@@ -1,0 +1,281 @@
+{
+  "boundary_conditions": [
+    {
+      "bc_name": "INFLOW",
+      "bc_type": "FLOW",
+      "bc_values": {
+        "Q": [
+          2.5e-2,
+          2.5e-2
+        ],
+        "t": [
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "bc_name": "RCR_0",
+      "bc_type": "PRESSURE",
+      "bc_values": {
+        "P": [
+          0.0,
+          0.0
+        ],
+        "t": [
+          0.0,
+          1.0
+        ]
+      }
+    }
+  ],
+  "simulation_parameters": {
+    "density": 1.06,
+    "model_name": "u-bend",
+    "number_of_cardiac_cycles": 2,
+    "number_of_time_pts_per_cardiac_cycle": 100,
+    "viscosity": 0.04
+  },
+  "vessels": [
+    {
+      "vessel_id": 0,
+      "vessel_length": 1.9500048727253068,
+      "vessel_name": "arterial_seg1",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 1.3692076427013974e-08,
+        "L": 45.2763488395485,
+        "R_poiseuille": 998.9948499758551,
+        "stenosis_coefficient": 0.0
+      },
+      "boundary_conditions": {
+        "inlet": "INFLOW"
+      }
+    },
+    {
+      "vessel_id": 1,
+      "vessel_length": 0.6000014993000985,
+      "vessel_name": "arterial_seg2",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 4.215999195529484e-09,
+        "L": 13.717378524403859,
+        "R_poiseuille": 284.379323447727,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 2,
+      "vessel_length": 0.600001499300099,
+      "vessel_name": "arterial_seg3",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 4.211464799303865e-09,
+        "L": 13.743857444115106,
+        "R_poiseuille": 285.5977045204621,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 3,
+      "vessel_length": 0.600001499300099,
+      "vessel_name": "arterial_seg4",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 4.2242903431141336e-09,
+        "L": 13.732407472138515,
+        "R_poiseuille": 286.43766639735577,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 4,
+      "vessel_length": 1.9000047477836521,
+      "vessel_name": "arterial_seg5",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 1.328340797571693e-08,
+        "L": 43.75523172773829,
+        "R_poiseuille": 915.8732393831275,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 5,
+      "vessel_length": 2.0203050483932965,
+      "vessel_name": "u_bend",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 2.3676013809582537e-08,
+        "L": 27.702100195706752,
+        "R_poiseuille": 345.08025987743594,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 6,
+      "vessel_length": 1.900004747783699,
+      "vessel_name": "veinous_seg1",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 2.6718582999763875e-08,
+        "L": 21.618199068599647,
+        "R_poiseuille": 222.00571732754423,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 7,
+      "vessel_length": 0.6000014993001219,
+      "vessel_name": "veinous_seg2",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 8.277964455358546e-09,
+        "L": 6.990185777800909,
+        "R_poiseuille": 73.8893232387344,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 8,
+      "vessel_length": 0.6000014993001223,
+      "vessel_name": "veinous_seg3",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 8.459736290978495e-09,
+        "L": 6.80609711220281,
+        "R_poiseuille": 69.66647911622188,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 9,
+      "vessel_length": 0.6000014993001205,
+      "vessel_name": "veinous_seg4",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 8.421732147280393e-09,
+        "L": 6.841964279269075,
+        "R_poiseuille": 70.42521024573804,
+        "stenosis_coefficient": 0.0
+      }
+    },
+    {
+      "vessel_id": 10,
+      "vessel_length": 1.9500048727251102,
+      "vessel_name": "veinous_seg5",
+      "zero_d_element_type": "BloodVessel",
+      "zero_d_element_values": {
+        "C": 2.6663679758177983e-08,
+        "L": 22.60482700423628,
+        "R_poiseuille": 237.84171744209482,
+        "stenosis_coefficient": 0.0
+      },
+      "boundary_conditions": {
+        "outlet": "RCR_0"
+      }
+    }
+  ],
+  "junctions": [
+    {
+      "junction_name": "J0",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        0
+      ],
+      "outlet_vessels": [
+        1
+      ]
+    },
+    {
+      "junction_name": "J1",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        1
+      ],
+      "outlet_vessels": [
+        2
+      ]
+    },
+    {
+      "junction_name": "J2",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        2
+      ],
+      "outlet_vessels": [
+        3
+      ]
+    },
+    {
+      "junction_name": "J3",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        3
+      ],
+      "outlet_vessels": [
+        4
+      ]
+    },
+    {
+      "junction_name": "J4",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        4
+      ],
+      "outlet_vessels": [
+        5
+      ]
+    },
+    {
+      "junction_name": "J5",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        5
+      ],
+      "outlet_vessels": [
+        6
+      ]
+    },
+    {
+      "junction_name": "J6",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        6
+      ],
+      "outlet_vessels": [
+        7
+      ]
+    },
+    {
+      "junction_name": "J7",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        7
+      ],
+      "outlet_vessels": [
+        8
+      ]
+    },
+    {
+      "junction_name": "J8",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        8
+      ],
+      "outlet_vessels": [
+        9
+      ]
+    },
+    {
+      "junction_name": "J9",
+      "junction_type": "NORMAL_JUNCTION",
+      "inlet_vessels": [
+        9
+      ],
+      "outlet_vessels": [
+        10
+      ]
+    }
+  ]
+}
