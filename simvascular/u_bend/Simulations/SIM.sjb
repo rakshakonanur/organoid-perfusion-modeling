@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mitk_job model_name="u-bend" mesh_name="u-bend" status="No Data Files" version="1.0">
+    <job>
+        <basic_props>
+            <prop key="Fluid Density" value="1.06"/>
+            <prop key="Fluid Viscosity" value="0.04"/>
+            <prop key="Initial Pressure" value="0"/>
+            <prop key="Initial Velocities" value="0.0001 0.0001 0.0001"/>
+            <prop key="Pressure IC File" value=""/>
+            <prop key="Velocity IC File" value=""/>
+        </basic_props>
+        <zerod_interface_props>
+            <prop key="config_file_name" value=""/>
+            <prop key="coupling_type" value="semi-implicit"/>
+            <prop key="initial_pressure_value" value=""/>
+            <prop key="initial_velocity_value" value=""/>
+            <prop key="library_name" value=""/>
+        </zerod_interface_props>
+        <cap_props>
+            <cap name="inlet">
+                <prop key="Analytic Shape" value=""/>
+                <prop key="BC Type" value=""/>
+                <prop key="Flip Normal" value=""/>
+                <prop key="Flow Rate" value=""/>
+                <prop key="Fourier Modes" value=""/>
+                <prop key="Original File" value=""/>
+                <prop key="Period" value=""/>
+                <prop key="Point Number" value=""/>
+                <prop key="Pressure" value=""/>
+                <prop key="Pressure Period" value=""/>
+                <prop key="Pressure Scaling" value=""/>
+                <prop key="Timed Pressure" value=""/>
+                <prop key="Values" value=""/>
+            </cap>
+            <cap name="outlet">
+                <prop key="Analytic Shape" value=""/>
+                <prop key="BC Type" value=""/>
+                <prop key="Flip Normal" value=""/>
+                <prop key="Flow Rate" value=""/>
+                <prop key="Fourier Modes" value=""/>
+                <prop key="Original File" value=""/>
+                <prop key="Period" value=""/>
+                <prop key="Point Number" value=""/>
+                <prop key="Pressure" value=""/>
+                <prop key="Pressure Period" value=""/>
+                <prop key="Pressure Scaling" value=""/>
+                <prop key="Timed Pressure" value=""/>
+                <prop key="Values" value=""/>
+            </cap>
+        </cap_props>
+        <wall_props>
+            <prop key="Density" value=""/>
+            <prop key="Elastic Modulus" value=""/>
+            <prop key="Poisson Ratio" value=""/>
+            <prop key="Thickness" value=""/>
+            <prop key="Type" value="rigid"/>
+            <prop key="Wall Properities File" value=""/>
+        </wall_props>
+        <cmm_props>
+            <prop key="Displacements file" value=""/>
+            <prop key="Enable cmm simulation" value="false"/>
+            <prop key="Initialize simulation" value="false"/>
+            <prop key="Prestress file" value=""/>
+            <prop key="Simulation Type" value="inflate"/>
+            <prop key="Traction file" value=""/>
+            <prop key="Wall file" value=""/>
+            <prop key="Wall name" value=""/>
+        </cmm_props>
+        <solver_output_props>
+            <prop key="Increment in saving VTK files" value="10"/>
+            <prop key="Increment in saving restart files" value="10"/>
+            <prop key="Name prefix of saved VTK files" value="result"/>
+            <prop key="Save results in folder" value="N-procs"/>
+            <prop key="Save results to VTK format" value="true"/>
+            <prop key="Start saving after time step" value="1"/>
+        </solver_output_props>
+        <solver_time_props>
+            <prop key="Number of Timesteps" value="1"/>
+            <prop key="Spectral radius of infinite time step" value="0.5"/>
+            <prop key="Time Step Size" value="0.01"/>
+        </solver_time_props>
+        <nonlinear_solver_props>
+            <prop key="Backflow stabilization coefficient" value="0.2"/>
+            <prop key="Max iterations" value="12"/>
+            <prop key="Min iterations" value="3"/>
+            <prop key="Tolerance" value="1e-5"/>
+        </nonlinear_solver_props>
+        <linear_solver_props>
+            <prop key="Absolute tolerance" value="1e-10"/>
+            <prop key="Krylov space dimension" value="200"/>
+            <prop key="Max iterations" value="15"/>
+            <prop key="NS CG max iterations" value="300"/>
+            <prop key="NS CG tolerance" value="1e-3"/>
+            <prop key="NS GM max iterations" value="10"/>
+            <prop key="NS GM tolerance" value="1e-3"/>
+            <prop key="Solver" value="NS"/>
+            <prop key="Tolerance" value="1e-4"/>
+        </linear_solver_props>
+        <run_props>
+            <prop key="Number of Processes" value=""/>
+        </run_props>
+    </job>
+</mitk_job>
