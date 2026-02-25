@@ -1,9 +1,9 @@
-from CFD import CFD
+from generate_vasculature import Generate
 
 is_forest = int(input('Enter 1 for forest and 0 for tree: '))
 rom = int(input('Enter the order of ROM (0, 1): '))
 num_branches = int(input('Enter the number of branches: '))
-obj = CFD()
+obj = Generate()
 obj.set_parameters(num_branches=num_branches)
 obj.set_assumptions(convex = True)
 

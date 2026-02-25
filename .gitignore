@@ -1,0 +1,5 @@
+clones/
+.DS_Store
+*.DS_Store
+.vscode/
+src/synthetic-vasculature-generation/Forest_Output*

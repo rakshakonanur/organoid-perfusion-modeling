@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0, "../clones/svVascularize")
+sys.path.insert(0, "../../clones/svVascularize")
 import pyvista as pv
 import svv
 from svv.domain.domain import Domain
@@ -23,7 +23,7 @@ import os
 import vtk
 import subprocess
 
-class CFD:
+class Generate:
     def __init__(self):
         pass
 
@@ -40,9 +40,9 @@ class CFD:
         self.parameters['num_branches'] = kwargs.get('num_branches',10)
         self.parameters['path_to_0d_solver'] = kwargs.get('path_to_0d_solver',r'/usr/local/sv/svZeroDSolver/2024-10-01/bin')
         self.parameters['path_to_1d_solver'] = kwargs.get('path_to_1d_solver',r'/usr/local/sv/oneDSolver/2025-06-26/bin/OneDSolver')
-        self.parameters['outdir'] = kwargs.get('outdir',"/Users/rakshakonanur/Documents/Research/two-channel/output")
+        self.parameters['outdir'] = kwargs.get('outdir',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation")
         self.parameters['folder'] = kwargs.get('folder','tmp')
-        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/two-channel/files/organoid-4.stl")
+        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/original/organoid-4.stl")
 
 
     def set_assumptions(self,**kwargs):
