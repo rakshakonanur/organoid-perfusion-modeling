@@ -1,7 +1,7 @@
 import pandas as pd
 from pathlib import Path
 # Run with: gmsh branched_network.geo -1 -format msh2 -o branched_network.msh
-current_dir = Path("/Users/rakshakonanur/Documents/Research/two-channel/src/geometry")
+current_dir = Path("/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry")
 
 def write_geo_from_branching_data(df, geo_file="branched_network.geo", elements_per_line=1000):
     point_map = {}
