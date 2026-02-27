@@ -35,14 +35,22 @@ class Generate:
         self.parameters['buffer']       = kwargs.get('buffer',5)
         self.parameters['inlet_normal'] = kwargs.get('inlet_normal',np.array([0.5,0,0]))#.reshape(-1,1))
         self.parameters['outlet_normal'] = kwargs.get('outlet_normal',np.array([-0.5,0,0]))
-        self.parameters['inlet'] = kwargs.get('inlet',np.array([-.175, -0.9, .55])) #old - [2.6,3.05,3.4], [.3,.305,.34]
-        self.parameters['outlet'] = kwargs.get('outlet',np.array([.175, -0.9, .55]))
+        self.parameters['inlet'] = kwargs.get('inlet',np.array([-.18, 0.9, .55])) #old - [2.6,3.05,3.4], [.3,.305,.34]
+        self.parameters['outlet'] = kwargs.get('outlet',np.array([.18, 0.9, .55]))
         self.parameters['num_branches'] = kwargs.get('num_branches',10)
         self.parameters['path_to_0d_solver'] = kwargs.get('path_to_0d_solver',r'/usr/local/sv/svZeroDSolver/2024-10-01/bin')
         self.parameters['path_to_1d_solver'] = kwargs.get('path_to_1d_solver',r'/usr/local/sv/oneDSolver/2025-06-26/bin/OneDSolver')
         self.parameters['outdir'] = kwargs.get('outdir',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation")
         self.parameters['folder'] = kwargs.get('folder','tmp')
-        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/original/organoid-4.stl")
+        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/original/organoid-1.stl")
+        # 3D mesh controls (used by svVascularize Simulation.build_meshes)
+        self.parameters['mesh_hmax'] = kwargs.get('mesh_hmax', 0.001)
+        self.parameters['mesh_hausd'] = kwargs.get('mesh_hausd', 1e-4)
+        self.parameters['mesh_hmin_factor'] = kwargs.get('mesh_hmin_factor', 0.01)
+        self.parameters['mesh_hgrad'] = kwargs.get('mesh_hgrad', 1.12)
+        self.parameters['mesh_minratio'] = kwargs.get('mesh_minratio', 1.4)
+        self.parameters['mesh_mindihedral'] = kwargs.get('mesh_mindihedral', 18.0)
+        self.parameters['mesh_remesh_vol'] = kwargs.get('mesh_remesh_vol', True)
 
 
     def set_assumptions(self,**kwargs):
@@ -114,11 +122,63 @@ class Generate:
             for j in range(trees_per_network[i]): # currently only writes the first network, can be modified to write all networks
                 self.data = networks[0][j].data
                 self.save_data(filename="branchingData_{}.csv".format(j))
-                merged_model = networks[0][j].export_solid(watertight=False) # use watertight = True for 3d models
+                merged_model = networks[0][j].export_solid(watertight=True) # use watertight = True for 3d models
                 os.makedirs(outdir+os.sep+"3d_tmp", exist_ok=True)
-                merged_model.save(outdir+os.sep+"3d_tmp"+os.sep+"geom3D_{}.vtp".format(i))
+                merged_model.save(outdir+os.sep+"3d_tmp"+os.sep+"geom3D_{}.vtp".format(j))
+
         # cerm_forest.connect() # suppressed for now
         # cerm_forest.connections.tree_connections[0].show().show()
+        sim = Simulation(synthetic_object=cerm_forest,directory=outdir, name="tree_{}".format(j))
+        root_radii = []
+        for tr in networks[0]:
+            try:
+                r = float(tr.data[0, 21])
+            except Exception:
+                r = np.nan
+            if np.isfinite(r) and r > 0:
+                root_radii.append(r)
+
+        user_hmax = float(self.parameters['mesh_hmax'])
+        if root_radii:
+            # Keep max element size tied to vessel scale to avoid coarse lumens.
+            adaptive_hmax = min(user_hmax, 0.5 * min(root_radii))
+        else:
+            adaptive_hmax = user_hmax
+
+        print(
+            "Meshing params: "
+            f"hausd={self.parameters['mesh_hausd']}, "
+            f"hmax={adaptive_hmax:.6g}, "
+            f"hmin_factor={self.parameters['mesh_hmin_factor']}, "
+            f"hgrad={self.parameters['mesh_hgrad']}, "
+            f"minratio={self.parameters['mesh_minratio']}, "
+            f"mindihedral={self.parameters['mesh_mindihedral']}"
+        )
+        sim.build_meshes(
+            fluid=True,
+            tissue=True,
+            hausd=self.parameters['mesh_hausd'],
+            remesh_vol=self.parameters['mesh_remesh_vol'],
+            minratio=self.parameters['mesh_minratio'],
+            mindihedral=self.parameters['mesh_mindihedral'],
+            mesh_hmax=adaptive_hmax,
+            mesh_hmin_factor=self.parameters['mesh_hmin_factor'],
+            mesh_hgrad=self.parameters['mesh_hgrad'],
+        )
+
+
+        # This is not working...
+        # # Detect walls, outlets, and shared boundaries
+        # sim.extract_faces(crease_angle=60.0)
+
+        # # Inspect names stored in the GeneralMesh container
+        # print(sim.fluid_domain_meshes[0].faces.keys())
+
+        # # Build and persist 3-D CFD input files
+        # sim.construct_3d_fluid_simulation()
+        # sim.write_3d_fluid_simulation()
+
+        # # Result: meshes + XML under sim.file_path (e.g. ./simulations/example/)
         self.cerm_forest = cerm_forest
 
     def export_tree_0d_files(self, num_cardiac_cycles = 1, num_time_pts_per_cycle = 5, distal_pressure = 0.0, modify_bc = False,
@@ -548,4 +608,3 @@ if __name__ == "__main__":
     # obj.forest_build(1,[2])
     # obj.export_forest_1d_files()
     # obj.run_tree_1d_simulation()
-
