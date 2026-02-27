@@ -1,258 +1,176 @@
+
+"""
+mesh.py (updated)
+
+Keeps the existing 1D pipeline:
+- build 1D meshes from branchingData CSV via branch.py
+- parse 1D *.vtp outputs and generate 1D checkpoint files (as before)
+- returns terminal point coordinates (outlet_coords) from the 1D branched mesh boundary
+
+Replaces ONLY the 3D meshing + tagging:
+- reads an existing 3D volumetric mesh (VTU) for the tissue/bioreactor
+- converts VTU -> XDMF (for FEniCSx)
+- creates 2D facet MeshTags for:
+    * outer wall facets
+    * arterial concave patch (seeded near coords_inlet)
+    * venous concave patch (seeded near coords_outlet)
+    * inlet terminal faces (one tag per inlet branch terminal point)
+    * outlet terminal faces (one tag per outlet branch terminal point)
+- supports either duplicating/translating a single VTU into 4 wells, or using 4 VTUs.
+
+Outputs (per well):
+- bioreactor_well{i}.xdmf
+- mesh_tags_well{i}.xdmf   (facet meshtags, fdim=2)
+
+NOTE: This script assumes your VTU is a tetrahedral volume mesh.
+"""
+
+from __future__ import annotations
+
+import os, subprocess, shutil
+import re
+import glob
+import logging
+from pathlib import Path
+from send2trash import send2trash
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
 import gmsh
 import meshio
-import pandas as pd
-import numpy as np
-from dolfinx.io import XDMFFile, gmshio
-import os, subprocess, shutil
-from mpi4py import MPI
-import dolfinx as dfx
 import vtk
+from vtk.util.numpy_support import vtk_to_numpy
+from scipy.spatial import cKDTree
+
+from mpi4py import MPI
+import adios4dolfinx
+import dolfinx as dfx
+from dolfinx.io import XDMFFile
+from dolfinx import mesh as dmesh
+from basix.ufl import element
+
+# ---------------------------------------------------------------------
+# Local imports (branch.py)
+# ---------------------------------------------------------------------
 try:
     from geometry import branch
 except ImportError:
     import branch
-import logging
-logger = logging.getLogger("coupler")   # use this in your code
-logger.setLevel(logging.DEBUG)
-from pathlib import Path
-import glob
-import re
-from vtk.util.numpy_support import vtk_to_numpy
-from basix.ufl import element
-import pyvista as pv
-import adios4dolfinx
-from send2trash import send2trash
-current_dir = Path("/Users/rakshakonanur/Documents/Research/two-channel/src/geometry")
 
-WALL = 2
-OUTLET = 1
+logger = logging.getLogger("mesh")
+logger.setLevel(logging.INFO)
 
-def _get_ftetwild_path():
-    path = os.environ.get("FTETWILD_PATH") or shutil.which("FloatTetwild_bin")
-    if path is None:
-        raise RuntimeError(
-            "ERROR: cannot find fTetWild . "
-            "Set $FTETWILD_PATH or add FloatTetwild_bin to your PATH."
-        )
-    return path
+current_dir = Path("/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry")
 
-def geo_to_mesh_gmsh(geo_file, msh_file, mesh_size=0.001):
+# ---------------------------------------------------------------------
+# 1D pipeline (kept from your original script)
+# ---------------------------------------------------------------------
+
+def geo_to_mesh_gmsh(geo_file: str, msh_file: str) -> None:
+    import gmsh
     gmsh.initialize()
+    gmsh.model.add("branched")
     gmsh.open(str(current_dir / geo_file))
-
-    # Generate 1D mesh (use .generate(2) for 2D, .generate(3) for 3D)
     gmsh.model.mesh.generate(1)
-
-    # Save mesh in MSH version 2 format
     gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
     gmsh.write(str(current_dir / msh_file))
-
-    gmsh.finalize()    
-
-def stl_to_mesh_gmsh(stl_file, msh_file,char_len_min=0.001, char_len_max=0.01): # let final char_len_max be 0.01
-
-    gmsh.initialize()
-    gmsh.model.add("bioreactor")
-    gmsh.merge(stl_file)
-
-    gmsh.model.mesh.removeDuplicateNodes()
-    
-    # Classify surfaces to reconstruct the volume
-    angle = 30  # angle threshold in degrees for feature edges
-    force_param = True
-    include_boundary = True
-    curve_angle = 180
-    gmsh.model.mesh.classifySurfaces(angle * (3.14159265359 / 180), include_boundary, force_param, curve_angle * (3.14159265359 / 180))
-    
-    # Create geometry from mesh
-    gmsh.model.mesh.createGeometry()
-    gmsh.model.mesh.createTopology()
-
-    # Create volume from surface
-    s = gmsh.model.getEntities(2)  # Get all surfaces
-    gmsh.model.geo.addSurfaceLoop([surf[1] for surf in s], 1)
-    vol = gmsh.model.geo.addVolume([1], 1)
-    gmsh.model.geo.synchronize()
-
-    # Define physical group (optional but needed for DOLFINx)
-    gmsh.model.addPhysicalGroup(3, [1], 1)  # Volume
-    gmsh.model.setPhysicalName(3, 1, "volume")
-
-    p = gmsh.model.addPhysicalGroup(3, [vol], 9)
-    gmsh.model.setPhysicalName(3, p, "Wall")
-
-    gmsh.option.setNumber("Mesh.Optimize", 1)
-    gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
-    gmsh.option.setNumber("Mesh.Smoothing", 1)
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_len_max)
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_len_min)
-    gmsh.option.setNumber("Mesh.Algorithm3D", 1)
-
-    gmsh.model.geo.synchronize()
-    gmsh.model.mesh.generate(3)
-    gmsh.write(str(current_dir / msh_file))
-    logger.info(f"Created mesh {current_dir/msh_file} from {stl_file}")
     gmsh.finalize()
 
-def stl_to_mesh_ftet(stl_file, msh_file, edge_length=0.005, eps=0.0005):
-    edge_length = edge_length  # ideal_edge_length = diag_of_bbox * L. (double, optional, default: 0.05) GOOD 0.007
-    eps = 0.0005 # epsilon = diag_of_bbox * EPS. (double, optional, default: 1e-3) GOOD 0.0005
-    float_tetwild_path = _get_ftetwild_path()
-    command = f"{float_tetwild_path} -i {stl_file} -o {current_dir/msh_file} --lr {edge_length} --epsr {eps}"
-    subprocess.run(command, shell=True, check=True)
 
-def mesh_to_xdmf(msh_file, xdmf_file):
-    # Convert .msh to .vtu
-    mesh = meshio.read(current_dir/msh_file)
-    meshio.write(current_dir/xdmf_file, mesh)
-
-def xdmf_to_dolfinx(xdmf_file):
-    with XDMFFile(MPI.COMM_WORLD, current_dir/xdmf_file, "r") as xdmf:
-        mesh = xdmf.read_mesh(name="Grid")
-
-    # Create connectivity between the mesh elements and their facets
-    mesh.topology.create_connectivity(mesh.topology.dim, mesh.topology.dim - 1)
-
-def convert_mesh(msh_file, xdmf_file):
-    """
-    Read the mesh from a file and convert it to XDMF format.
-    """
-    # Read full Gmsh mesh
-    msh = meshio.read(current_dir/msh_file)
-    # Extract only "line" elements
+def convert_mesh(msh_file: str, xdmf_file: str) -> None:
+    """Extract 1D 'line' cells from msh and write XDMF."""
+    msh = meshio.read(current_dir / msh_file)
     line_cells = [cell for cell in msh.cells if cell.type == "line"]
     if not line_cells:
         raise RuntimeError("No line cells found in the mesh.")
-    # meshio expects a list of (cell_type, numpy_array)
     line_cells = [("line", line_cells[0].data)]
-    # Optionally, also filter cell data for lines only
     line_cell_data = {}
-    if "gmsh:physical" in msh.cell_data_dict:
-        # meshio expects a dict of {cell_type: [data_array]}
+    if "gmsh:physical" in msh.cell_data_dict and "line" in msh.cell_data_dict["gmsh:physical"]:
         line_cell_data = {"gmsh:physical": [msh.cell_data_dict["gmsh:physical"]["line"]]}
-    # Create a new mesh with only line elements
-    line_mesh = meshio.Mesh(
-        points=msh.points,
-        cells=line_cells,
-        cell_data=line_cell_data if line_cell_data else None
-    )
-    # Write to XDMF
-    line_mesh.write(current_dir/xdmf_file)
+    line_mesh = meshio.Mesh(points=msh.points, cells=line_cells, cell_data=line_cell_data if line_cell_data else None)
+    line_mesh.write(current_dir / xdmf_file)
 
-def branch_mesh_tagging(mesh, inlet=np.array([0,0.41,0.34])):
 
+def xdmf_to_dolfinx(xdmf_file: str) -> dfx.mesh.Mesh:
+    with XDMFFile(MPI.COMM_WORLD, current_dir / xdmf_file, "r") as xdmf:
+        mesh = xdmf.read_mesh(name="Grid")
+    # ensure basic connectivities
+    mesh.topology.create_connectivity(mesh.topology.dim, mesh.topology.dim - 1)
+    return mesh
+
+
+def branch_mesh_tagging(mesh: dfx.mesh.Mesh, inlet: np.ndarray) -> Tuple[np.ndarray, dfx.mesh.MeshTags]:
+    """Returns outlet coordinates on 1D boundary (excluding inlet point)."""
     fdim = mesh.topology.dim - 1
-
     mesh.topology.create_connectivity(fdim, mesh.topology.dim)
     boundary_facets_indices = dfx.mesh.exterior_facet_indices(mesh.topology)
-    tol = 1e-6
 
     def near_inlet(x):
         return np.isclose(x[0], inlet[0]) & np.isclose(x[1], inlet[1]) & np.isclose(x[2], inlet[2])
 
     inlet_facets = dfx.mesh.locate_entities_boundary(mesh, fdim, near_inlet)
-
-    # Extract outlet facets: boundary facets excluding inlet facets
     outlet_facets = np.setdiff1d(boundary_facets_indices, inlet_facets)
 
     facet_indices = np.concatenate([inlet_facets, outlet_facets])
-    facet_markers = np.concatenate([np.full(len(inlet_facets), 1, dtype=np.int32),
-                                    np.full(len(outlet_facets), 2, dtype=np.int32)])
-    facet_tag = dfx.mesh.meshtags(mesh, fdim, facet_indices, facet_markers)
-    print("Facet indices: ", facet_indices, flush=True)
-    print("Facet markers: ", facet_markers, flush=True)
-
-    # Return outlet coordinates
+    facet_markers = np.concatenate(
+        [np.full(len(inlet_facets), 1, dtype=np.int32), np.full(len(outlet_facets), 2, dtype=np.int32)]
+    )
+    facet_tag = dfx.mesh.meshtags(mesh, fdim, facet_indices.astype(np.int32), facet_markers.astype(np.int32))
     outlet_coords = mesh.geometry.x[facet_tag.indices[facet_tag.values == 2]]
-    print("Outlet coordinates: ", outlet_coords, flush=True)
-
     return outlet_coords, facet_tag
 
-def convert_vertex_tags_to_facet_tags(mesh, vertex_tags):
-    """
-    Convert vertex-based tags (dim=0) to facet-based tags (dim=dim-1),
-    and reduce u_vec to assign only one facet per tagged vertex.
-    """
 
-    # with XDMFFile(MPI.COMM_WORLD, xdmf_file, "r") as xdmf:
-    #     mesh = xdmf.read_mesh(name="Grid")
+def load_vtp(directory: str):
+    """Kept as in your original: reads time series VTPs and returns arrays."""
+    def extract_arrays(data_obj):
+        return {
+            data_obj.GetArray(i).GetName(): vtk_to_numpy(data_obj.GetArray(i))
+            for i in range(data_obj.GetNumberOfArrays())
+        }
 
-    tdim = mesh.topology.dim
-    fdim = tdim - 1
-    mesh.topology.create_connectivity(fdim, 0)  # facet -> vertex
-    mesh.topology.create_connectivity(fdim, tdim)  # facet -> cell
+    vtp_files = sorted(glob.glob(os.path.join(directory, "*.vtp")), key=lambda x: int(re.findall(r"\d+", x)[-1]))
+    if not vtp_files:
+        vtp_files = sorted(
+            glob.glob(os.path.join(directory + os.sep + "timeseries", "*.vtp")),
+            key=lambda x: int(re.findall(r"\d+", x)[-1]),
+        )
 
-    facet_to_vertex = mesh.topology.connectivity(fdim, 0)
-    vertex_to_facet = {}
+    points_per_section = 20
+    centerlineVel, centerlineFlow, pressure = [], [], []
+    centerlineCoords, area = None, None
 
-    facet_indices = []
-    facet_values = []
-    total_facets, total_values, sorted_facets = [],[],[]
-    used_facets = set()
-    used_vertices = set()
+    for file in vtp_files:
+        if file.endswith(("centerlines.vtp", "1d_model.vtp", "total.vtp")):
+            continue
+        reader = vtk.vtkXMLPolyDataReader()
+        reader.SetFileName(file)
+        reader.Update()
+        polydata = reader.GetOutput()
 
-    for facet in range(mesh.topology.index_map(fdim).size_local):
-        vertex_ids = facet_to_vertex.links(facet)
-        tags_on_vertices = vertex_tags.values[np.isin(vertex_tags.indices, vertex_ids)]
+        points = polydata.GetPoints()
+        num_points = points.GetNumberOfPoints()
+        coords = np.array([points.GetPoint(i) for i in range(num_points)])
 
-        if len(tags_on_vertices) > 0:
-            # Assign tag only if vertex hasn't been used
-            for v_id in vertex_ids:
-                if v_id in vertex_tags.indices and v_id not in used_vertices:
-                    tag = np.bincount(tags_on_vertices).argmax()
-                    facet_indices.append(facet)
-                    facet_values.append(tag)
-                    used_vertices.add(v_id)
-                    used_facets.add(facet)
-                    break  # Only one facet per vertex
+        point_data = extract_arrays(polydata.GetPointData())
+
+        area_ = point_data["Area"]
+        flowrate_1d = point_data["Flowrate"]
+        pressure_1d = point_data["Pressure_mmHg"]
+
+        velocity_1d = flowrate_1d / area_
+        centerlineVel.append(velocity_1d[::points_per_section])
+        centerlineFlow.append(flowrate_1d[::points_per_section])
+        pressure.append(pressure_1d[::points_per_section])
+
+        centerlineCoords = coords.reshape(-1, points_per_section, 3).mean(axis=1)
+        area = area_[::points_per_section]
+
+    return centerlineVel, centerlineFlow, pressure, centerlineCoords, area
+
+
+def generate_1d_files(xdmf_file: str, output_dir: str, file_prefix: str = "", inlet_coords: np.ndarray = None):
     
-    total_facets.append(facet_indices)
-    total_values.append(np.full_like(facet_indices, OUTLET))  # Tag 0 for internal facets
-    facet_indices = np.array(facet_indices, dtype=np.int32)
-    facet_values = np.array(facet_values, dtype=np.int32)
-    sorted_indices = np.argsort(facet_indices)
-    internal_tags = dfx.mesh.meshtags(mesh, fdim, facet_indices[sorted_indices], facet_values[sorted_indices])
-
-    # Determine the wall facets
-    wall_BC_indices, wall_BC_markers = [], []
-    wall_BC_facets = dfx.mesh.exterior_facet_indices(mesh.topology)
-    total_facets.append(wall_BC_facets)
-    total_values.append(np.full_like(wall_BC_facets, WALL)) # Tag 0 for wall BCs
-    wall_BC_indices.append(wall_BC_facets)
-    wall_BC_markers.append(np.full_like(wall_BC_facets, WALL))  # Tag 0 for wall BCs
-
-    wall_BC_indices = np.hstack(wall_BC_indices).astype(np.int32)  # Ensure facets are in int32 format
-    wall_BC_markers = np.hstack(wall_BC_markers).astype(np.int32)  # Ensure markers are in int32 format
-    sorted_facets = np.argsort(wall_BC_indices)
-    external_tags = dfx.mesh.meshtags(mesh, fdim, wall_BC_indices[sorted_facets], wall_BC_markers[sorted_facets])
-    print("External facets for wall BCs:", wall_BC_indices, flush=True)
-
-    # Remove external facets from facet_indices and facet_values
-    sorted_facets = np.argsort(facet_indices)
-    velocity_facets = dfx.mesh.meshtags(mesh, fdim, facet_indices[sorted_facets], facet_values[sorted_facets])
-    facet_indices = np.setdiff1d(facet_indices, wall_BC_indices)
-    facet_values = np.setdiff1d(facet_values, wall_BC_markers)
-    print("Internal facets after removing wall BCs:", facet_indices, flush=True)
-
-    # Save both meshtags for visualization
-    total_values = np.hstack(total_values).astype(np.int32)
-    total_facets = np.hstack(total_facets).astype(np.int32)
-    sorted_facets = np.argsort(total_facets)
-    print("Total facets:", total_facets[sorted_facets], flush=True)
-
-    # Write mesh and tags to output files
-    if mesh.comm.rank == 0:
-        out_str = current_dir/'mesh_tags.xdmf'
-        with XDMFFile(mesh.comm, out_str, 'w') as xdmf_out:
-            xdmf_out.write_mesh(mesh)
-            mesh.topology.create_connectivity(fdim, tdim)
-            xdmf_out.write_meshtags(
-                dfx.mesh.meshtags(mesh, fdim, total_facets[sorted_facets], total_values[sorted_facets]),
-                mesh.geometry
-            )
-
-def generate_1d_files(xdmf_file, output_dir, file_prefix=None, inlet_coords=np.array([0,0.41,0.34])):
-
     # Load the converted XDMF mesh
     with XDMFFile(MPI.COMM_WORLD, current_dir/xdmf_file, "r") as xdmf:
         mesh = xdmf.read_mesh(name="Grid")
@@ -392,551 +310,901 @@ def generate_1d_files(xdmf_file, output_dir, file_prefix=None, inlet_coords=np.a
 
     return outlet_coords
 
-    
-def load_vtp(directory):
-    def extract_arrays(data_obj):
-        return {
-            data_obj.GetArray(i).GetName(): vtk_to_numpy(data_obj.GetArray(i))
-            for i in range(data_obj.GetNumberOfArrays())
-        }
+def import_branched_mesh(
+    branching_data_file: str,
+    output_1d: str,
+    geo_file: str,
+    msh_file: str,
+    xdmf_file: str,
+    fileprefix: str,
+    coords: np.ndarray,
+) -> np.ndarray:
+    df = pd.read_csv(branching_data_file)
+    branch.write_geo_from_branching_data(df, geo_file=geo_file)
+    geo_to_mesh_gmsh(geo_file=geo_file, msh_file=msh_file)
+    convert_mesh(msh_file=msh_file, xdmf_file=xdmf_file)
+    _ = xdmf_to_dolfinx(xdmf_file=xdmf_file)
+    outlet_coords = generate_1d_files(xdmf_file=xdmf_file, output_dir=output_1d, file_prefix=fileprefix, inlet_coords=coords)
+    return outlet_coords
 
-    # Find all model files in the specified directory
-    print("Searching for model files in directory:", directory)
-    
-    # Get a sorted list of all VTP files
-    vtp_files = sorted(glob.glob(os.path.join(directory, "*.vtp")), key=lambda x: int(re.findall(r'\d+', x)[-1]))
+# ---------------------------------------------------------------------
+# 3D replacement: VTU -> XDMF and facet meshtagging
+# ---------------------------------------------------------------------
 
-    # if no files found, raise error
-    if not vtp_files:
-        vtp_files = sorted(glob.glob(os.path.join(directory+os.sep+"timeseries", "*.vtp")), key=lambda x: int(re.findall(r'\d+', x)[-1]))
-    all_data = []
-    points_per_section = 20  # Number of points per section to average
+def vtu_to_xdmf(vtu_file: str, xdmf_file: str) -> None:
+    """Convert VTU (tet volume) to XDMF for dolfinx."""
+    m = meshio.read(vtu_file)
+    tetra_cells = [c for c in m.cells if c.type in ("tetra", "tetra10")]
+    if not tetra_cells:
+        raise RuntimeError(f"No tetra cells found in VTU: {vtu_file}")
+    # Prefer linear tetra for dolfinx import; keep connectivity as-is
+    tet_mesh = meshio.Mesh(points=m.points, cells=[("tetra", tetra_cells[0].data.astype(np.int64))])
+    meshio.write(current_dir / xdmf_file, tet_mesh)
 
-    centerlineVel = []  # initialize as a list
-    centerlineFlow = []  # initialize as a list
-    pressure = []  # initialize as a list
+import subprocess
+from pathlib import Path
+import meshio
 
-    for file in vtp_files:
-        if file.endswith("centerlines.vtp"):
-            continue
-        if file.endswith("1d_model.vtp"):
-            continue
-        if file.endswith("total.vtp"):
-            continue
-        print(f"Reading: {file}")
-        reader = vtk.vtkXMLPolyDataReader()
-        reader.SetFileName(file)
-        reader.Update()
-        polydata = reader.GetOutput()
+import numpy as np
+import meshio
+import pyvista as pv
+from pathlib import Path
 
-        def extract_arrays(data_obj):
-            return {
-                data_obj.GetArray(i).GetName(): vtk_to_numpy(data_obj.GetArray(i))
-                for i in range(data_obj.GetNumberOfArrays())
-            }
-        
-        # Extract point coordinates
-        points = polydata.GetPoints()
+def vtu_volume_to_surface_stl(vtu_in: str, stl_out: str) -> str:
+    m = meshio.read(vtu_in)
 
-        # Convert to NumPy array
-        num_points = points.GetNumberOfPoints()
+    tet = None
+    for c in m.cells:
+        if c.type in ("tetra", "tetra10"):
+            tet = c.data[:, :4] if c.type == "tetra10" else c.data
+            break
+    if tet is None:
+        raise RuntimeError("No tetra cells found in VTU.")
 
-        timestep_data = {
-            "filename": file,
-            "coords": np.array([points.GetPoint(i) for i in range(num_points)]),
-            "point_data": extract_arrays(polydata.GetPointData()),
-            "cell_data": extract_arrays(polydata.GetCellData()),
-            "field_data": extract_arrays(polydata.GetFieldData())
-        }
+    pts = m.points.astype(np.float64)
+    nc = tet.shape[0]
+    cells = np.hstack([np.full((nc, 1), 4, dtype=np.int64), tet.astype(np.int64)]).ravel()
+    celltypes = np.full(nc, pv.CellType.TETRA, dtype=np.uint8)
+    ug = pv.UnstructuredGrid(cells, celltypes, pts)
 
+    surf = ug.extract_surface().triangulate()
+    surf = surf.clean(tolerance=1e-8)
+    try:
+        surf = surf.fill_holes(1e9)  # helps ensure watertight
+    except Exception:
+        pass
 
-        area = timestep_data["point_data"]["Area"]  # (N,)
-        flowrate_1d = timestep_data["point_data"]["Flowrate"]  # (N,)
-        pressure_1d = timestep_data["point_data"]["Pressure_mmHg"]  # (N,)
-        mesh_3d_coords = timestep_data["coords"]  # (N, 3)
-
-        velocity_1d = flowrate_1d/area # calculate velocity from flowrate and area
-        centerline = velocity_1d[::points_per_section] # save only one point for each cross-section
-        centerlineFlowrate = flowrate_1d[::points_per_section] # save only one point for each cross-section
-        centerlineFlow.append(centerlineFlowrate) # save the flowrate values for each timestep in each row
-
-        centerlineVel.append(centerline)# save the velocity values for each timestep in each row
-        pressure.append(pressure_1d[::points_per_section]) # save the pressure values for each timestep in each row
-        centerlineCoords = mesh_3d_coords.reshape(-1, points_per_section, 3).mean(axis=1)
-
-        area = area[::points_per_section]  # save only one point for each cross-section
+    Path(stl_out).parent.mkdir(parents=True, exist_ok=True)
+    surf.save(stl_out)
+    return stl_out
 
 
-    return centerlineVel, centerlineFlow, pressure, centerlineCoords, area
-
-
-def domain_mesh_tagging(mesh, coords, tag_value=1, tol=5e-3):
-
+def refine_vtu_with_gmsh(vtu_in: str, vtu_out: str, *, n_refine: int = 1, gmsh_exe: str = "gmsh"):
     """
-    Tag vertices in the mesh that are near given coordinates.
-
-    Parameters:
-        mesh (dolfinx.Mesh): The mesh object
-        coords (np.ndarray): An (N, 3) array of points to tag vertices near
-        tag_value (int): The marker value to assign to those vertices
-        tol (float): Tolerance for proximity check
-
-    Returns:
-        dolfinx.mesh.meshtags: Vertex tags
+    Refine an existing tetrahedral VTU using Gmsh, fully in Python.
+    - Converts VTU -> MSH2
+    - Runs gmsh -refine n_refine times
+    - Converts refined MSH -> VTU (or you can write XDMF instead)
     """
-    vdim = 0  # vertex dimension
-    mesh_coords = mesh.geometry.x
+    vtu_in = str(vtu_in)
+    vtu_out = str(vtu_out)
+    tmp_dir = Path(vtu_out).parent
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Define proximity function
-    def near_coords(x):
-        return np.any([np.linalg.norm(x.T - p, axis=1) < tol for p in coords], axis=0)
+    msh0 = tmp_dir / "_tmp_in.msh"
+    msh1 = tmp_dir / "_tmp_refined.msh"
 
-    # Find matching vertex indices
-    near_vertex_indices = dfx.mesh.locate_entities(mesh, vdim, near_coords)
+    # 1) VTU -> MSH (MSH2 ASCII for compatibility)
+    m = meshio.read(vtu_in)
+    tet_cells = None
+    for c in m.cells:
+        if c.type == "tetra":
+            tet_cells = c.data
+            break
+        if c.type == "tetra10":
+            # gmsh can read 2nd order too, but refinement is simpler on linear tets;
+            # downgrade if needed
+            tet_cells = c.data[:, :4]
+            break
+    if tet_cells is None:
+        raise RuntimeError(f"No tetra cells found in {vtu_in}")
 
-    # Tag them
-    tags = np.full_like(near_vertex_indices, tag_value, dtype=np.int32)
-    vertex_tags = dfx.mesh.meshtags(mesh, vdim, near_vertex_indices, tags)
+    msh_mesh = meshio.Mesh(points=m.points, cells=[("tetra", tet_cells.astype(int))])
+    meshio.write(msh0, msh_mesh, file_format="gmsh22")
 
-    print("Tagged vertex indices:", near_vertex_indices, flush=True)
-    # Ensure vertex-to-cell connectivity exists
-    mesh.topology.create_connectivity(0, mesh.topology.dim)
+    # 2) Refine with gmsh (repeat if requested)
+    # gmsh -refine reads an existing mesh and refines it
+    current = msh0
+    for k in range(n_refine):
+        cmd = [gmsh_exe, "-refine", str(current), "-format", "msh2", "-o", str(msh1)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"Gmsh refine failed:\nCMD: {' '.join(cmd)}\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}\n")
+        current = msh1
 
-    # Write vertex tags
-    with dfx.io.XDMFFile(mesh.comm, "vertex_tags.xdmf", "w") as xdmf:
-        xdmf.write_mesh(mesh)
-        xdmf.write_meshtags(vertex_tags, mesh.geometry)
+    # 3) Refined MSH -> VTU
+    mref = meshio.read(current)
+    tet_cells = [c for c in mref.cells if c.type == "tetra"]
+    if not tet_cells:
+        raise RuntimeError("Refined mesh contains no tetra cells")
 
-    return vertex_tags
+    out = meshio.Mesh(points=mref.points, cells=tet_cells)
+    meshio.write(vtu_out, out, file_format="vtu")
 
-from scipy.spatial import cKDTree
+    # Optional: cleanup
+    try:
+        msh0.unlink(missing_ok=True)
+        msh1.unlink(missing_ok=True)
+    except Exception:
+        pass
 
-def domain_mesh_tagging_nearest(xdmf_file, coords):
+import numpy as np
+from dolfinx import mesh as dmesh
+
+def refine_large_cells(msh, hmax: float, nsteps: int = 1):
     """
-    Tag the nearest INTERIOR vertex in the mesh to each coordinate in coords.
-
-    Parameters:
-        xdmf_file (str or Path): Path to the mesh XDMF file
-        coords (np.ndarray): An (N, 3) array of target points
-
-    Returns:
-        dolfinx.mesh.meshtags: Vertex tags
-        dolfinx.mesh.Mesh:    Mesh
+    Refine only cells whose estimated size exceeds hmax by splitting all edges
+    belonging to those cells (dolfinx 0.10 requires edge-based refinement).
     """
-    from dolfinx.io import XDMFFile
-    from dolfinx import mesh as dfx_mesh
+    tdim = msh.topology.dim
+    fdim = tdim - 1
 
-    # ------------------------------------------------------------------
-    # 1. Load mesh
-    # ------------------------------------------------------------------
-    with XDMFFile(MPI.COMM_WORLD, current_dir / xdmf_file, "r") as xdmf:
+    for _ in range(nsteps):
+        # Ensure required connectivities exist
+        msh.topology.create_entities(1)                 # create edges
+        msh.topology.create_connectivity(tdim, 0)       # cell -> vertices
+        msh.topology.create_connectivity(tdim, 1)       # cell -> edges
+
+        c2v = msh.topology.connectivity(tdim, 0)
+        c2e = msh.topology.connectivity(tdim, 1)
+        X = msh.geometry.x
+
+        ncells = msh.topology.index_map(tdim).size_local
+        cell_marked = np.zeros(ncells, dtype=np.int8)
+
+        # Mark large cells
+        for c in range(ncells):
+            vs = c2v.links(c)
+            pts = X[vs]
+            dmax = 0.0
+            for i in range(len(pts)):
+                for j in range(i + 1, len(pts)):
+                    d = np.linalg.norm(pts[i] - pts[j])
+                    if d > dmax:
+                        dmax = d
+            if dmax > hmax:
+                cell_marked[c] = 1
+
+        if not cell_marked.any():
+            break
+
+        # Collect edges of marked cells
+        edge_ids = []
+        for c in np.where(cell_marked == 1)[0]:
+            edge_ids.extend(c2e.links(c))
+
+        # Unique edges (local)
+        edges = np.unique(np.array(edge_ids, dtype=np.int32))
+
+        # Refine by splitting these edges
+        msh, _, _ = dmesh.refine(msh, edges)
+
+    # Rebuild connectivities often used later (facet tagging etc.)
+    msh.topology.create_entities(fdim)
+    msh.topology.create_connectivity(fdim, 0)
+    msh.topology.create_connectivity(tdim, fdim)
+    return msh
+
+def refine_mesh_uniform(mesh: dfx.mesh.Mesh, n_refine: int) -> dfx.mesh.Mesh:
+    tdim = mesh.topology.dim
+    # For 3D tetra mesh: edges are dim=1
+    mesh.topology.create_entities(1)
+    mesh.topology.create_connectivity(1, 0)      # edge -> vertex
+    mesh.topology.create_connectivity(tdim, 1)   # cell -> edge (needed by refine)
+
+    for _ in range(n_refine):
+        mesh, _, _ = dmesh.refine(mesh)
+        # After refinement, rebuild the connectivities that downstream tagging/writing needs
+        mesh.topology.create_entities(1)
+        mesh.topology.create_connectivity(1, 0)
+        mesh.topology.create_connectivity(mesh.topology.dim, 1)
+
+    # And also make sure facets exist (you tag facets later)
+    fdim = mesh.topology.dim - 1
+    mesh.topology.create_entities(fdim)
+    mesh.topology.create_connectivity(fdim, 0)
+    mesh.topology.create_connectivity(mesh.topology.dim, fdim)
+
+    return mesh
+
+# def read_3d_mesh_from_vtu(vtu_file: str, xdmf_name: str, n_refine: int = 0) -> dfx.mesh.Mesh:
+#     vtu_to_xdmf(vtu_file, xdmf_name)
+#     with XDMFFile(MPI.COMM_WORLD, current_dir / xdmf_name, "r") as xdmf:
+#         mesh = xdmf.read_mesh(name="Grid")
+
+#     if n_refine > 0:
+#         mesh = refine_mesh_uniform(mesh, n_refine)
+
+#     # ensure facet entities exist for tagging/writing
+#     tdim = mesh.topology.dim
+#     fdim = tdim - 1
+#     mesh.topology.create_entities(fdim)
+#     mesh.topology.create_connectivity(fdim, 0)
+#     mesh.topology.create_connectivity(tdim, fdim)
+#     return mesh
+
+import numpy as np
+from dolfinx import mesh as dmesh
+
+def refine_long_edges(msh, hmax: float, nsteps: int = 1):
+    """
+    Refine by splitting only edges longer than hmax.
+    This avoids shrinking regions that are already fine.
+    """
+    for _ in range(nsteps):
+        msh.topology.create_entities(1)            # edges
+        msh.topology.create_connectivity(1, 0)     # edge -> vertices
+        e2v = msh.topology.connectivity(1, 0)
+        X = msh.geometry.x
+
+        nedges = msh.topology.index_map(1).size_local
+        long_edges = np.zeros(nedges, dtype=np.int8)
+
+        for e in range(nedges):
+            vs = e2v.links(e)
+            p0, p1 = X[vs[0]], X[vs[1]]
+            if np.linalg.norm(p1 - p0) > hmax:
+                long_edges[e] = 1
+
+        if not long_edges.any():
+            break
+
+        edges = np.where(long_edges == 1)[0].astype(np.int32)
+        msh, _, _ = dmesh.refine(msh, edges)
+
+    # rebuild common connectivities
+    tdim = msh.topology.dim
+    fdim = tdim - 1
+    msh.topology.create_entities(fdim)
+    msh.topology.create_connectivity(fdim, 0)
+    msh.topology.create_connectivity(tdim, fdim)
+    return msh
+
+def read_3d_mesh_from_vtu(vtu_file: str, xdmf_name: str,
+                          n_refine: int = 0,
+                          refine_hmax: float = 0.01,
+                          refine_steps: int = 1) -> dfx.mesh.Mesh:
+    vtu_to_xdmf(vtu_file, xdmf_name)
+    with XDMFFile(MPI.COMM_WORLD, current_dir / xdmf_name, "r") as xdmf:
         mesh = xdmf.read_mesh(name="Grid")
 
+    # Optional: selective refinement FIRST (targets only coarse elements)
+    if refine_hmax is not None:
+        mesh = refine_long_edges(mesh, hmax=refine_hmax, nsteps=refine_steps)
+
+    # Optional: your existing uniform refinement
+    if n_refine > 0:
+        mesh = refine_mesh_uniform(mesh, n_refine)
+
+    # ensure facet entities exist for tagging/writing
     tdim = mesh.topology.dim
-    vdim = 0  # vertex dimension
+    fdim = tdim - 1
+    mesh.topology.create_entities(fdim)
+    mesh.topology.create_connectivity(fdim, 0)
+    mesh.topology.create_connectivity(tdim, fdim)
+    return mesh
 
-    # Connectivity needed for boundary detection
-    mesh.topology.create_connectivity(vdim, tdim)
 
-    # ------------------------------------------------------------------
-    # 2. Find boundary vertices and define "interior" set
-    # ------------------------------------------------------------------
-    # All boundary vertices (dimension 0 on the exterior boundary)
-    boundary_vertices = dfx_mesh.locate_entities_boundary(
-        mesh,
-        vdim,
-        lambda x: np.full(x.shape[1], True, dtype=bool)
-    )
-    boundary_vertices = np.unique(boundary_vertices)
-
-    mesh_coords = mesh.geometry.x
-    num_vertices = mesh_coords.shape[0]
-
-    is_boundary = np.zeros(num_vertices, dtype=bool)
-    is_boundary[boundary_vertices] = True
-
-    interior_vertices = np.where(~is_boundary)[0]
-
-    if interior_vertices.size == 0:
-        raise RuntimeError("No interior vertices found in the mesh.")
-
-    # ------------------------------------------------------------------
-    # 3. Build KDTree on interior vertices only and query
-    # ------------------------------------------------------------------
-    tree = cKDTree(mesh_coords[interior_vertices])
-    distances, local_indices = tree.query(coords)
-    # Map back to global vertex indices
-    vertex_indices = interior_vertices[local_indices]
-
-    # Remove duplicates (optional)
-    unique_vertex_indices = np.unique(vertex_indices)
-
-    # ------------------------------------------------------------------
-    # 4. Create meshtags for these interior vertices
-    # ------------------------------------------------------------------
-    tags = np.full_like(unique_vertex_indices, OUTLET, dtype=np.int32)
-    vertex_tags = dfx_mesh.meshtags(mesh, vdim, unique_vertex_indices, tags)
-
-    print("Nearest INTERIOR tagged vertex indices:", unique_vertex_indices, flush=True)
-    print("Vertex coordinates:", mesh_coords[unique_vertex_indices], flush=True)
-
-    # ------------------------------------------------------------------
-    # 5. Write mesh + tags back to file
-    # ------------------------------------------------------------------
-    with dfx.io.XDMFFile(mesh.comm, current_dir / xdmf_file, "w") as xdmf:
-        xdmf.write_mesh(mesh)
-        xdmf.write_meshtags(vertex_tags, mesh.geometry)
-
-        print(f"Total vertices: {num_vertices}")
-        print(f"Tagged vertices: {vertex_tags.indices.size}")
-
-    return vertex_tags, mesh
-
-import numpy as np
-from dolfinx import mesh as dmesh, fem
-from mpi4py import MPI
-
-import numpy as np
-from dolfinx import mesh as dmesh
-
-def tag_facet_patch_by_seed(mesh, x0, n0, theta_deg, marker):
-    """
-    Tag a connected patch of boundary facets starting from a seed point x0.
-    Connectivity is defined by shared vertices between boundary facets.
-    The patch grows over neighboring facets whose normal makes an angle
-    <= theta_deg with the reference direction n0.
-
-    Parameters
-    ----------
-    mesh : dolfinx.mesh.Mesh
-        3D mesh.
-    x0 : array_like, shape (3,)
-        Seed point on / near the desired surface.
-    n0 : array_like, shape (3,)
-        Reference normal direction (will be normalized).
-    theta_deg : float
-        Max allowed angle (degrees) between facet normal and n0.
-    marker : int
-        Integer tag for the selected patch.
-
-    Returns
-    -------
-    facet_tags : dolfinx.mesh.MeshTags
-        Meshtags on boundary facets (fdim = tdim-1) with 'marker' on
-        the selected patch. Only tagged facets are present.
-    """
-
+def _boundary_facets_and_geometry(mesh: dfx.mesh.Mesh):
+    """Compute boundary facet list, centers, normals, adjacency."""
     tdim = mesh.topology.dim
     fdim = tdim - 1
     gdim = mesh.geometry.dim
-    assert gdim == 3, "This helper is written for 3D meshes."
-
-    # --------------------------------------------------------------
-    # 1) All boundary facets
-    # --------------------------------------------------------------
+    mesh.topology.create_entities(fdim)
     mesh.topology.create_connectivity(fdim, 0)
-    all_bdry_facets = dmesh.locate_entities_boundary(
-        mesh, fdim, lambda x: np.full(x.shape[1], True)
-    )
-    if len(all_bdry_facets) == 0:
-        raise RuntimeError("No boundary facets found.")
+
+    all_bdry_facets = dmesh.locate_entities_boundary(mesh, fdim, lambda x: np.full(x.shape[1], True, dtype=bool))
+    if all_bdry_facets.size == 0:
+        raise RuntimeError("No boundary facets found on 3D mesh.")
 
     f_to_v = mesh.topology.connectivity(fdim, 0)
-    coords = mesh.geometry.x
+    X = mesh.geometry.x
 
-    nfacets = len(all_bdry_facets)
-    facet_centers = np.zeros((nfacets, gdim))
-    facet_normals = np.zeros((nfacets, gdim))
+    nfac = len(all_bdry_facets)
+    centers = np.zeros((nfac, gdim), dtype=float)
+    normals = np.zeros((nfac, gdim), dtype=float)
 
-    # --------------------------------------------------------------
-    # 2) Centers & normals for boundary facets
-    # --------------------------------------------------------------
     for i, f in enumerate(all_bdry_facets):
-        vs = f_to_v.links(f)
-        pts = coords[vs]
-
-        facet_centers[i, :] = pts.mean(axis=0)
-
+        vs = f_to_v.links(int(f))
+        pts = X[vs]
+        centers[i] = pts.mean(axis=0)
         v0, v1, v2 = pts[0], pts[1], pts[2]
         n = np.cross(v1 - v0, v2 - v0)
-        n_norm = np.linalg.norm(n)
-        if n_norm > 0:
-            n /= n_norm
-        facet_normals[i, :] = n
+        nn = np.linalg.norm(n)
+        if nn > 0:
+            n /= nn
+        normals[i] = n
 
-    # --------------------------------------------------------------
-    # 3) Vertex-based adjacency: facets that share any vertex
-    # --------------------------------------------------------------
-    # Build vertex -> boundary facets map
-    v_to_f = {}
+    # adjacency (shared vertices)
+    v_to_f: Dict[int, List[int]] = {}
     for f in all_bdry_facets:
-        vs = f_to_v.links(f)
+        vs = f_to_v.links(int(f))
         for v in vs:
             v_to_f.setdefault(int(v), []).append(int(f))
 
-    # Build adjacency: for each boundary facet, all other boundary
-    # facets sharing at least one vertex
-    adj = {int(f): set() for f in all_bdry_facets}
+    adj: Dict[int, set] = {int(f): set() for f in all_bdry_facets}
     for f in all_bdry_facets:
-        vs = f_to_v.links(f)
+        vs = f_to_v.links(int(f))
         neigh = set()
         for v in vs:
             neigh.update(v_to_f[int(v)])
         neigh.discard(int(f))
         adj[int(f)] = neigh
 
-    # --------------------------------------------------------------
-    # 4) Region-growing from seed facet with angle filter
-    # --------------------------------------------------------------
-    x0 = np.asarray(x0, dtype=float)
-    n0 = np.asarray(n0, dtype=float)
-    n0 /= np.linalg.norm(n0)
-
-    cos_thr = np.cos(np.deg2rad(theta_deg))
-
-    # Find nearest boundary facet to seed point
-    d2 = np.sum((facet_centers - x0) ** 2, axis=1)
-    seed_idx = int(np.argmin(d2))
-    seed_facet = int(all_bdry_facets[seed_idx])
-
     facet_to_idx = {int(f): i for i, f in enumerate(all_bdry_facets)}
+    return all_bdry_facets.astype(np.int32), centers, normals, adj, facet_to_idx
 
-    selected = set()
-    visited = set()
-    stack = [seed_facet]
 
-    while stack:
-        f = stack.pop()
-        if f in visited:
-            continue
-        visited.add(f)
-
-        i = facet_to_idx[f]
-        nf = facet_normals[i]
-
-        # Angle condition
-        if np.dot(nf, n0) >= cos_thr:
-            selected.add(f)
-            for nb in adj[f]:
-                if nb not in visited:
-                    stack.append(nb)
-
-    if not selected:
-        raise RuntimeError("Region-growing selected no facets. "
-                           "Check x0, n0, and theta_deg.")
-
-    # --------------------------------------------------------------
-    # 5) Build MeshTags for selected patch
-    # --------------------------------------------------------------
-    facet_indices = np.array(sorted(selected), dtype=np.int32)
-    facet_values  = np.full_like(facet_indices, marker, dtype=np.int32)
-
-    facet_tags = dmesh.meshtags(mesh, fdim, facet_indices, facet_values)
-    return facet_tags
-
-import numpy as np
-from dolfinx import mesh as dmesh
-
-def tag_surface_from_seed(mesh, x0, theta_deg, marker):
-    """
-    Tag a connected patch of boundary facets starting from a seed point x0.
-    Connectivity is defined by shared vertices between boundary facets.
-    The patch grows over neighboring facets whose normal makes an angle
-    <= theta_deg with the *seed facet's* normal.
-
-    Parameters
-    ----------
-    mesh : dolfinx.mesh.Mesh
-        3D mesh.
-    x0 : array_like, shape (3,)
-        Seed point on / near the desired surface (in physical coordinates).
-    theta_deg : float
-        Max allowed angle (degrees) between facet normal and the seed normal.
-    marker : int
-        Integer tag for the selected patch.
-
-    Returns
-    -------
-    facet_tags : dolfinx.mesh.MeshTags
-        Meshtags on boundary facets (fdim = tdim-1) with 'marker' on
-        the selected patch. Only those facets are present.
-    """
-
+def tag_surface_from_seed(mesh: dfx.mesh.Mesh, x0: np.ndarray, theta_deg: float, marker: int) -> dfx.mesh.MeshTags:
+    """Your original region-growing patch tagger (auto seed normal)."""
     tdim = mesh.topology.dim
     fdim = tdim - 1
-    gdim = mesh.geometry.dim
-    assert gdim == 3, "tag_surface_from_seed is written for 3D meshes."
-
-    # ----------------------------------------------------------
-    # 1) All boundary facets
-    # ----------------------------------------------------------
+    mesh.topology.create_entities(fdim)
     mesh.topology.create_connectivity(fdim, 0)
-    all_bdry_facets = dmesh.locate_entities_boundary(
-        mesh, fdim, lambda x: np.full(x.shape[1], True)
-    )
-    if len(all_bdry_facets) == 0:
-        raise RuntimeError("No boundary facets found.")
 
-    f_to_v = mesh.topology.connectivity(fdim, 0)
-    coords = mesh.geometry.x
+    all_bdry_facets, centers, normals, adj, facet_to_idx = _boundary_facets_and_geometry(mesh)
 
-    nfacets = len(all_bdry_facets)
-    facet_centers = np.zeros((nfacets, gdim))
-    facet_normals = np.zeros((nfacets, gdim))
+    x0 = np.asarray(x0, float)
+    d2 = np.sum((centers - x0) ** 2, axis=1)
+    seed_i = int(np.argmin(d2))
+    seed_f = int(all_bdry_facets[seed_i])
 
-    # ----------------------------------------------------------
-    # 2) Centers & normals for boundary facets
-    # ----------------------------------------------------------
-    for i, f in enumerate(all_bdry_facets):
-        vs = f_to_v.links(f)
-        pts = coords[vs]
+    n0 = normals[seed_i].copy()
+    nn = np.linalg.norm(n0)
+    if nn == 0:
+        raise RuntimeError("Seed facet has zero normal.")
+    n0 /= nn
 
-        # center
-        facet_centers[i, :] = pts.mean(axis=0)
-
-        # normal from first 3 vertices
-        v0, v1, v2 = pts[0], pts[1], pts[2]
-        n = np.cross(v1 - v0, v2 - v0)
-        n_norm = np.linalg.norm(n)
-        if n_norm > 0.0:
-            n /= n_norm
-        facet_normals[i, :] = n
-
-    # ----------------------------------------------------------
-    # 3) Vertex-based adjacency: facets sharing any vertex
-    # ----------------------------------------------------------
-    v_to_f = {}
-    for f in all_bdry_facets:
-        vs = f_to_v.links(f)
-        for v in vs:
-            v_to_f.setdefault(int(v), []).append(int(f))
-
-    adj = {int(f): set() for f in all_bdry_facets}
-    for f in all_bdry_facets:
-        vs = f_to_v.links(f)
-        neigh = set()
-        for v in vs:
-            neigh.update(v_to_f[int(v)])
-        neigh.discard(int(f))
-        adj[int(f)] = neigh
-
-    # ----------------------------------------------------------
-    # 4) Region growing from seed facet (auto normal)
-    # ----------------------------------------------------------
-    x0 = np.asarray(x0, dtype=float)
-
-    # pick the boundary facet whose center is closest to x0
-    d2 = np.sum((facet_centers - x0) ** 2, axis=1)
-    seed_idx = int(np.argmin(d2))
-    seed_facet = int(all_bdry_facets[seed_idx])
-
-    # seed normal
-    n0 = facet_normals[seed_idx].copy()
-    n0_norm = np.linalg.norm(n0)
-    if n0_norm == 0.0:
-        raise RuntimeError("Seed facet has zero normal; pick a different x0?")
-    n0 /= n0_norm
-
-    cos_thr = np.cos(np.deg2rad(theta_deg))
-    facet_to_idx = {int(f): i for i, f in enumerate(all_bdry_facets)}
+    cos_thr = float(np.cos(np.deg2rad(theta_deg)))
 
     selected = set()
     visited = set()
-    stack = [seed_facet]
-
+    stack = [seed_f]
     while stack:
         f = stack.pop()
         if f in visited:
             continue
         visited.add(f)
-
         i = facet_to_idx[f]
-        nf = facet_normals[i]
-
-        # ignore normal sign: treat nf and -nf as equivalent
+        nf = normals[i]
         if abs(np.dot(nf, n0)) >= cos_thr:
             selected.add(f)
             for nb in adj[f]:
                 if nb not in visited:
                     stack.append(nb)
 
+    if not selected:
+        raise RuntimeError("tag_surface_from_seed selected no facets.")
+
+    idx = np.array(sorted(selected), dtype=np.int32)
+    vals = np.full_like(idx, marker, dtype=np.int32)
+    return dmesh.meshtags(mesh, fdim, idx, vals)
+
+
+def tag_terminal_plane_patch(
+    mesh: dfx.mesh.Mesh,
+    x0: np.ndarray,
+    marker: int,
+    theta_deg: float = 15.0,
+    plane_tol: Optional[float] = None,
+) -> dfx.mesh.MeshTags:
+    """
+    Tag a connected terminal face near x0, constrained to a single plane:
+    - choose nearest boundary facet to x0
+    - seed plane: (x - x_seed) · n0 = 0
+    - region-grow over facets with normals aligned to n0 and centers close to seed plane.
+    """
+    tdim = mesh.topology.dim
+    fdim = tdim - 1
+
+    all_bdry_facets, centers, normals, adj, facet_to_idx = _boundary_facets_and_geometry(mesh)
+
+    x0 = np.asarray(x0, float)
+    d2 = np.sum((centers - x0) ** 2, axis=1)
+    seed_i = int(np.argmin(d2))
+    seed_f = int(all_bdry_facets[seed_i])
+
+    n0 = normals[seed_i].copy()
+    nn = np.linalg.norm(n0)
+    if nn == 0:
+        raise RuntimeError("Terminal seed facet has zero normal.")
+    n0 /= nn
+    x_seed = centers[seed_i].copy()
+
+    # default plane tolerance: 2% of local bbox diagonal
+    if plane_tol is None:
+        bbox = mesh.geometry.x.max(axis=0) - mesh.geometry.x.min(axis=0)
+        plane_tol = 0.002 * float(np.linalg.norm(bbox))
+
+    cos_thr = float(np.cos(np.deg2rad(theta_deg)))
+
+    selected = set()
+    visited = set()
+    stack = [seed_f]
+    while stack:
+        f = stack.pop()
+        if f in visited:
+            continue
+        visited.add(f)
+        i = facet_to_idx[f]
+        nf = normals[i]
+        if abs(np.dot(nf, n0)) < cos_thr:
+            continue
+        # coplanarity check using facet center
+        if abs(np.dot((centers[i] - x_seed), n0)) > plane_tol:
+            continue
+        selected.add(f)
+        for nb in adj[f]:
+            if nb not in visited:
+                stack.append(nb)
 
     if not selected:
-        raise RuntimeError("tag_surface_from_seed: no facets selected. "
-                           "Check x0 and theta_deg.")
+        raise RuntimeError(f"Terminal patch empty for x0={x0}. Try increasing plane_tol/theta_deg.")
 
-    facet_indices = np.array(sorted(selected), dtype=np.int32)
-    facet_values  = np.full_like(facet_indices, marker, dtype=np.int32)
+    idx = np.array(sorted(selected), dtype=np.int32)
+    vals = np.full_like(idx, marker, dtype=np.int32)
+    return dmesh.meshtags(mesh, fdim, idx, vals)
 
+
+def tag_outer_wall_facets(mesh: dfx.mesh.Mesh, marker: int, outer_tol: Optional[float] = None) -> Dict[int, int]:
+    """Tag outer box boundary facets based on bbox planes."""
+    tdim = mesh.topology.dim
+    fdim = tdim - 1
+    all_bdry_facets, centers, normals, adj, facet_to_idx = _boundary_facets_and_geometry(mesh)
+
+    X = mesh.geometry.x
+    mins = X.min(axis=0); maxs = X.max(axis=0)
+    diag = float(np.linalg.norm(maxs - mins))
+    if outer_tol is None:
+        outer_tol = 1e-3 * diag
+
+    facet_to_marker: Dict[int, int] = {}
+    for f, c in zip(all_bdry_facets, centers):
+        if (
+            abs(c[0] - mins[0]) < outer_tol or abs(c[0] - maxs[0]) < outer_tol or
+            abs(c[1] - mins[1]) < outer_tol or abs(c[1] - maxs[1]) < outer_tol or
+            abs(c[2] - mins[2]) < outer_tol or abs(c[2] - maxs[2]) < outer_tol
+        ):
+            facet_to_marker[int(f)] = int(marker)
+    return facet_to_marker
+
+def _get_ftetwild_path():
+    project_root = current_dir.parent.parent
+    candidates = [
+        os.environ.get("FTETWILD_PATH"),
+        shutil.which("FloatTetwild_bin"),
+        str(project_root / "clones" / "fTetWild" / "build" / "FloatTetwild_bin"),
+        str(project_root / "clones" / "fTetWild" / "build" / "FloatTetwild_bin.exe"),
+    ]
+
+    for cand in candidates:
+        if not cand:
+            continue
+        p = Path(cand).expanduser()
+        if p.is_file():
+            return str(p)
+
+    raise RuntimeError(
+        "ERROR: cannot find fTetWild. Looked for FTETWILD_PATH, PATH, and "
+        f"{project_root / 'clones' / 'fTetWild' / 'build' / 'FloatTetwild_bin'}."
+    )
+
+def geo_to_mesh_gmsh(geo_file, msh_file, mesh_size=0.001):
+    gmsh.initialize()
+    gmsh.open(str(current_dir / geo_file))
+
+    # Generate 1D mesh (use .generate(2) for 2D, .generate(3) for 3D)
+    gmsh.model.mesh.generate(1)
+
+    # Save mesh in MSH version 2 format
+    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+    gmsh.write(str(current_dir / msh_file))
+
+    gmsh.finalize()    
+
+def stl_to_mesh_gmsh(stl_file, msh_file,char_len_min=0.001, char_len_max=0.01): # let final char_len_max be 0.01
+
+    gmsh.initialize()
+    gmsh.model.add("bioreactor")
+    gmsh.merge(stl_file)
+
+    gmsh.model.mesh.removeDuplicateNodes()
+    
+    # Classify surfaces to reconstruct the volume
+    angle = 30  # angle threshold in degrees for feature edges
+    force_param = True
+    include_boundary = True
+    curve_angle = 180
+    gmsh.model.mesh.classifySurfaces(angle * (3.14159265359 / 180), include_boundary, force_param, curve_angle * (3.14159265359 / 180))
+    
+    # Create geometry from mesh
+    gmsh.model.mesh.createGeometry()
+    gmsh.model.mesh.createTopology()
+
+    # Create volume from surface
+    s = gmsh.model.getEntities(2)  # Get all surfaces
+    gmsh.model.geo.addSurfaceLoop([surf[1] for surf in s], 1)
+    vol = gmsh.model.geo.addVolume([1], 1)
+    gmsh.model.geo.synchronize()
+
+    # Define physical group (optional but needed for DOLFINx)
+    gmsh.model.addPhysicalGroup(3, [1], 1)  # Volume
+    gmsh.model.setPhysicalName(3, 1, "volume")
+
+    p = gmsh.model.addPhysicalGroup(3, [vol], 9)
+    gmsh.model.setPhysicalName(3, p, "Wall")
+
+    gmsh.option.setNumber("Mesh.Optimize", 1)
+    gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+    gmsh.option.setNumber("Mesh.Smoothing", 1)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_len_max)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_len_min)
+    gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+
+    gmsh.model.geo.synchronize()
+    gmsh.model.mesh.generate(3)
+    gmsh.write(str(current_dir / msh_file))
+    logger.info(f"Created mesh {current_dir/msh_file} from {stl_file}")
+    gmsh.finalize()
+
+def stl_to_mesh_ftet(
+    stl_file,
+    msh_file,
+    edge_length: float = 0.005,
+    eps: float = 0.0005,
+    max_threads: Optional[int] = None,
+):
+    """
+    Mesh STL with fTetWild.
+
+    For better surface preservation, reduce both:
+    - edge_length (--lr): smaller target tetra edge length ratio
+    - eps (--epsr): smaller geometric perturbation tolerance ratio
+    """
+    if edge_length <= 0:
+        raise ValueError("edge_length must be > 0")
+    if eps <= 0:
+        raise ValueError("eps must be > 0")
+    if eps >= edge_length:
+        logger.warning(
+            "eps (%g) >= edge_length (%g). This may over-smooth geometry.",
+            eps,
+            edge_length,
+        )
+    if max_threads is not None and max_threads <= 0:
+        raise ValueError("max_threads must be > 0 when provided")
+
+    float_tetwild_path = _get_ftetwild_path()
+    out_path = current_dir / msh_file
+    cmd = [
+        float_tetwild_path,
+        "-i",
+        str(stl_file),
+        "-o",
+        str(out_path),
+        "--lr",
+        str(edge_length),
+        "--epsr",
+        str(eps),
+    ]
+    if max_threads is not None:
+        cmd.extend(["--max-threads", str(int(max_threads))])
+    logger.info("Running fTetWild: %s", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+def mesh_to_xdmf(msh_file, xdmf_file):
+    # Convert .msh to .vtu
+    mesh = meshio.read(current_dir/msh_file)
+    meshio.write(current_dir/xdmf_file, mesh)
+
+def xdmf_to_dolfinx(xdmf_file):
+    with XDMFFile(MPI.COMM_WORLD, current_dir/xdmf_file, "r") as xdmf:
+        mesh = xdmf.read_mesh(name="Grid")
+
+    # Create connectivity between the mesh elements and their facets
+    mesh.topology.create_connectivity(mesh.topology.dim, mesh.topology.dim - 1)
+
+def remove_seed_points(terminal_pts, seed_pt, tol=1e-8):
+    """
+    Remove the single row in terminal_pts that is closest to seed_pt.
+    Returns (filtered_pts, removed_index, removed_point).
+    """
+    terminal_pts = np.asarray(terminal_pts, dtype=float).reshape(-1, 3)
+    seed_pt = np.asarray(seed_pt, dtype=float).reshape(3,)
+
+    if terminal_pts.shape[0] == 0:
+        return terminal_pts, None, None
+
+    d2 = np.sum((terminal_pts - seed_pt) ** 2, axis=1)
+    idx = int(np.argmin(d2))
+    removed = terminal_pts[idx].copy()
+    filtered = np.delete(terminal_pts, idx, axis=0)
+    return filtered, idx, removed
+
+def build_facet_tags_for_mesh(
+    mesh: dfx.mesh.Mesh,
+    inlet_terminal_pts: np.ndarray,
+    outlet_terminal_pts: np.ndarray,
+    coords_inlet: np.ndarray,
+    coords_outlet: np.ndarray,
+    *,
+    wall_marker: int = 1,
+    arterial_concave_marker: int = 31,
+    venous_concave_marker: int = 32,
+    inlet_base_marker: int = 100,
+    outlet_base_marker: int = 200,
+    theta_concave_deg: float = 60.0,
+    theta_terminal_deg: float = 30.0,
+    plane_tol: Optional[float] = None,
+    outer_tol: Optional[float] = None,
+) -> dfx.mesh.MeshTags:
+    """
+    Builds a SINGLE facet MeshTags (fdim=2) with priority:
+        wall < concave patches < terminal faces
+    """
+    tdim = mesh.topology.dim
+    fdim = tdim - 1
+    mesh.topology.create_entities(fdim)
+    mesh.topology.create_connectivity(fdim, 0)
+    mesh.topology.create_connectivity(tdim, fdim)
+
+    facet_to_marker: Dict[int, int] = {}
+
+    # 1) outer wall (lowest priority)
+    facet_to_marker.update(tag_outer_wall_facets(mesh, marker=wall_marker, outer_tol=outer_tol))
+
+    # 2) concave patches (overwrite wall)
+    shifted_inlet = coords_inlet[:] + np.array([0, 0.1, 0.0])  # shift slightly to ensure seed is inside
+    shifted_outlet = coords_outlet[:] + np.array([0, 0.1, 0.0])
+    conc_art = tag_surface_from_seed(mesh, shifted_inlet, theta_deg=theta_concave_deg, marker=arterial_concave_marker)
+    conc_ven = tag_surface_from_seed(mesh, shifted_outlet, theta_deg=theta_concave_deg, marker=venous_concave_marker)
+    for f, v in zip(conc_art.indices, conc_art.values):
+        facet_to_marker[int(f)] = int(v)
+    for f, v in zip(conc_ven.indices, conc_ven.values):
+        facet_to_marker[int(f)] = int(v)
+
+    # 3) terminal faces (overwrite everything)
+    # Remove coords_inlet from inlet terminals
+    inlet_terminal_pts, _, _ = remove_seed_points(inlet_terminal_pts, coords_inlet, tol=1e-6)
+
+    # Remove coords_outlet from outlet terminals
+    outlet_terminal_pts, _, _ = remove_seed_points(outlet_terminal_pts, coords_outlet, tol=1e-6)
+    # inlet terminals
+    for k, pt in enumerate(np.asarray(inlet_terminal_pts, float)):
+        tag = inlet_base_marker + k
+        tpatch = tag_terminal_plane_patch(mesh, pt, marker=tag, theta_deg=theta_terminal_deg, plane_tol=plane_tol)
+        for f, v in zip(tpatch.indices, tpatch.values):
+            facet_to_marker[int(f)] = int(v)
+
+    # outlet terminals
+    for k, pt in enumerate(np.asarray(outlet_terminal_pts, float)):
+        tag = outlet_base_marker + k
+        tpatch = tag_terminal_plane_patch(mesh, pt, marker=tag, theta_deg=theta_terminal_deg, plane_tol=plane_tol)
+        for f, v in zip(tpatch.indices, tpatch.values):
+            facet_to_marker[int(f)] = int(v)
+
+    facet_indices = np.array(sorted(facet_to_marker.keys()), dtype=np.int32)
+    facet_values = np.array([facet_to_marker[i] for i in facet_indices], dtype=np.int32)
     facet_tags = dmesh.meshtags(mesh, fdim, facet_indices, facet_values)
     return facet_tags
 
-def create_surface_tags(x_inlet, x_outlet, mesh, n_inlet=[1.0,0.0,0.0], n_outlet=[-1.0,0.0,0.0]):
-    INLET = 1
-    OUTLET = 2
-    inlet_tags = tag_surface_from_seed(mesh, x_inlet, theta_deg=60, marker=INLET)
-    outlet_tags = tag_surface_from_seed(mesh, x_outlet, theta_deg=60, marker=OUTLET)
-    fdim = mesh.topology.dim - 1
-    indices = np.concatenate([inlet_tags.indices, outlet_tags.indices]).astype(np.int32)
-    values  = np.concatenate([inlet_tags.values,  outlet_tags.values]).astype(np.int32)
 
-    facet_tags = dmesh.meshtags(mesh, fdim, indices, values)
-    from dolfinx import io
+def write_mesh_and_tags(mesh: dfx.mesh.Mesh, facet_tags: dfx.mesh.MeshTags, mesh_xdmf: str, tags_xdmf: str) -> None:
+    tdim = mesh.topology.dim
+    fdim = tdim - 1
+    mesh.topology.create_entities(fdim)
+    mesh.topology.create_connectivity(fdim, 0)
+    mesh.topology.create_connectivity(tdim, fdim)
 
-    with io.XDMFFile(mesh.comm, current_dir/"bioreactor_facets.xdmf", "w") as xdmf:
+    with XDMFFile(mesh.comm, str(current_dir / mesh_xdmf), "w") as xdmf:
+        xdmf.write_mesh(mesh)
+
+    with XDMFFile(mesh.comm, str(current_dir / tags_xdmf), "w") as xdmf:
         xdmf.write_mesh(mesh)
         xdmf.write_meshtags(facet_tags, mesh.geometry)
 
 
-def import_branched_mesh(branching_data_file, output_1d, geo_file="branched_network.geo", msh_file="branched_network.msh", xdmf_file="branched_network.xdmf", fileprefix="", coords=np.array([0,0.41,0.34])):
-    df = pd.read_csv(branching_data_file)
-    branch.write_geo_from_branching_data(df, geo_file=geo_file)
-    geo_to_mesh_gmsh(geo_file=geo_file, msh_file=msh_file)
-    convert_mesh(msh_file=msh_file, xdmf_file=xdmf_file)
-    xdmf_to_dolfinx(xdmf_file=xdmf_file)
-    outlet_coords = generate_1d_files(xdmf_file=xdmf_file, output_dir=output_1d, file_prefix=fileprefix, inlet_coords=coords)
-    return outlet_coords
-
-def create_bioreactor_mesh(stl_file, msh_file="bioreactor.msh", xdmf_file="bioreactor.xdmf", diric=None, coords_inlet=None, coords_outlet=None):
-    stl_to_mesh_gmsh(stl_file, msh_file=msh_file)
-    mesh_to_xdmf(msh_file=msh_file, xdmf_file=xdmf_file)
-    xdmf_to_dolfinx(xdmf_file=xdmf_file)
-    facet_tags, mesh = domain_mesh_tagging_nearest(xdmf_file=xdmf_file, coords=diric)
-    create_surface_tags(x_inlet=coords_inlet, x_outlet=coords_outlet, mesh=mesh)
-    convert_vertex_tags_to_facet_tags(mesh=mesh, vertex_tags=facet_tags)
+def translate_mesh_inplace(mesh: dfx.mesh.Mesh, dy: float) -> None:
+    mesh.geometry.x[:, 1] += float(dy)
 
 
-class Files():
-    def __init__(self, stl_file, output_1d_inlet, output_1d_outlet, branching_data_inlet, branching_data_outlet, init = True, single=True, coords_inlet=np.array([-.183, 0.6, .593]), coords_outlet=np.array([+.186, 0.6, .61]),
-                 geo_file_inlet="branched_network_inlet.geo",
-                 msh_file_inlet="branched_network_inlet.msh",
-                 xdmf_file_inlet="branched_network_inlet.xdmf",
-                 geo_file_outlet="branched_network_outlet.geo",
-                 msh_file_outlet="branched_network_outlet.msh",
-                 xdmf_file_outlet="branched_network_outlet.xdmf",
-                 msh_bioreactor="bioreactor.msh",
-                 xdmf_bioreactor="bioreactor.xdmf"):
-        if single:
-            diric = import_branched_mesh(branching_data_inlet, output_1d_inlet, inlet=True)
+# ---------------------------------------------------------------------
+# High-level driver (keeps old 1D pipeline, swaps 3D)
+# ---------------------------------------------------------------------
+
+class Files:
+    def __init__(
+        self,
+        tissue_vtu: Optional[str],
+        tissue_stl: Optional[str],
+        output_1d_inlet: str,
+        output_1d_outlet: str,
+        branching_data_inlet: str,
+        branching_data_outlet: str,
+        coords_inlet: np.ndarray,
+        coords_outlet: np.ndarray,
+        # 1D filenames
+        geo_file_inlet: str = "branched_network_inlet.geo",
+        msh_file_inlet: str = "branched_network_inlet.msh",
+        xdmf_file_inlet: str = "branched_network_inlet.xdmf",
+        geo_file_outlet: str = "branched_network_outlet.geo",
+        msh_file_outlet: str = "branched_network_outlet.msh",
+        xdmf_file_outlet: str = "branched_network_outlet.xdmf",
+        # 3D input options
+        tissue_vtu_list: Optional[Sequence[str]] = None,
+        ftet_max_threads: Optional[int] = None,
+        multiwell: bool = True,
+        same_tissue_for_all_wells: bool = True,
+        well_spacing_y: float = 0.6,
+        # tagging params
+        wall_marker: int = 1,
+        arterial_concave_marker: int = 31,
+        venous_concave_marker: int = 32,
+        inlet_base_marker: int = 100,
+        outlet_base_marker: int = 200,
+        theta_concave_deg: float = 70.0,
+        theta_terminal_deg: float = 2.5,
+        plane_tol: Optional[float] = None,
+        outer_tol: Optional[float] = None,
+    ):
+        self.coords_inlet = np.asarray(coords_inlet, float)
+        self.coords_outlet = np.asarray(coords_outlet, float)
+
+        # --------------------------
+        # 1) Build 1D, get terminal points
+        # --------------------------
+        inlet_terminal_pts = import_branched_mesh(
+            branching_data_file=branching_data_inlet,
+            output_1d=output_1d_inlet,
+            geo_file=geo_file_inlet,
+            msh_file=msh_file_inlet,
+            xdmf_file=xdmf_file_inlet,
+            fileprefix="_inlet",
+            coords=self.coords_inlet,
+        )
+        outlet_terminal_pts = import_branched_mesh(
+            branching_data_file=branching_data_outlet,
+            output_1d=output_1d_outlet,
+            geo_file=geo_file_outlet,
+            msh_file=msh_file_outlet,
+            xdmf_file=xdmf_file_outlet,
+            fileprefix="_outlet",
+            coords=self.coords_outlet,
+        )
+
+        # --------------------------
+        # 2) Load/duplicate 3D and tag facets
+        # --------------------------
+        if tissue_vtu_list is not None:
+            vtu_list = list(tissue_vtu_list)
+            if len(vtu_list) != 4:
+                raise ValueError("tissue_vtu_list must have 4 VTU files.")
+            for i in range(1, 5):
+                mesh_i = read_3d_mesh_from_vtu(vtu_list[i-1], xdmf_name=f"_tmp_bioreactor_well{i}.xdmf")
+                facet_tags_i = build_facet_tags_for_mesh(
+                    mesh_i,
+                    inlet_terminal_pts=inlet_terminal_pts,
+                    outlet_terminal_pts=outlet_terminal_pts,
+                    coords_inlet=self.coords_inlet,
+                    coords_outlet=self.coords_outlet,
+                    wall_marker=wall_marker,
+                    arterial_concave_marker=arterial_concave_marker,
+                    venous_concave_marker=venous_concave_marker,
+                    inlet_base_marker=inlet_base_marker,
+                    outlet_base_marker=outlet_base_marker,
+                    theta_concave_deg=theta_concave_deg,
+                    theta_terminal_deg=theta_terminal_deg,
+                    plane_tol=plane_tol,
+                    outer_tol=outer_tol,
+                )
+                write_mesh_and_tags(mesh_i, facet_tags_i, f"bioreactor_well{i}.xdmf", f"mesh_tags_well{i}.xdmf")
+            return
+
+        if tissue_vtu is None and tissue_stl is None:
+            raise ValueError("Provide tissue_vtu or tissue_vtu_list.")
+
+        if not multiwell:
+            mesh = read_3d_mesh_from_vtu(tissue_vtu, xdmf_name="_tmp_bioreactor.xdmf")
+            facet_tags = build_facet_tags_for_mesh(
+                mesh,
+                inlet_terminal_pts=inlet_terminal_pts,
+                outlet_terminal_pts=outlet_terminal_pts,
+                coords_inlet=self.coords_inlet,
+                coords_outlet=self.coords_outlet,
+                wall_marker=wall_marker,
+                arterial_concave_marker=arterial_concave_marker,
+                venous_concave_marker=venous_concave_marker,
+                inlet_base_marker=inlet_base_marker,
+                outlet_base_marker=outlet_base_marker,
+                theta_concave_deg=theta_concave_deg,
+                theta_terminal_deg=theta_terminal_deg,
+                plane_tol=plane_tol,
+                outer_tol=outer_tol,
+            )
+            write_mesh_and_tags(mesh, facet_tags, "bioreactor.xdmf", "mesh_tags.xdmf")
+            return
+
+        # # multiwell with single VTU
+        # refine_vtu_with_gmsh(
+        #     vtu_in=tissue_vtu,
+        #     vtu_out="tissue_domain_volume_refined.vtu",
+        #     n_refine=0  # 1 is usually plenty (DOFs blow up fast!)
+        # )
+
+        mesh = read_3d_mesh_from_vtu(tissue_vtu, xdmf_name="_tmp_bioreactor_base.xdmf")
+        # stl_to_mesh_ftet(
+        #     tissue_stl,
+        #     msh_file="bioreactor_base.msh",
+        #     max_threads=ftet_max_threads,
+        # )
+        # mesh_to_xdmf(msh_file="bioreactor_base.msh", xdmf_file="bioreactor_base.xdmf")
+        # xdmf_to_dolfinx(xdmf_file="bioreactor_base.xdmf")
+        # with XDMFFile(MPI.COMM_WORLD, current_dir / "bioreactor_base.xdmf", "r") as xdmf:
+        #     mesh = xdmf.read_mesh(name="Grid")
+
+        # Tag once on the base (well 1) geometry
+        facet_tags = build_facet_tags_for_mesh(
+            mesh,
+            inlet_terminal_pts=inlet_terminal_pts,
+            outlet_terminal_pts=outlet_terminal_pts,
+            coords_inlet=self.coords_inlet,
+            coords_outlet=self.coords_outlet,
+            wall_marker=wall_marker,
+            arterial_concave_marker=arterial_concave_marker,
+            venous_concave_marker=venous_concave_marker,
+            inlet_base_marker=inlet_base_marker,
+            outlet_base_marker=outlet_base_marker,
+            theta_concave_deg=theta_concave_deg,
+            theta_terminal_deg=theta_terminal_deg,
+            plane_tol=plane_tol,
+            outer_tol=outer_tol,
+        )
+
+        # Write well 1
+        write_mesh_and_tags(mesh, facet_tags, "bioreactor_well1.xdmf", "mesh_tags_well1.xdmf")
+
+        if same_tissue_for_all_wells:
+            # Translate the same tagged mesh and write remaining wells (no retagging!)
+            X0 = mesh.geometry.x.copy()
+
+            for i in range(2, 5):
+                dy = well_spacing_y * (i - 1)
+                mesh.geometry.x[:] = X0 + np.array([0.0, dy, 0.0], dtype=X0.dtype)
+                write_mesh_and_tags(mesh, facet_tags, f"bioreactor_well{i}.xdmf", f"mesh_tags_well{i}.xdmf")
+
+            # Restore base coords (optional)
+            mesh.geometry.x[:] = X0
         else:
-            diric = import_branched_mesh(branching_data_inlet, output_1d_inlet, geo_file=geo_file_inlet, msh_file=msh_file_inlet, xdmf_file=xdmf_file_inlet, fileprefix="_inlet", coords=coords_inlet)
-            _ = import_branched_mesh(branching_data_outlet, output_1d_outlet, geo_file=geo_file_outlet, msh_file=msh_file_outlet, xdmf_file=xdmf_file_outlet, fileprefix="_outlet", coords=coords_outlet)
-        if init:
-            create_bioreactor_mesh(stl_file, msh_bioreactor, xdmf_bioreactor, diric=diric, coords_inlet=coords_inlet, coords_outlet=coords_outlet)
+            # If you *aren't* using the same tissue for all wells, you need per-well VTUs (tissue_vtu_list)
+            raise ValueError("same_tissue_for_all_wells=False requires tissue_vtu_list with 4 meshes.")
 
-
-
+        return
 
 if __name__ == "__main__":
-    # perfusion = Files(stl_file="/Users/rakshakonanur/Documents/Research/Synthetic_Vasculature/syntheticVasculature/files/geometry/cermRaksha_scaled.stl",
-    #                             branching_data_file="/Users/rakshakonanur/Documents/Research/Synthetic_Vasculature/output/1D_Output/090425/Run2_50branches/1D_Input_Files/branchingData.csv")
-    perfusion = Files(stl_file="/Users/rakshakonanur/Documents/Research/two-channel/files/organoid-2.stl",
-                                output_1d_inlet = "/Users/rakshakonanur/Documents/Research/two-channel/input/trial-3/organoid_2/0D_Input_Files/inlet",
-                                output_1d_outlet = "/Users/rakshakonanur/Documents/Research/two-channel/input/trial-3/organoid_2/0D_Input_Files/outlet",
-                                branching_data_inlet="/Users/rakshakonanur/Documents/Research/two-channel/input/trial-3/organoid_2/branchingData_0.csv",
-                                branching_data_outlet="/Users/rakshakonanur/Documents/Research/two-channel/input/trial-3/organoid_2/branchingData_1.csv",
-                                coords_inlet=np.array([-0.183, 0.3, .593]),
-                                coords_outlet=np.array([0.186, 0.3, .61]),
-                                single=False,
-                                init=True
-                                )
+    # Example usage (update paths)
+    Files(
+        tissue_stl=None,
+        tissue_vtu = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/tissue_domain_volume.vtu",
+        output_1d_inlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/0D_Input_Files/inlet",
+        output_1d_outlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/0D_Input_Files/outlet",
+        branching_data_inlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/branchingData_0.csv",
+        branching_data_outlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/branchingData_1.csv",
+        coords_inlet=[-.175, 0.9, .55],
+        coords_outlet=[.175, 0.9, .55],
+        ftet_max_threads=24,
+        multiwell=True,
+        same_tissue_for_all_wells=True,
+        well_spacing_y=0.6,
+        inlet_base_marker=100,
+        outlet_base_marker=200,
+    )
