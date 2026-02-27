@@ -16,7 +16,7 @@ from scipy.spatial import cKDTree
 import adios4dolfinx
 from dolfinx.io import VTKFile
 
-current_dir = Path("/Users/rakshakonanur/Documents/Research/two-channel/src/solves")
+current_dir = Path("/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/solves")
 
 # -----------------------------------------------------
 # Mesh importer
@@ -38,11 +38,11 @@ def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
     Read 3D perfusion mesh and facet meshtags.
 
     mesh_file: XDMF with the volume mesh (e.g. bioreactor.xdmf).
-    facet_file: XDMF with boundary facet tags (e.g. bioreactor_facets.xdmf),
+    facet_file: XDMF with boundary facet tags (e.g. mesh_tags_well1.xdmf),
                 with marker 1 = inlet surface, 2 = outlet surface.
     """
     with io.XDMFFile(MPI.COMM_WORLD, mesh_file, "r") as xdmf:
-        m = xdmf.read_mesh(name="Grid")
+        m = xdmf.read_mesh()
 
     with io.XDMFFile(MPI.COMM_WORLD, facet_file, "r") as xdmf:
         m.topology.create_connectivity(m.topology.dim,     m.topology.dim-1)
@@ -70,20 +70,21 @@ def import_pressure_data(mesh_obj, bp_file: str):
     return out   # list of Functions
 
 # -----------------------------------------------------
-# Flow ADIOS importer
+# Velocity ADIOS importer (vector P1)
 # -----------------------------------------------------
-def import_flow_data(mesh_obj, bp_file: str):
+def import_velocity_data(mesh_obj, bp_file: str):
     ts = adios4dolfinx.read_timestamps(bp_file, comm=MPI.COMM_WORLD,
                                        function_name="f")
-    print("Timestamps found for flow data:", ts)
-    P1 = fem.functionspace(mesh_obj, element("Lagrange", mesh_obj.basix_cell(), 1))
-    q_src = fem.Function(P1)
+    print("Timestamps found for velocity data:", ts)
+    P1_vec = element("Lagrange", mesh_obj.basix_cell(), 1, shape=(mesh_obj.geometry.dim,))
+    V = fem.functionspace(mesh_obj, P1_vec)
+    u_src = fem.Function(V)
     out = []
     for t in ts:
-        adios4dolfinx.read_function(bp_file, q_src,
+        adios4dolfinx.read_function(bp_file, u_src,
                                     name="f", time=t)
-        q_src.x.scatter_forward()
-        out.append(q_src.copy())
+        u_src.x.scatter_forward()
+        out.append(u_src.copy())
     return out   # list of Functions
 
 
@@ -96,7 +97,7 @@ class PerfusionSolver:
     def __init__(self, bioreactor_domain, facet_file,
                  mesh_inlet_file, mesh_outlet_file,
                  pres_inlet_file, pres_outlet_file,
-                 flow_inlet_file, flow_outlet_file,
+                 velocity_inlet_file, velocity_outlet_file,
                  inlet_coord, outlet_coord,
                  branching_in_file=None, branching_out_file=None):
 
@@ -105,15 +106,21 @@ class PerfusionSolver:
             bioreactor_domain, facet_file
         )
 
+        # Marker conventions from mesh_tags_well*.xdmf
+        self.arterial_concave_marker = 31
+        self.venous_concave_marker = 32
+        self.inlet_base_marker = 100
+        self.outlet_base_marker = 200
+
         # 1D tree terminal territory meshes
         self.inlet_mesh,  self.inlet_tags  = import_mesh(mesh_inlet_file)
         self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file)
 
-        # Load last time-slice of pressures/flows
+        # Load last time-slice of pressures/velocities
         self.p_A_k = import_pressure_data(self.inlet_mesh,  pres_inlet_file)[-1]
         self.p_V_k = import_pressure_data(self.outlet_mesh, pres_outlet_file)[-1]
-        self.w_A_k = import_flow_data(self.inlet_mesh,  flow_inlet_file)[-1]
-        self.w_V_k = import_flow_data(self.outlet_mesh, flow_outlet_file)[-1]
+        self.u_A_k = import_velocity_data(self.inlet_mesh,  velocity_inlet_file)[-1]
+        self.u_V_k = import_velocity_data(self.outlet_mesh, velocity_outlet_file)[-1]
 
         # Extract terminal (marker=2) coordinates + pressures + flows
         self._extract_terminal_data()
@@ -153,41 +160,45 @@ class PerfusionSolver:
         tree = cKDTree(dof_coords)
         _, nn = tree.query(x_pt.reshape(1, -1))
         return float(func.x.array[int(nn[0])])
-
     def _build_wall_dirichlet_bcs(self, W):
         """
-        Build Dirichlet BCs on the concave inlet/outlet surfaces using facet tags
-        from bioreactor_facets.xdmf.
+        Build Dirichlet BCs on the *concave* arterial/venous surfaces using facet tags
+        read from the facet_file (now mesh_tags_well1.xdmf).
 
-        Marker 1: inlet surface  -> use self.p_in_BC
-        Marker 2: outlet surface -> use self.p_out_BC
+        Expected markers (from mesh generation script):
+          - 31: arterial concave surface  -> use self.p_in_BC
+          - 32: venous  concave surface  -> use self.p_out_BC
         """
         mesh = self.mesh
         facet_tags = self.facet_tags
         fdim = mesh.topology.dim - 1
 
-        INLET_MARK  = 1
-        OUTLET_MARK = 2
+        ART_CONCAVE = getattr(self, "arterial_concave_marker", 31)
+        VEN_CONCAVE = getattr(self, "venous_concave_marker", 32)
 
-        # facet sets
-        inlet_facets  = facet_tags.find(INLET_MARK)
-        outlet_facets = facet_tags.find(OUTLET_MARK)
+        # Ensure facet entities/connectivities exist
+        mesh.topology.create_entities(fdim)
+        mesh.topology.create_connectivity(fdim, 0)
+        mesh.topology.create_connectivity(mesh.topology.dim, fdim)
+
+        art_facets = facet_tags.find(ART_CONCAVE)
+        ven_facets = facet_tags.find(VEN_CONCAVE)
 
         if mesh.comm.rank == 0:
-            print("Number of inlet facets tagged :", inlet_facets.size)
-            print("Number of outlet facets tagged:", outlet_facets.size)
+            print("Number of arterial concave facets tagged:", art_facets.size)
+            print("Number of venous  concave facets tagged:", ven_facets.size)
 
-        # map boundary facets to DOFs in W
-        inlet_dofs  = fem.locate_dofs_topological(W, fdim, inlet_facets)
-        outlet_dofs = fem.locate_dofs_topological(W, fdim, outlet_facets)
+        art_dofs = fem.locate_dofs_topological(W, fdim, art_facets)
+        ven_dofs = fem.locate_dofs_topological(W, fdim, ven_facets)
 
-        p_in_val  = fem.Constant(mesh, dfx.default_scalar_type(self.p_in_BC))
-        p_out_val = fem.Constant(mesh, dfx.default_scalar_type(self.p_out_BC))
+        p_art = fem.Constant(mesh, dfx.default_scalar_type(self.p_in_BC))
+        p_ven = fem.Constant(mesh, dfx.default_scalar_type(self.p_out_BC))
 
-        bc_in  = fem.dirichletbc(p_in_val,  inlet_dofs,  W)
-        bc_out = fem.dirichletbc(p_out_val, outlet_dofs, W)
+        bc_art = fem.dirichletbc(p_art, art_dofs, W)
+        bc_ven = fem.dirichletbc(p_ven, ven_dofs, W)
 
-        return [bc_in, bc_out]
+        return [bc_art, bc_ven]
+
 
     def _load_terminal_branch_coords(self, csv_path):
         """
@@ -257,7 +268,7 @@ class PerfusionSolver:
     def _extract_terminal_data(self):
         """
         Extract terminal coordinates (marker==2) directly from inlet/outlet meshtags.
-        Then sample the nearest pressure and flow values.
+        Then sample the nearest pressure and velocity values.
         """
 
         # ------------------------------------------------------
@@ -286,19 +297,23 @@ class PerfusionSolver:
             if len(pts) == 0:
                 return np.zeros(0)
 
+            bs = int(getattr(func.function_space.dofmap, "bs", 1))
             dof_coords = func.function_space.tabulate_dof_coordinates()
             tree = cKDTree(dof_coords)
             _, nn = tree.query(pts)
             nn = nn.astype(int)
-            return func.x.array[nn]
+            arr = func.x.array
+            if bs > 1 and arr.size == dof_coords.shape[0] * bs:
+                return arr.reshape(dof_coords.shape[0], bs)[nn]
+            return arr[nn]
 
-        # inlet pressures/flows
+        # inlet pressures/velocities
         self.p_inlet = sample_field_at_points(self.p_A_k, self.x_inlet)
-        self.q_inlet = sample_field_at_points(self.w_A_k, self.x_inlet)
+        self.u_inlet = sample_field_at_points(self.u_A_k, self.x_inlet)
 
-        # outlet pressures/flows
+        # outlet pressures/velocities
         self.p_outlet = sample_field_at_points(self.p_V_k, self.x_outlet)
-        self.q_outlet = sample_field_at_points(self.w_V_k, self.x_outlet)
+        self.u_outlet = sample_field_at_points(self.u_V_k, self.x_outlet)
 
         print(f"Found {len(self.x_inlet)} inlet terminals")
         print(f"Found {len(self.x_outlet)} outlet terminals")
@@ -318,42 +333,128 @@ class PerfusionSolver:
         _, idx = tree.query(branch_coords)
         return idx.astype(int)
 
+
+    # ========================================================
+    # Terminal facet marker utilities (from mesh_tags_well*.xdmf)
+    # ========================================================
+    def _get_terminal_marker_sets(self):
+        """
+        Return sorted unique terminal facet markers for inlet/outlet based on the
+        conventions used in mesh.py:
+          inlet terminals  : [inlet_base_marker,  inlet_base_marker+1,  ...]
+          outlet terminals : [outlet_base_marker, outlet_base_marker+1, ...]
+        """
+        vals = np.unique(self.facet_tags.values)
+        inlet_base  = getattr(self, "inlet_base_marker", 1)
+        outlet_base = getattr(self, "outlet_base_marker", 100)
+
+        inlet_marks  = np.sort(vals[(vals >= inlet_base)  & (vals < outlet_base)])
+        outlet_marks = np.sort(vals[(vals >= outlet_base) & (vals < outlet_base + 1000)])
+        return inlet_marks.astype(int), outlet_marks.astype(int)
+
+    def _marker_centroids(self, markers):
+        """
+        Compute one representative coordinate for each marker: the mean of boundary
+        facet centroids in that marker set.
+        """
+        mesh = self.mesh
+        tdim = mesh.topology.dim
+        fdim = tdim - 1
+
+        mesh.topology.create_entities(fdim)
+        mesh.topology.create_connectivity(fdim, 0)
+
+        f_to_v = mesh.topology.connectivity(fdim, 0)
+        X = mesh.geometry.x
+
+        centroids = np.zeros((len(markers), 3), dtype=np.float64)
+        for i, m in enumerate(markers):
+            facets = self.facet_tags.find(int(m))
+            if facets.size == 0:
+                centroids[i, :] = np.nan
+                continue
+            # centroid per facet then average
+            c = np.zeros((facets.size, 3), dtype=np.float64)
+            for j, f in enumerate(facets):
+                vs = f_to_v.links(int(f))
+                c[j, :] = X[vs].mean(axis=0)
+            centroids[i, :] = c.mean(axis=0)
+        return centroids
+
+    def _assign_markers_to_terminals(self, marker_centroids, terminal_coords):
+        """
+        Match each marker centroid to the nearest terminal coordinate (KD-tree).
+        Returns idx such that terminal_coords[idx[i]] corresponds to marker i.
+        """
+        if marker_centroids.size == 0 or terminal_coords.size == 0:
+            return np.zeros((0,), dtype=int)
+        tree = cKDTree(terminal_coords)
+        _, idx = tree.query(marker_centroids)
+        return idx.astype(int)
+
+    def _build_terminal_flux_form(self, v):
+        """
+        Build a Neumann-type RHS term that imposes terminal velocities *facet-wise*
+        on the boundary facets tagged as terminal inlet/outlet faces.
+
+        For each terminal marker m:
+          RHS += ∫ (u_m · n) * v ds(m)
+
+        Notes
+        -----
+        - u_m is sampled from velocity_checkpoint_{inlet|outlet}.bp on the
+          corresponding 1D terminal coordinates and mapped to 3D terminal markers.
+        """
+        mesh = self.mesh
+        n = ufl.FacetNormal(mesh)
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+
+        inlet_marks, outlet_marks = self._get_terminal_marker_sets()
+        inlet_c = self._marker_centroids(inlet_marks)
+        outlet_c = self._marker_centroids(outlet_marks)
+
+        idx_in  = self._assign_markers_to_terminals(inlet_c,  self.x_inlet)
+        idx_out = self._assign_markers_to_terminals(outlet_c, self.x_outlet)
+
+        # Store for later (interface output)
+        self.inlet_terminal_markers  = inlet_marks
+        self.outlet_terminal_markers = outlet_marks
+        self.inlet_terminal_centroids  = inlet_c
+        self.outlet_terminal_centroids = outlet_c
+
+        L_flux = 0
+        # Inlet terminals
+        for j, m in enumerate(inlet_marks):
+            if j >= len(idx_in):
+                continue
+            if len(self.u_inlet) == 0:
+                U = np.zeros(mesh.geometry.dim, dtype=float)
+            else:
+                U = np.asarray(self.u_inlet[idx_in[j]], dtype=float).reshape(mesh.geometry.dim,)
+            Uc = fem.Constant(mesh, dfx.default_scalar_type(U))
+            L_flux += ufl.dot(Uc, n) * v * ds(int(m))
+
+        # Outlet terminals
+        for j, m in enumerate(outlet_marks):
+            if j >= len(idx_out):
+                continue
+            if len(self.u_outlet) == 0:
+                U = np.zeros(mesh.geometry.dim, dtype=float)
+            else:
+                U = np.asarray(self.u_outlet[idx_out[j]], dtype=float).reshape(mesh.geometry.dim,)
+            Uc = fem.Constant(mesh, dfx.default_scalar_type(U))
+            L_flux += ufl.dot(Uc, n) * v * ds(int(m))
+
+        return L_flux
+
     # ========================================================
     # Step B: Build q_src density approximation for Darcy
     # ========================================================
     def _build_q_src(self, W):
-        mesh = self.mesh
-        gdim = mesh.geometry.dim
-
+        """Return a zero volumetric source field (terminal flows are now imposed facet-wise)."""
         q_src = fem.Function(W)
         q_src.x.array[:] = 0.0
-
-        # global average cell volume
-        tdim = mesh.topology.dim
-        ncells = mesh.topology.index_map(tdim).size_local
-        one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
-        vol_form = fem.form(one * ufl.dx)
-        total_vol = fem.assemble_scalar(vol_form)
-        cell_vol = total_vol / max(ncells, 1)
-
-        # dof coords
-        dof_coords = W.tabulate_dof_coordinates()
-        tree = cKDTree(dof_coords)
-
-        def add_terminals(xpts, flows, sign):
-            if len(xpts) == 0:
-                return
-            _, dofs = tree.query(xpts)
-            rho = sign * flows / cell_vol
-
-            for d, r in zip(dofs, rho):
-                q_src.x.array[d] += r
-
-        # arterial (source, +)
-        add_terminals(self.x_inlet,  self.q_inlet,  +1.0)
-        # venous   (sink, -)
-        add_terminals(self.x_outlet, self.q_outlet, +1.0)
-
+        q_src.x.scatter_forward()
         return q_src
 
 
@@ -658,39 +759,71 @@ class PerfusionSolver:
         mesh = self.mesh
         gdim = mesh.geometry.dim
 
-        # ----- sample pressure (in current Darcy terminal order) -----
-        Wp = p_h.function_space
-        p_dof_coords = Wp.tabulate_dof_coordinates()
-        tree_p = cKDTree(p_dof_coords)
 
-        def sample_pressure(pts):
-            if len(pts) == 0:
+        # -------------------------------------------------------------
+        # Facet-wise sampling at terminal markers (preferred)
+        # -------------------------------------------------------------
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+        one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
+
+        inlet_marks  = getattr(self, "inlet_terminal_markers",  np.array([], dtype=int))
+        outlet_marks = getattr(self, "outlet_terminal_markers", np.array([], dtype=int))
+
+        def facet_average_scalar(f):
+            if len(f) == 0:
                 return np.zeros(0)
-            _, nn = tree_p.query(pts)
-            nn = nn.astype(int)
-            return p_h.x.array[nn]
+            out = []
+            for m in f:
+                A = fem.assemble_scalar(fem.form(one * ds(int(m))))
+                if A == 0:
+                    out.append(0.0)
+                else:
+                    out.append(float(fem.assemble_scalar(fem.form(p_h * ds(int(m))))) / float(A))
+            return np.array(out, dtype=float)
 
-        p_inlet_raw  = sample_pressure(self.x_inlet)
-        p_outlet_raw = sample_pressure(self.x_outlet)
-
-        # ----- sample velocity (still in Darcy terminal order) -----
-        V = u_h.function_space
-        u_dof_coords = V.tabulate_dof_coordinates()
-        tree_u = cKDTree(u_dof_coords)
-        u_arr = u_h.x.array.reshape((-1, gdim))
-
-        def sample_velocity(pts):
-            if len(pts) == 0:
+        def facet_average_vector(f):
+            if len(f) == 0:
                 return np.zeros((0, gdim))
-            _, nn = tree_u.query(pts)
-            nn = nn.astype(int)
-            return u_arr[nn, :]
+            out = []
+            for m in f:
+                A = fem.assemble_scalar(fem.form(one * ds(int(m))))
+                if A == 0:
+                    out.append(np.zeros(gdim))
+                else:
+                    # assemble each component
+                    comps = []
+                    for k in range(gdim):
+                        comps.append(float(fem.assemble_scalar(fem.form(u_h[k] * ds(int(m))))) / float(A))
+                    out.append(np.array(comps))
+            return np.vstack(out) if len(out) else np.zeros((0, gdim))
 
-        u_inlet_raw  = sample_velocity(self.x_inlet)
-        u_outlet_raw = sample_velocity(self.x_outlet)
+        def facet_flux(f):
+            if len(f) == 0:
+                return np.zeros(0)
+            out = []
+            for m in f:
+                out.append(float(fem.assemble_scalar(fem.form(ufl.dot(u_h, ufl.FacetNormal(mesh)) * ds(int(m))))))
+            return np.array(out, dtype=float)
 
+        # These replace point-wise pressure/velocity/flow samples at terminals
+        p_inlet_raw  = facet_average_scalar(inlet_marks)
+        p_outlet_raw = facet_average_scalar(outlet_marks)
+
+        u_inlet_raw  = facet_average_vector(inlet_marks)
+        u_outlet_raw = facet_average_vector(outlet_marks)
+
+        q_inlet_raw  = facet_flux(inlet_marks)
+        q_outlet_raw = facet_flux(outlet_marks)
+
+        # Representative coords: marker centroids (computed earlier in _build_terminal_flux_form)
+        coords_in = getattr(self, "inlet_terminal_centroids",  np.zeros((len(inlet_marks), 3)))
+        coords_out = getattr(self, "outlet_terminal_centroids", np.zeros((len(outlet_marks), 3)))
+
+        # Keep div(u) and cell_volume outputs for backward compatibility
+        # (computed using previous point-sampling approach)
+        # (point-sampling code removed: now using facet-wise sampling above)
         # ----- q = cell_vol * div(u) at interface points (Darcy order) -----
-        f_h, q_inlet_raw, q_outlet_raw, divu_inlet_raw, divu_outlet_raw, cell_vol = \
+        f_h, q_inlet_divu_raw, q_outlet_divu_raw, divu_inlet_raw, divu_outlet_raw, cell_vol = \
             self._compute_q_from_div_u(u_h)
 
         # Optional global checks
@@ -708,9 +841,9 @@ class PerfusionSolver:
         idx_in = idx_out = None
 
         if self.branch_coords_in is not None and len(self.branch_coords_in) > 0:
-            idx_in = self._build_reordering_indices(self.x_inlet, self.branch_coords_in)
+            idx_in = self._build_reordering_indices(coords_in, self.branch_coords_in)
         if self.branch_coords_out is not None and len(self.branch_coords_out) > 0:
-            idx_out = self._build_reordering_indices(self.x_outlet, self.branch_coords_out)
+            idx_out = self._build_reordering_indices(coords_out, self.branch_coords_out)
 
         if idx_in is not None:
             p_inlet   = p_inlet_raw[idx_in]
@@ -724,7 +857,7 @@ class PerfusionSolver:
             u_inlet   = u_inlet_raw
             q_inlet   = q_inlet_raw
             divu_in   = divu_inlet_raw
-            coords_in = self.x_inlet
+            coords_in = coords_in
             ids_in    = None
 
         if idx_out is not None:
@@ -739,7 +872,7 @@ class PerfusionSolver:
             u_outlet   = u_outlet_raw
             q_outlet   = q_outlet_raw
             divu_out   = divu_outlet_raw
-            coords_out = self.x_outlet
+            coords_out = coords_out
             ids_out    = None
 
         # Means (in the final, reordered indexing)
@@ -979,9 +1112,9 @@ class PerfusionSolver:
         # ---------------------------
         # K(x)
         # ---------------------------
-        K_base = 5e-8  # bulk gel permeability
-        K_wall = 5e-8    # higher permeability near wall
-        K_high = 1.0e-3    # high-K blobs (e.g. organoids)
+        K_base = 1e-7  # bulk gel permeability
+        K_wall = 1e-7    # higher permeability near wall
+        K_high = 1.0e-8    # high-K blobs (e.g. organoids)
         d_inner = 0.01     # 2% of domain-size thickness of full high-K
         d_outer = 0.025    # smooth transition back to K_base by 5%
         r = 0.1
@@ -991,8 +1124,8 @@ class PerfusionSolver:
             [0, -0.300,  0.4359],
             [0, -0.900, 0.4359],
         ], dtype=np.float64)
-        INLET_MARK = 1
-        OUTLET_MARK = 2
+        INLET_MARK = getattr(self, "arterial_concave_marker", 32)
+        OUTLET_MARK = getattr(self, "venous_concave_marker", 31)
 
         K_wall_blobs = self.make_K_near_wall_DG0(
             mesh,
@@ -1047,7 +1180,7 @@ class PerfusionSolver:
         # if mesh.comm.rank == 0:
         #     print("q_src  min/max:",  q_src.x.array.min(),  q_src.x.array.max())
 
-        L = q_src * v * ufl.dx
+        L = q_src * v * ufl.dx + self._build_terminal_flux_form(v)
         # Dirichlet BCs on concave inlet/outlet surfaces
         bcs = self._build_wall_dirichlet_bcs(W)
 
@@ -1161,8 +1294,8 @@ class PerfusionSolver:
         n  = ufl.FacetNormal(mesh)
         ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
 
-        INLET_MARK  = 1  # arterial side
-        OUTLET_MARK = 2  # venous side
+        INLET_MARK  = getattr(self, "arterial_concave_marker", 31)  # arterial side (concave)
+        OUTLET_MARK = getattr(self, "venous_concave_marker", 32)  # venous side (concave)
 
         # Flux = ∫_Γ (u · n) dS
         Q_art_leak = fem.assemble_scalar(
@@ -1248,27 +1381,27 @@ class Projector:
 # RUN
 # ===================================================================
 if __name__ == "__main__":
-    bioreactor_domain = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/bioreactor.xdmf"
-    mesh_inlet_file   = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/tagged_branches_inlet.bp"
-    mesh_outlet_file  = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/tagged_branches_outlet.bp"
-    pres_inlet_file   = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/pressure_checkpoint_inlet.bp"
-    pres_outlet_file  = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/pressure_checkpoint_outlet.bp"
-    flow_inlet_file   = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/flow_checkpoint_inlet.bp"
-    flow_outlet_file  = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/flow_checkpoint_outlet.bp"
-    facet_file       = "/Users/rakshakonanur/Documents/Research/two-channel/src/coupled_without_wall/run_10/organoid_4/geometry/bioreactor_facets.xdmf"
+    bioreactor_domain = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/bioreactor_well1.xdmf"
+    mesh_inlet_file   = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/tagged_branches_inlet.bp"
+    mesh_outlet_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/tagged_branches_outlet.bp"
+    pres_inlet_file   = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/pressure_checkpoint_inlet.bp"
+    pres_outlet_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/pressure_checkpoint_outlet.bp"
+    velocity_inlet_file   = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/velocity_checkpoint_inlet.bp"
+    velocity_outlet_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/velocity_checkpoint_outlet.bp"
+    facet_file       = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/mesh_tags_well1.xdmf"
 
     # user-chosen coords near arterial / venous channel inlet/outlet
-    inlet_coord  = np.array([-0.175, -0.9, .55])  # fill with your values
-    outlet_coord = np.array([0.175, -0.9, .55])
+    inlet_coord  = np.array([-0.175, 0.9, .55])  # fill with your values
+    outlet_coord = np.array([0.175, 0.9, .55])
 
-    branching_in_file  = "/path/to/branchingData_0.csv"
-    branching_out_file = "/path/to/branchingData_1.csv"
+    branching_in_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_0.csv"
+    branching_out_file = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_1.csv"
 
     solver = PerfusionSolver(
         bioreactor_domain, facet_file,
         mesh_inlet_file, mesh_outlet_file,
         pres_inlet_file, pres_outlet_file,
-        flow_inlet_file, flow_outlet_file,
+        velocity_inlet_file, velocity_outlet_file,
         inlet_coord, outlet_coord,
         branching_in_file=branching_in_file,
         branching_out_file=branching_out_file,
