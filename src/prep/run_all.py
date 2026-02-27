@@ -108,14 +108,14 @@ def run_one(
     mesh_outlet_file  = str(geom_dir / "tagged_branches_outlet.bp")
     pres_inlet_file   = str(geom_dir / "pressure_checkpoint_inlet.bp")
     pres_outlet_file  = str(geom_dir / "pressure_checkpoint_outlet.bp")
-    flow_inlet_file   = str(geom_dir / "flow_checkpoint_inlet.bp")
-    flow_outlet_file  = str(geom_dir / "flow_checkpoint_outlet.bp")
+    velocity_inlet_file   = str(geom_dir / "velocity_checkpoint_inlet.bp")
+    velocity_outlet_file  = str(geom_dir / "velocity_checkpoint_outlet.bp")
 
     solver = PerfusionSolver(
         bioreactor_domain, facet_file,
         mesh_inlet_file, mesh_outlet_file,
         pres_inlet_file, pres_outlet_file,
-        flow_inlet_file, flow_outlet_file,
+        velocity_inlet_file, velocity_outlet_file,
         coords_inlet, coords_outlet,
         branching_in, branching_out
     )
