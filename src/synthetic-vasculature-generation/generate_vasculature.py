@@ -102,14 +102,14 @@ class Generate:
         num_branches = self.parameters['num_branches']
         outdir = self.parameters['outdir']
         folder = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep
-        cerm_forest = Forest(n_networks=number_of_networks, n_trees_per_network=trees_per_network,physical_clearance=2.5e-2) 
+        cerm_forest = Forest(n_networks=number_of_networks, n_trees_per_network=trees_per_network,physical_clearance=4e-2) 
         cerm_forest.set_domain(cermSurf)
-        params_inlet = TreeParameters(terminal_pressure=0.05*1333.22,
-                        root_pressure=0.1*1333.22,
-                        terminal_flow=5e-7/num_branches)
-        params_outlet = TreeParameters(terminal_pressure=0.0*1333.22,
+        params_inlet = TreeParameters(terminal_pressure=0.025*1333.22,
                         root_pressure=0.05*1333.22,
-                        terminal_flow=5e-7/num_branches)
+                        terminal_flow=2e-7/num_branches)
+        params_outlet = TreeParameters(terminal_pressure=0.0*1333.22,
+                        root_pressure=0.025*1333.22,
+                        terminal_flow=2e-7/num_branches)
         # for i in range(number_of_networks):
         #     for j in range(trees_per_network[i]):
         #         cerm_forest.networks[i][j].parameters = params
