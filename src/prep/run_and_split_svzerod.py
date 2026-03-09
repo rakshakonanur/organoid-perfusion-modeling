@@ -426,6 +426,7 @@ def copy_and_plot_organoid_files(
     written_files: List[Path],
     organoid_root: Path,
     plot_script: str = "plot_0d_results_to_3d.py",
+    run_plot: bool = True,
     debug: bool = False,
 ) -> None:
     """
@@ -434,7 +435,7 @@ def copy_and_plot_organoid_files(
       <organoid_root>/organoid_X/0D_Input_Files/outlet/
     Then run plot_script once in each destination directory.
     """
-    ran_dirs: Set[Path] = set()
+    target_dirs: Set[Path] = set()
 
     for p in written_files:
         m = re.match(r"^organoid_(\d+)_(inlet|outlet)\.csv$", p.name)
@@ -444,9 +445,20 @@ def copy_and_plot_organoid_files(
         idx = m.group(1)
         side = m.group(2).lower()
 
-        dest_dir = organoid_root / f"organoid_{idx}" / "0D_Input_Files" / side
-        if not dest_dir.exists():
-            raise SystemExit(f"Destination directory does not exist: {dest_dir}")
+        candidates = [
+            organoid_root / f"organoid_{idx}" / "0D_Input_Files" / side,
+            organoid_root / f"organoid-{idx}" / "0D_Input_Files" / side,
+        ]
+        dest_dir = None
+        for cand in candidates:
+            if cand.exists():
+                dest_dir = cand
+                break
+        if dest_dir is None:
+            raise SystemExit(
+                "Destination directory does not exist. Tried:\n"
+                + "\n".join(str(c) for c in candidates)
+            )
 
         dest_file = dest_dir / "output.csv"
         shutil.copy2(p, dest_file)
@@ -454,19 +466,20 @@ def copy_and_plot_organoid_files(
         if debug:
             print(f"[debug] Copied {p} -> {dest_file}")
 
-        if dest_dir not in ran_dirs:
-            # Run plot script in that directory
-            # Prefer python3; fall back to python if needed
-            cmd = ["python3", plot_script]
-            try:
-                subprocess.run(cmd, cwd=str(dest_dir), check=True)
-            except FileNotFoundError:
-                cmd = ["python", plot_script]
-                subprocess.run(cmd, cwd=str(dest_dir), check=True)
+        target_dirs.add(dest_dir)
 
-            ran_dirs.add(dest_dir)
-            if debug:
-                print(f"[debug] Ran {plot_script} in {dest_dir}")
+    # Run plots only after all output.csv files are copied.
+    if not run_plot:
+        return
+    for dest_dir in sorted(target_dirs):
+        cmd = ["python3", plot_script]
+        try:
+            subprocess.run(cmd, cwd=str(dest_dir), check=True)
+        except FileNotFoundError:
+            cmd = ["python", plot_script]
+            subprocess.run(cmd, cwd=str(dest_dir), check=True)
+        if debug:
+            print(f"[debug] Ran {plot_script} in {dest_dir}")
 
 
 # -----------------------------
@@ -481,8 +494,8 @@ def run_solver(exe: str, input_file: Path, output_file: Path, cwd: Path) -> None
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Run svzerodsolver and split the output CSV by group (channel/organoids).")
     ap.add_argument("--exe", default="svzerodsolver", help="Executable name or path (default: svzerodsolver)")
-    ap.add_argument("--input", type=str, default="combined.in", help="Input .in/.json file for svzerodsolver")
-    ap.add_argument("--outdir", type=str, default="./", help="Output directory (cwd for solver, and where split/ is created)")
+    ap.add_argument("--input", type=str, default="./prepped/trial-3/combined.in", help="Input .in/.json file for svzerodsolver")
+    ap.add_argument("--outdir", type=str, default="./prepped/trial-3", help="Output directory (cwd for solver, and where split/ is created)")
     ap.add_argument("--output", type=str, default="output.csv", help="Solver output filename (default: output.csv)")
     ap.add_argument("--no-run", action="store_true", help="Do not run solver; only split the existing output CSV")
     ap.add_argument("--debug", action="store_true", help="Print grouping/debug info while splitting")
@@ -491,7 +504,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--organoid-root",
         type=str,
-        default="/Users/rakshakonanur/Documents/Research/two-channel/input/trial-10",
+        default="",
         help="If provided, copy organoid split CSVs to <organoid_root>/organoid_X/0D_Input_Files/{inlet,outlet} and run plot script there.",
     )
     ap.add_argument(
@@ -500,7 +513,11 @@ def parse_args() -> argparse.Namespace:
         default="plot_0d_results_to_3d.py",
         help="Plot script name to run inside each inlet/outlet directory (default: plot_0d_results_to_3d.py)",
     )
-
+    ap.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Copy output.csv into organoid inlet/outlet folders but do not run plot script.",
+    )
     return ap.parse_args()
 
 
@@ -526,14 +543,14 @@ def main() -> None:
     for p in written:
         print(f"  - {p}")
 
-    if args.organoid_root:
-        organoid_root = Path(args.organoid_root).resolve()
-        copy_and_plot_organoid_files(
-            written_files=written,
-            organoid_root=organoid_root,
-            plot_script=args.plot_script,
-            debug=getattr(args, "debug", False),
-        )
+    organoid_root = Path(args.organoid_root).resolve() if args.organoid_root else outdir
+    copy_and_plot_organoid_files(
+        written_files=written,
+        organoid_root=organoid_root,
+        plot_script=args.plot_script,
+        run_plot=not args.no_plot,
+        debug=getattr(args, "debug", False),
+    )
 
 
 if __name__ == "__main__":
