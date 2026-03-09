@@ -63,6 +63,84 @@ logger.setLevel(logging.INFO)
 
 current_dir = Path("/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry")
 
+
+def _copy_artifact(src: Path, dst: Path) -> None:
+    if dst.exists():
+        send2trash(dst)
+    if src.is_dir():
+        shutil.copytree(src, dst)
+    else:
+        shutil.copy2(src, dst)
+
+
+def _write_well_suffixed_bp_outputs(n_wells: int) -> None:
+    """
+    Duplicate core BP outputs with a `_well{i}` suffix so run_all.py can copy
+    well-specific files to organoid_i folders.
+    """
+    if n_wells < 1:
+        return
+
+    base_names = [
+        "tagged_branches_inlet.bp",
+        "tagged_branches_outlet.bp",
+        "pressure_checkpoint_inlet.bp",
+        "pressure_checkpoint_outlet.bp",
+        "velocity_checkpoint_inlet.bp",
+        "velocity_checkpoint_outlet.bp",
+    ]
+    optional_names = [
+        "flow_checkpoint_inlet.bp",
+        "flow_checkpoint_outlet.bp",
+        "area_checkpoint_inlet.bp",
+        "area_checkpoint_outlet.bp",
+    ]
+
+    for i in range(1, n_wells + 1):
+        suffix = f"_well{i}.bp"
+        for name in base_names + optional_names:
+            src = current_dir / name
+            if not src.exists():
+                if name in base_names:
+                    raise FileNotFoundError(f"Missing required BP output for well suffixing: {src}")
+                continue
+            dst = current_dir / name.replace(".bp", suffix)
+            _copy_artifact(src, dst)
+
+
+def _infer_well_count(default_n: int, *series: Optional[Sequence[str]]) -> int:
+    lengths = [len(s) for s in series if s is not None]
+    if not lengths:
+        return default_n
+    uniq = sorted(set(lengths))
+    if len(uniq) != 1:
+        raise ValueError(f"Inconsistent per-well input lengths: {uniq}")
+    return int(uniq[0])
+
+
+def _organoid_series_from_base(base: str, n_wells: int, require_all: bool = False) -> List[str]:
+    """
+    Expand .../organoid_1/... to .../organoid_i/... when available.
+    If `require_all` is True, missing organoid_i paths raise.
+    """
+    base_p = Path(base)
+    base_s = str(base_p)
+    out: List[str] = []
+    has_organoid_token = "organoid_1" in base_s
+
+    for i in range(1, n_wells + 1):
+        if has_organoid_token:
+            cand = Path(base_s.replace("organoid_1", f"organoid_{i}"))
+        else:
+            cand = base_p
+        if cand.exists():
+            out.append(str(cand))
+        else:
+            if require_all:
+                raise FileNotFoundError(f"Missing per-well path for organoid_{i}: {cand}")
+            out.append(str(base_p))
+    return out
+
 # ---------------------------------------------------------------------
 # 1D pipeline (kept from your original script)
 # ---------------------------------------------------------------------
@@ -573,7 +651,7 @@ def refine_long_edges(msh, hmax: float, nsteps: int = 1):
 def read_3d_mesh_from_vtu(vtu_file: str, xdmf_name: str,
                           n_refine: int = 0,
                           refine_hmax: float = 0.01,
-                          refine_steps: int = 1) -> dfx.mesh.Mesh:
+                          refine_steps: int = 0) -> dfx.mesh.Mesh:
     vtu_to_xdmf(vtu_file, xdmf_name)
     with XDMFFile(MPI.COMM_WORLD, current_dir / xdmf_name, "r") as xdmf:
         mesh = xdmf.read_mesh(name="Grid")
@@ -974,11 +1052,7 @@ def build_facet_tags_for_mesh(
         facet_to_marker[int(f)] = int(v)
 
     # 3) terminal faces (overwrite everything)
-    # Remove coords_inlet from inlet terminals
-    inlet_terminal_pts, _, _ = remove_seed_points(inlet_terminal_pts, coords_inlet, tol=1e-6)
-
-    # Remove coords_outlet from outlet terminals
-    outlet_terminal_pts, _, _ = remove_seed_points(outlet_terminal_pts, coords_outlet, tol=1e-6)
+    # Keep all inlet/outlet terminal points; do not drop seed-corresponding terminals.
     # inlet terminals
     for k, pt in enumerate(np.asarray(inlet_terminal_pts, float)):
         tag = inlet_base_marker + k
@@ -1033,6 +1107,10 @@ class Files:
         branching_data_outlet: str,
         coords_inlet: np.ndarray,
         coords_outlet: np.ndarray,
+        output_1d_inlet_list: Optional[Sequence[str]] = None,
+        output_1d_outlet_list: Optional[Sequence[str]] = None,
+        branching_data_inlet_list: Optional[Sequence[str]] = None,
+        branching_data_outlet_list: Optional[Sequence[str]] = None,
         # 1D filenames
         geo_file_inlet: str = "branched_network_inlet.geo",
         msh_file_inlet: str = "branched_network_inlet.msh",
@@ -1045,6 +1123,7 @@ class Files:
         ftet_max_threads: Optional[int] = None,
         multiwell: bool = True,
         same_tissue_for_all_wells: bool = True,
+        same_meshtags_for_all_wells: bool = False,
         well_spacing_y: float = 0.6,
         # tagging params
         wall_marker: int = 1,
@@ -1060,43 +1139,146 @@ class Files:
         self.coords_inlet = np.asarray(coords_inlet, float)
         self.coords_outlet = np.asarray(coords_outlet, float)
 
-        # --------------------------
-        # 1) Build 1D, get terminal points
-        # --------------------------
-        inlet_terminal_pts = import_branched_mesh(
-            branching_data_file=branching_data_inlet,
-            output_1d=output_1d_inlet,
-            geo_file=geo_file_inlet,
-            msh_file=msh_file_inlet,
-            xdmf_file=xdmf_file_inlet,
-            fileprefix="_inlet",
-            coords=self.coords_inlet,
+        default_wells = 4 if multiwell else 1
+        if tissue_vtu_list is not None:
+            default_wells = len(list(tissue_vtu_list))
+        n_wells = _infer_well_count(
+            default_wells,
+            output_1d_inlet_list,
+            output_1d_outlet_list,
+            branching_data_inlet_list,
+            branching_data_outlet_list,
         )
-        outlet_terminal_pts = import_branched_mesh(
-            branching_data_file=branching_data_outlet,
-            output_1d=output_1d_outlet,
-            geo_file=geo_file_outlet,
-            msh_file=msh_file_outlet,
-            xdmf_file=xdmf_file_outlet,
-            fileprefix="_outlet",
-            coords=self.coords_outlet,
-        )
+
+        if branching_data_inlet_list is None:
+            branching_in_list = _organoid_series_from_base(branching_data_inlet, n_wells, require_all=(n_wells > 1))
+        else:
+            branching_in_list = [str(p) for p in branching_data_inlet_list]
+        if branching_data_outlet_list is None:
+            branching_out_list = _organoid_series_from_base(branching_data_outlet, n_wells, require_all=(n_wells > 1))
+        else:
+            branching_out_list = [str(p) for p in branching_data_outlet_list]
+
+        if output_1d_inlet_list is None:
+            output_in_list = _organoid_series_from_base(output_1d_inlet, n_wells, require_all=False)
+        else:
+            output_in_list = [str(p) for p in output_1d_inlet_list]
+        if output_1d_outlet_list is None:
+            output_out_list = _organoid_series_from_base(output_1d_outlet, n_wells, require_all=False)
+        else:
+            output_out_list = [str(p) for p in output_1d_outlet_list]
+
+        # If output folders for organoid_i are not present in the provided base
+        # path (common in coupled/_tmp workflows), fall back to per-organoid
+        # source folders adjacent to branchingData_*.csv in trial/prepped dirs.
+        for i in range(n_wells):
+            if not Path(output_in_list[i]).exists():
+                cand = Path(branching_in_list[i]).parent / "0D_Input_Files" / "inlet"
+                if cand.exists():
+                    output_in_list[i] = str(cand)
+            if not Path(output_out_list[i]).exists():
+                cand = Path(branching_out_list[i]).parent / "0D_Input_Files" / "outlet"
+                if cand.exists():
+                    output_out_list[i] = str(cand)
+
+        if not (len(branching_in_list) == len(branching_out_list) == len(output_in_list) == len(output_out_list) == n_wells):
+            raise ValueError("Per-well input lists must all have the same length.")
+
+        def _seed_from_branching_csv(csv_path: str, fallback: np.ndarray) -> np.ndarray:
+            cols_candidates = [
+                ("proximalCoordsX", "proximalCoordsY", "proximalCoordsZ"),
+                ("x_prox", "y_prox", "z_prox"),
+                ("x0", "y0", "z0"),
+            ]
+            try:
+                df_seed = pd.read_csv(csv_path)
+                for cols in cols_candidates:
+                    if all(c in df_seed.columns for c in cols) and len(df_seed) > 0:
+                        return np.asarray(
+                            [
+                                float(df_seed.iloc[0][cols[0]]),
+                                float(df_seed.iloc[0][cols[1]]),
+                                float(df_seed.iloc[0][cols[2]]),
+                            ],
+                            dtype=float,
+                        )
+            except Exception:
+                pass
+            return np.asarray(fallback, dtype=float).copy()
+
+        # --------------------------
+        # 1) Build 1D per well using each organoid's already-translated inputs
+        # --------------------------
+        inlet_terminal_pts_by_well: List[np.ndarray] = []
+        outlet_terminal_pts_by_well: List[np.ndarray] = []
+        coords_inlet_by_well: List[np.ndarray] = []
+        coords_outlet_by_well: List[np.ndarray] = []
+
+        for i in range(1, n_wells + 1):
+            c_in = _seed_from_branching_csv(branching_in_list[i - 1], self.coords_inlet)
+            c_out = _seed_from_branching_csv(branching_out_list[i - 1], self.coords_outlet)
+            coords_inlet_by_well.append(c_in)
+            coords_outlet_by_well.append(c_out)
+
+            if n_wells > 1:
+                suffix_in = f"_inlet_well{i}"
+                suffix_out = f"_outlet_well{i}"
+                geo_in = str(Path(geo_file_inlet).with_name(f"{Path(geo_file_inlet).stem}_well{i}{Path(geo_file_inlet).suffix}"))
+                msh_in = str(Path(msh_file_inlet).with_name(f"{Path(msh_file_inlet).stem}_well{i}{Path(msh_file_inlet).suffix}"))
+                xdmf_in = str(Path(xdmf_file_inlet).with_name(f"{Path(xdmf_file_inlet).stem}_well{i}{Path(xdmf_file_inlet).suffix}"))
+                geo_out = str(Path(geo_file_outlet).with_name(f"{Path(geo_file_outlet).stem}_well{i}{Path(geo_file_outlet).suffix}"))
+                msh_out = str(Path(msh_file_outlet).with_name(f"{Path(msh_file_outlet).stem}_well{i}{Path(msh_file_outlet).suffix}"))
+                xdmf_out = str(Path(xdmf_file_outlet).with_name(f"{Path(xdmf_file_outlet).stem}_well{i}{Path(xdmf_file_outlet).suffix}"))
+            else:
+                suffix_in, suffix_out = "_inlet", "_outlet"
+                geo_in, msh_in, xdmf_in = geo_file_inlet, msh_file_inlet, xdmf_file_inlet
+                geo_out, msh_out, xdmf_out = geo_file_outlet, msh_file_outlet, xdmf_file_outlet
+
+            if not Path(branching_in_list[i - 1]).exists():
+                raise FileNotFoundError(f"Missing branching_data_inlet for well{i}: {branching_in_list[i - 1]}")
+            if not Path(branching_out_list[i - 1]).exists():
+                raise FileNotFoundError(f"Missing branching_data_outlet for well{i}: {branching_out_list[i - 1]}")
+            if not Path(output_in_list[i - 1]).exists():
+                raise FileNotFoundError(f"Missing output_1d_inlet folder for well{i}: {output_in_list[i - 1]}")
+            if not Path(output_out_list[i - 1]).exists():
+                raise FileNotFoundError(f"Missing output_1d_outlet folder for well{i}: {output_out_list[i - 1]}")
+
+            inlet_terminal_pts = import_branched_mesh(
+                branching_data_file=branching_in_list[i - 1],
+                output_1d=output_in_list[i - 1],
+                geo_file=geo_in,
+                msh_file=msh_in,
+                xdmf_file=xdmf_in,
+                fileprefix=suffix_in,
+                coords=c_in,
+            )
+            outlet_terminal_pts = import_branched_mesh(
+                branching_data_file=branching_out_list[i - 1],
+                output_1d=output_out_list[i - 1],
+                geo_file=geo_out,
+                msh_file=msh_out,
+                xdmf_file=xdmf_out,
+                fileprefix=suffix_out,
+                coords=c_out,
+            )
+            inlet_terminal_pts_by_well.append(inlet_terminal_pts)
+            outlet_terminal_pts_by_well.append(outlet_terminal_pts)
 
         # --------------------------
         # 2) Load/duplicate 3D and tag facets
         # --------------------------
         if tissue_vtu_list is not None:
             vtu_list = list(tissue_vtu_list)
-            if len(vtu_list) != 4:
-                raise ValueError("tissue_vtu_list must have 4 VTU files.")
-            for i in range(1, 5):
+            if len(vtu_list) != n_wells:
+                raise ValueError(f"tissue_vtu_list must have {n_wells} VTU files.")
+            for i in range(1, n_wells + 1):
                 mesh_i = read_3d_mesh_from_vtu(vtu_list[i-1], xdmf_name=f"_tmp_bioreactor_well{i}.xdmf")
                 facet_tags_i = build_facet_tags_for_mesh(
                     mesh_i,
-                    inlet_terminal_pts=inlet_terminal_pts,
-                    outlet_terminal_pts=outlet_terminal_pts,
-                    coords_inlet=self.coords_inlet,
-                    coords_outlet=self.coords_outlet,
+                    inlet_terminal_pts=inlet_terminal_pts_by_well[i - 1],
+                    outlet_terminal_pts=outlet_terminal_pts_by_well[i - 1],
+                    coords_inlet=coords_inlet_by_well[i - 1],
+                    coords_outlet=coords_outlet_by_well[i - 1],
                     wall_marker=wall_marker,
                     arterial_concave_marker=arterial_concave_marker,
                     venous_concave_marker=venous_concave_marker,
@@ -1117,10 +1299,10 @@ class Files:
             mesh = read_3d_mesh_from_vtu(tissue_vtu, xdmf_name="_tmp_bioreactor.xdmf")
             facet_tags = build_facet_tags_for_mesh(
                 mesh,
-                inlet_terminal_pts=inlet_terminal_pts,
-                outlet_terminal_pts=outlet_terminal_pts,
-                coords_inlet=self.coords_inlet,
-                coords_outlet=self.coords_outlet,
+                inlet_terminal_pts=inlet_terminal_pts_by_well[0],
+                outlet_terminal_pts=outlet_terminal_pts_by_well[0],
+                coords_inlet=coords_inlet_by_well[0],
+                coords_outlet=coords_outlet_by_well[0],
                 wall_marker=wall_marker,
                 arterial_concave_marker=arterial_concave_marker,
                 venous_concave_marker=venous_concave_marker,
@@ -1152,41 +1334,54 @@ class Files:
         # with XDMFFile(MPI.COMM_WORLD, current_dir / "bioreactor_base.xdmf", "r") as xdmf:
         #     mesh = xdmf.read_mesh(name="Grid")
 
-        # Tag once on the base (well 1) geometry
-        facet_tags = build_facet_tags_for_mesh(
-            mesh,
-            inlet_terminal_pts=inlet_terminal_pts,
-            outlet_terminal_pts=outlet_terminal_pts,
-            coords_inlet=self.coords_inlet,
-            coords_outlet=self.coords_outlet,
-            wall_marker=wall_marker,
-            arterial_concave_marker=arterial_concave_marker,
-            venous_concave_marker=venous_concave_marker,
-            inlet_base_marker=inlet_base_marker,
-            outlet_base_marker=outlet_base_marker,
-            theta_concave_deg=theta_concave_deg,
-            theta_terminal_deg=theta_terminal_deg,
-            plane_tol=plane_tol,
-            outer_tol=outer_tol,
-        )
-
-        # Write well 1
-        write_mesh_and_tags(mesh, facet_tags, "bioreactor_well1.xdmf", "mesh_tags_well1.xdmf")
-
         if same_tissue_for_all_wells:
-            # Translate the same tagged mesh and write remaining wells (no retagging!)
+            # Translate shared VTU and either reuse well1 tags or retag per well.
             X0 = mesh.geometry.x.copy()
-
-            for i in range(2, 5):
+            facet_tags_well1 = build_facet_tags_for_mesh(
+                mesh,
+                inlet_terminal_pts=inlet_terminal_pts_by_well[0],
+                outlet_terminal_pts=outlet_terminal_pts_by_well[0],
+                coords_inlet=coords_inlet_by_well[0],
+                coords_outlet=coords_outlet_by_well[0],
+                wall_marker=wall_marker,
+                arterial_concave_marker=arterial_concave_marker,
+                venous_concave_marker=venous_concave_marker,
+                inlet_base_marker=inlet_base_marker,
+                outlet_base_marker=outlet_base_marker,
+                theta_concave_deg=theta_concave_deg,
+                theta_terminal_deg=theta_terminal_deg,
+                plane_tol=plane_tol,
+                outer_tol=outer_tol,
+            )
+            for i in range(1, n_wells + 1):
                 dy = well_spacing_y * (i - 1)
                 mesh.geometry.x[:] = X0 + np.array([0.0, dy, 0.0], dtype=X0.dtype)
+                if same_meshtags_for_all_wells:
+                    facet_tags = facet_tags_well1
+                else:
+                    facet_tags = build_facet_tags_for_mesh(
+                        mesh,
+                        inlet_terminal_pts=inlet_terminal_pts_by_well[i - 1],
+                        outlet_terminal_pts=outlet_terminal_pts_by_well[i - 1],
+                        coords_inlet=coords_inlet_by_well[i - 1],
+                        coords_outlet=coords_outlet_by_well[i - 1],
+                        wall_marker=wall_marker,
+                        arterial_concave_marker=arterial_concave_marker,
+                        venous_concave_marker=venous_concave_marker,
+                        inlet_base_marker=inlet_base_marker,
+                        outlet_base_marker=outlet_base_marker,
+                        theta_concave_deg=theta_concave_deg,
+                        theta_terminal_deg=theta_terminal_deg,
+                        plane_tol=plane_tol,
+                        outer_tol=outer_tol,
+                    )
                 write_mesh_and_tags(mesh, facet_tags, f"bioreactor_well{i}.xdmf", f"mesh_tags_well{i}.xdmf")
 
             # Restore base coords (optional)
             mesh.geometry.x[:] = X0
         else:
             # If you *aren't* using the same tissue for all wells, you need per-well VTUs (tissue_vtu_list)
-            raise ValueError("same_tissue_for_all_wells=False requires tissue_vtu_list with 4 meshes.")
+            raise ValueError(f"same_tissue_for_all_wells=False requires tissue_vtu_list with {n_wells} meshes.")
 
         return
 
