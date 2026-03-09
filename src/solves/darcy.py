@@ -1,7 +1,8 @@
+import argparse
+import hashlib
 import ufl
 import numpy   as np
 import dolfinx as dfx
-import matplotlib.pyplot as plt
 import json
 import pandas  as pd
 
@@ -28,9 +29,9 @@ def import_3d_mesh(xdmf_file: str):
         tags = xdmf.read_meshtags(m, name="mesh_tags")
     return m, tags
 
-def import_mesh(bp_file: str):
-    mesh = adios4dolfinx.read_mesh(filename = Path(bp_file), comm=MPI.COMM_WORLD)
-    tags = adios4dolfinx.read_meshtags(filename = Path(bp_file), mesh=mesh, meshtag_name="mesh_tags")
+def import_mesh(bp_file: str, comm=MPI.COMM_WORLD):
+    mesh = adios4dolfinx.read_mesh(filename=Path(bp_file), comm=comm)
+    tags = adios4dolfinx.read_meshtags(filename=Path(bp_file), mesh=mesh, meshtag_name="mesh_tags")
     return mesh, tags
 
 def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
@@ -41,22 +42,62 @@ def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
     facet_file: XDMF with boundary facet tags (e.g. mesh_tags_well1.xdmf),
                 with marker 1 = inlet surface, 2 = outlet surface.
     """
-    with io.XDMFFile(MPI.COMM_WORLD, mesh_file, "r") as xdmf:
-        m = xdmf.read_mesh()
+    comm = MPI.COMM_WORLD
 
-    with io.XDMFFile(MPI.COMM_WORLD, facet_file, "r") as xdmf:
-        m.topology.create_connectivity(m.topology.dim,     m.topology.dim-1)
-        m.topology.create_connectivity(m.topology.dim-1, m.topology.dim)
-        m.topology.create_connectivity(m.topology.dim-1,   0)
-        facet_tags = xdmf.read_meshtags(m, name="mesh_tags")  # adjust name if needed
+    def _read_xdmf(local_comm):
+        with io.XDMFFile(local_comm, mesh_file, "r") as xdmf:
+            try:
+                # mesh.py writes the volume as Grid by default.
+                m_loc = xdmf.read_mesh(name="Grid")
+            except RuntimeError:
+                # Fallback for files written with a different default grid name.
+                m_loc = xdmf.read_mesh()
 
+        with io.XDMFFile(local_comm, facet_file, "r") as xdmf:
+            m_loc.topology.create_connectivity(m_loc.topology.dim, m_loc.topology.dim - 1)
+            m_loc.topology.create_connectivity(m_loc.topology.dim - 1, m_loc.topology.dim)
+            m_loc.topology.create_connectivity(m_loc.topology.dim - 1, 0)
+            facet_tags_loc = xdmf.read_meshtags(m_loc, name="mesh_tags")
+        return m_loc, facet_tags_loc
 
+    if comm.size == 1:
+        return _read_xdmf(comm)
+
+    # For MPI runs, avoid direct parallel XDMF/HDF5 reads by caching to ADIOS BP.
+    mesh_path = Path(mesh_file).expanduser().resolve()
+    facet_path = Path(facet_file).expanduser().resolve()
+    key = f"{mesh_path}|{facet_path}|{mesh_path.stat().st_mtime_ns}|{facet_path.stat().st_mtime_ns}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    cache_bp = mesh_path.parent / f".darcy_mesh_facets_cache_{digest}.bp"
+
+    if comm.rank == 0 and not cache_bp.exists():
+        print(f"[mesh] Building BP cache for 3D mesh/facets: {cache_bp}", flush=True)
+        m0, tags0 = _read_xdmf(MPI.COMM_SELF)
+        adios4dolfinx.write_mesh(filename=cache_bp, mesh=m0)
+        adios4dolfinx.write_meshtags(filename=cache_bp, mesh=m0, meshtags=tags0, meshtag_name="mesh_tags")
+    comm.barrier()
+
+    if comm.rank == 0:
+        print(f"[mesh] Reading 3D mesh from BP cache: {cache_bp}", flush=True)
+    m = adios4dolfinx.read_mesh(filename=cache_bp, comm=comm)
+    if comm.rank == 0:
+        print("[mesh] BP mesh read complete", flush=True)
+
+    # Read facet tags from XDMF on the distributed mesh to avoid potential
+    # multi-rank ADIOS meshtag read hangs.
+    with io.XDMFFile(comm, facet_file, "r") as xdmf:
+        m.topology.create_connectivity(m.topology.dim, m.topology.dim - 1)
+        m.topology.create_connectivity(m.topology.dim - 1, m.topology.dim)
+        m.topology.create_connectivity(m.topology.dim - 1, 0)
+        facet_tags = xdmf.read_meshtags(m, name="mesh_tags")
+    if comm.rank == 0:
+        print("[mesh] XDMF facet tags read complete", flush=True)
     return m, facet_tags
 # -----------------------------------------------------
 # Pressure ADIOS importer
 # -----------------------------------------------------
-def import_pressure_data(mesh_obj, bp_file: str):
-    ts = adios4dolfinx.read_timestamps(bp_file, comm=MPI.COMM_WORLD,
+def import_pressure_data(mesh_obj, bp_file: str, comm=MPI.COMM_WORLD):
+    ts = adios4dolfinx.read_timestamps(bp_file, comm=comm,
                                        function_name="f")
     print("Timestamps found for pressure data:", ts)
     P1 = fem.functionspace(mesh_obj, element("Lagrange", mesh_obj.basix_cell(), 1))
@@ -70,21 +111,34 @@ def import_pressure_data(mesh_obj, bp_file: str):
     return out   # list of Functions
 
 # -----------------------------------------------------
-# Velocity ADIOS importer (vector P1)
+# Flow ADIOS importer (scalar P1)
 # -----------------------------------------------------
-def import_velocity_data(mesh_obj, bp_file: str):
-    ts = adios4dolfinx.read_timestamps(bp_file, comm=MPI.COMM_WORLD,
+def import_flow_data(mesh_obj, bp_file: str, comm=MPI.COMM_WORLD):
+    ts = adios4dolfinx.read_timestamps(bp_file, comm=comm,
                                        function_name="f")
-    print("Timestamps found for velocity data:", ts)
-    P1_vec = element("Lagrange", mesh_obj.basix_cell(), 1, shape=(mesh_obj.geometry.dim,))
-    V = fem.functionspace(mesh_obj, P1_vec)
-    u_src = fem.Function(V)
+    print("Timestamps found for flow data:", ts)
+    P1 = fem.functionspace(mesh_obj, element("Lagrange", mesh_obj.basix_cell(), 1))
+    q_src = fem.Function(P1)
     out = []
     for t in ts:
-        adios4dolfinx.read_function(bp_file, u_src,
+        adios4dolfinx.read_function(bp_file, q_src,
                                     name="f", time=t)
-        u_src.x.scatter_forward()
-        out.append(u_src.copy())
+        q_src.x.scatter_forward()
+        out.append(q_src.copy())
+    return out   # list of Functions
+
+def import_area_data(mesh_obj, bp_file: str, comm=MPI.COMM_WORLD):
+    ts = adios4dolfinx.read_timestamps(bp_file, comm=comm,
+                                       function_name="f")
+    print("Timestamps found for area data:", ts)
+    P1 = fem.functionspace(mesh_obj, element("Lagrange", mesh_obj.basix_cell(), 1))
+    a_src = fem.Function(P1)
+    out = []
+    for t in ts:
+        adios4dolfinx.read_function(bp_file, a_src,
+                                    name="f", time=t)
+        a_src.x.scatter_forward()
+        out.append(a_src.copy())
     return out   # list of Functions
 
 
@@ -97,14 +151,27 @@ class PerfusionSolver:
     def __init__(self, bioreactor_domain, facet_file,
                  mesh_inlet_file, mesh_outlet_file,
                  pres_inlet_file, pres_outlet_file,
-                 velocity_inlet_file, velocity_outlet_file,
+                 flow_inlet_file, flow_outlet_file,
                  inlet_coord, outlet_coord,
+                 area_inlet_file=None, area_outlet_file=None,
+                 concave_bc_mode: str = "dirichlet",
+                 lp_arterial: float = 0.0,
+                 lp_venous: float = 0.0,
+                 inlet_flux_correction: bool = False,
+                 inlet_flux_corr_max_iter: int = 5,
+                 inlet_flux_corr_relax: float = 0.5,
+                 inlet_flux_corr_tol: float = 0.05,
                  branching_in_file=None, branching_out_file=None):
 
         # 3D perfusion domain + boundary facets
+        if MPI.COMM_WORLD.rank == 0:
+            print("About to open XDMF mesh", flush=True)
+        MPI.COMM_WORLD.barrier()
         self.mesh, self.facet_tags = import_3d_mesh_with_facets(
             bioreactor_domain, facet_file
         )
+        if self.mesh.comm.rank == 0:
+            print("[mesh] 3D mesh/facet import complete", flush=True)
 
         # Marker conventions from mesh_tags_well*.xdmf
         self.arterial_concave_marker = 31
@@ -112,18 +179,90 @@ class PerfusionSolver:
         self.inlet_base_marker = 100
         self.outlet_base_marker = 200
 
-        # 1D tree terminal territory meshes
-        self.inlet_mesh,  self.inlet_tags  = import_mesh(mesh_inlet_file)
-        self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file)
+        # 1D tree terminal territory meshes/checkpoints.
+        # Read only on rank 0 (COMM_SELF), then broadcast sampled arrays with
+        # typed MPI collectives (avoids object-pickle bcast hangs on some setups).
+        comm = self.mesh.comm
+        if comm.rank == 0:
+            print("[1d] Rank 0 reading inlet/outlet 1D meshes", flush=True)
+            self.inlet_mesh, self.inlet_tags = import_mesh(mesh_inlet_file, comm=MPI.COMM_SELF)
+            self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file, comm=MPI.COMM_SELF)
 
-        # Load last time-slice of pressures/velocities
-        self.p_A_k = import_pressure_data(self.inlet_mesh,  pres_inlet_file)[-1]
-        self.p_V_k = import_pressure_data(self.outlet_mesh, pres_outlet_file)[-1]
-        self.u_A_k = import_velocity_data(self.inlet_mesh,  velocity_inlet_file)[-1]
-        self.u_V_k = import_velocity_data(self.outlet_mesh, velocity_outlet_file)[-1]
+            print("[1d] Rank 0 reading pressure checkpoints", flush=True)
+            self.p_A_k = import_pressure_data(self.inlet_mesh, pres_inlet_file, comm=MPI.COMM_SELF)[-1]
+            self.p_V_k = import_pressure_data(self.outlet_mesh, pres_outlet_file, comm=MPI.COMM_SELF)[-1]
 
-        # Extract terminal (marker=2) coordinates + pressures + flows
-        self._extract_terminal_data()
+            print("[1d] Rank 0 reading flow checkpoints", flush=True)
+            self.q_A_k = import_flow_data(self.inlet_mesh, flow_inlet_file, comm=MPI.COMM_SELF)[-1]
+            self.q_V_k = import_flow_data(self.outlet_mesh, flow_outlet_file, comm=MPI.COMM_SELF)[-1]
+
+            self.a_A_k = None
+            self.a_V_k = None
+            if area_inlet_file is not None and Path(area_inlet_file).exists():
+                print("[1d] Rank 0 reading inlet area checkpoint", flush=True)
+                self.a_A_k = import_area_data(self.inlet_mesh, area_inlet_file, comm=MPI.COMM_SELF)[-1]
+            if area_outlet_file is not None and Path(area_outlet_file).exists():
+                print("[1d] Rank 0 reading outlet area checkpoint", flush=True)
+                self.a_V_k = import_area_data(self.outlet_mesh, area_outlet_file, comm=MPI.COMM_SELF)[-1]
+
+            print("[1d] Rank 0 sampling terminal data", flush=True)
+            self._extract_terminal_data()
+            p_in_BC = float(self._sample_pressure_at_point(self.p_A_k, np.asarray(inlet_coord, dtype=float)))
+            p_out_BC = float(self._sample_pressure_at_point(self.p_V_k, np.asarray(outlet_coord, dtype=float)))
+
+            x_inlet = np.ascontiguousarray(np.asarray(self.x_inlet, dtype=np.float64))
+            x_outlet = np.ascontiguousarray(np.asarray(self.x_outlet, dtype=np.float64))
+            p_inlet = np.ascontiguousarray(np.asarray(self.p_inlet, dtype=np.float64))
+            q_inlet = np.ascontiguousarray(np.asarray(self.q_inlet, dtype=np.float64))
+            a_inlet = np.ascontiguousarray(np.asarray(self.a_inlet, dtype=np.float64))
+            p_outlet = np.ascontiguousarray(np.asarray(self.p_outlet, dtype=np.float64))
+            q_outlet = np.ascontiguousarray(np.asarray(self.q_outlet, dtype=np.float64))
+            a_outlet = np.ascontiguousarray(np.asarray(self.a_outlet, dtype=np.float64))
+            n_in = int(x_inlet.shape[0])
+            n_out = int(x_outlet.shape[0])
+            print("[1d] Rank 0 broadcasting sampled 1D data", flush=True)
+        else:
+            x_inlet = x_outlet = None
+            p_inlet = q_inlet = a_inlet = None
+            p_outlet = q_outlet = a_outlet = None
+            p_in_BC = None
+            p_out_BC = None
+            n_in = 0
+            n_out = 0
+
+        n_in = comm.bcast(n_in, root=0)
+        n_out = comm.bcast(n_out, root=0)
+        if comm.rank != 0:
+            x_inlet = np.empty((n_in, 3), dtype=np.float64)
+            x_outlet = np.empty((n_out, 3), dtype=np.float64)
+            p_inlet = np.empty(n_in, dtype=np.float64)
+            q_inlet = np.empty(n_in, dtype=np.float64)
+            a_inlet = np.empty(n_in, dtype=np.float64)
+            p_outlet = np.empty(n_out, dtype=np.float64)
+            q_outlet = np.empty(n_out, dtype=np.float64)
+            a_outlet = np.empty(n_out, dtype=np.float64)
+
+        comm.Bcast(x_inlet, root=0)
+        comm.Bcast(x_outlet, root=0)
+        comm.Bcast(p_inlet, root=0)
+        comm.Bcast(q_inlet, root=0)
+        comm.Bcast(a_inlet, root=0)
+        comm.Bcast(p_outlet, root=0)
+        comm.Bcast(q_outlet, root=0)
+        comm.Bcast(a_outlet, root=0)
+        p_in_BC = comm.bcast(p_in_BC, root=0)
+        p_out_BC = comm.bcast(p_out_BC, root=0)
+
+        if comm.rank == 0:
+            print("[1d] 1D sampled data broadcast complete", flush=True)
+        self.x_inlet = x_inlet
+        self.x_outlet = x_outlet
+        self.p_inlet = p_inlet
+        self.q_inlet = q_inlet
+        self.a_inlet = a_inlet
+        self.p_outlet = p_outlet
+        self.q_outlet = q_outlet
+        self.a_outlet = a_outlet
 
         # --- branching data for inlet/outlet trees (optional but recommended) ---
         self.branch_coords_in  = None
@@ -142,10 +281,20 @@ class PerfusionSolver:
         # store user-input coordinates for channel inlet/outlet (3D)
         self.inlet_coord  = np.asarray(inlet_coord,  dtype=float)
         self.outlet_coord = np.asarray(outlet_coord, dtype=float)
+        self.concave_bc_mode = str(concave_bc_mode).strip().lower()
+        if self.concave_bc_mode not in {"dirichlet", "robin"}:
+            raise ValueError(f"concave_bc_mode must be 'dirichlet' or 'robin', got {concave_bc_mode!r}")
+        self.lp_arterial = float(lp_arterial)
+        self.lp_venous = float(lp_venous)
+        self.inlet_flux_correction = bool(inlet_flux_correction)
+        self.inlet_flux_corr_max_iter = int(max(0, inlet_flux_corr_max_iter))
+        self.inlet_flux_corr_relax = float(np.clip(inlet_flux_corr_relax, 0.0, 1.0))
+        self.inlet_flux_corr_tol = float(max(0.0, inlet_flux_corr_tol))
+        self._inlet_flux_scale_by_marker = {}
 
-        # sample BC pressures from 1D pressure fields at those coordinates
-        self.p_in_BC  = self._sample_pressure_at_point(self.p_A_k, self.inlet_coord)
-        self.p_out_BC = self._sample_pressure_at_point(self.p_V_k, self.outlet_coord)
+        # BC pressures sampled on rank 0 and broadcast to all ranks.
+        self.p_in_BC = float(p_in_BC)
+        self.p_out_BC = float(p_out_BC)
 
         if self.mesh.comm.rank == 0:
             print(f"Dirichlet BC pressures: p_in = {self.p_in_BC:.3e}, "
@@ -198,6 +347,33 @@ class PerfusionSolver:
         bc_ven = fem.dirichletbc(p_ven, ven_dofs, W)
 
         return [bc_art, bc_ven]
+
+    def _build_concave_robin_terms(self, p, v):
+        """
+        Robin transfer on concave faces:
+          (-K grad p · n) = Lp * (p_media - p)
+        Weak form contribution:
+          a += ∫ Lp * p * v ds
+          L += ∫ Lp * p_media * v ds
+        """
+        mesh = self.mesh
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+        a_r = 0
+        L_r = 0
+
+        if self.lp_arterial > 0.0:
+            lp_a = fem.Constant(mesh, dfx.default_scalar_type(self.lp_arterial))
+            p_a = fem.Constant(mesh, dfx.default_scalar_type(self.p_in_BC))
+            a_r += lp_a * p * v * ds(int(self.arterial_concave_marker))
+            L_r += lp_a * p_a * v * ds(int(self.arterial_concave_marker))
+
+        if self.lp_venous > 0.0:
+            lp_v = fem.Constant(mesh, dfx.default_scalar_type(self.lp_venous))
+            p_v = fem.Constant(mesh, dfx.default_scalar_type(self.p_out_BC))
+            a_r += lp_v * p * v * ds(int(self.venous_concave_marker))
+            L_r += lp_v * p_v * v * ds(int(self.venous_concave_marker))
+
+        return a_r, L_r
 
 
     def _load_terminal_branch_coords(self, csv_path):
@@ -307,13 +483,21 @@ class PerfusionSolver:
                 return arr.reshape(dof_coords.shape[0], bs)[nn]
             return arr[nn]
 
-        # inlet pressures/velocities
+        # inlet pressures/flows
         self.p_inlet = sample_field_at_points(self.p_A_k, self.x_inlet)
-        self.u_inlet = sample_field_at_points(self.u_A_k, self.x_inlet)
+        self.q_inlet = sample_field_at_points(self.q_A_k, self.x_inlet)
+        self.a_inlet = (
+            sample_field_at_points(self.a_A_k, self.x_inlet)
+            if self.a_A_k is not None else np.zeros(len(self.x_inlet))
+        )
 
-        # outlet pressures/velocities
+        # outlet pressures/flows
         self.p_outlet = sample_field_at_points(self.p_V_k, self.x_outlet)
-        self.u_outlet = sample_field_at_points(self.u_V_k, self.x_outlet)
+        self.q_outlet = sample_field_at_points(self.q_V_k, self.x_outlet)
+        self.a_outlet = (
+            sample_field_at_points(self.a_V_k, self.x_outlet)
+            if self.a_V_k is not None else np.zeros(len(self.x_outlet))
+        )
 
         print(f"Found {len(self.x_inlet)} inlet terminals")
         print(f"Found {len(self.x_outlet)} outlet terminals")
@@ -392,60 +576,95 @@ class PerfusionSolver:
         _, idx = tree.query(marker_centroids)
         return idx.astype(int)
 
-    def _build_terminal_flux_form(self, v):
+    def _get_terminal_marker_data(self):
         """
-        Build a Neumann-type RHS term that imposes terminal velocities *facet-wise*
-        on the boundary facets tagged as terminal inlet/outlet faces.
-
-        For each terminal marker m:
-          RHS += ∫ (u_m · n) * v ds(m)
-
-        Notes
-        -----
-        - u_m is sampled from velocity_checkpoint_{inlet|outlet}.bp on the
-          corresponding 1D terminal coordinates and mapped to 3D terminal markers.
+        Return inlet/outlet terminal markers, their centroids, and nearest 1D-terminal
+        index mappings. This is shared by the terminal Neumann and Dirichlet builders.
         """
-        mesh = self.mesh
-        n = ufl.FacetNormal(mesh)
-        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
-
         inlet_marks, outlet_marks = self._get_terminal_marker_sets()
         inlet_c = self._marker_centroids(inlet_marks)
         outlet_c = self._marker_centroids(outlet_marks)
 
-        idx_in  = self._assign_markers_to_terminals(inlet_c,  self.x_inlet)
+        idx_in = self._assign_markers_to_terminals(inlet_c, self.x_inlet)
         idx_out = self._assign_markers_to_terminals(outlet_c, self.x_outlet)
 
-        # Store for later (interface output)
-        self.inlet_terminal_markers  = inlet_marks
+        self.inlet_terminal_markers = inlet_marks
         self.outlet_terminal_markers = outlet_marks
-        self.inlet_terminal_centroids  = inlet_c
+        self.inlet_terminal_centroids = inlet_c
         self.outlet_terminal_centroids = outlet_c
+        # Marker-order -> 1D-terminal-order maps used by BC/diagnostics alignment.
+        self.inlet_marker_to_1d_idx = idx_in
+        self.outlet_marker_to_1d_idx = idx_out
+
+        return inlet_marks, outlet_marks, inlet_c, outlet_c, idx_in, idx_out
+
+    def _build_terminal_flux_form(self, v):
+        """
+        Build a Neumann-type RHS term that imposes inlet terminal flow rates
+        *facet-wise* on the boundary facets tagged as terminal inlet faces.
+
+        For each terminal marker m:
+          g_m = Q_m / Area(m)
+          RHS += ∫ (-g_m) * v ds(m)
+
+        Notes
+        -----
+        - Inlet terminal flow is sampled from flow_checkpoint_inlet.bp
+          and mapped to 3D terminal markers.
+        - Outlet terminals are handled separately as Dirichlet pressure BCs
+          from the venous tree.
+        """
+        mesh = self.mesh
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+        one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
+
+        inlet_marks, _, _, _, idx_in, _ = self._get_terminal_marker_data()
+        self.inlet_marker_area_3d = np.zeros(len(inlet_marks), dtype=float)
+        self.inlet_marker_area_1d = np.zeros(len(inlet_marks), dtype=float)
+        self.inlet_marker_q_target = np.zeros(len(inlet_marks), dtype=float)
 
         L_flux = 0
         # Inlet terminals
         for j, m in enumerate(inlet_marks):
             if j >= len(idx_in):
                 continue
-            if len(self.u_inlet) == 0:
-                U = np.zeros(mesh.geometry.dim, dtype=float)
-            else:
-                U = np.asarray(self.u_inlet[idx_in[j]], dtype=float).reshape(mesh.geometry.dim,)
-            Uc = fem.Constant(mesh, dfx.default_scalar_type(U))
-            L_flux += ufl.dot(Uc, n) * v * ds(int(m))
-
-        # Outlet terminals
-        for j, m in enumerate(outlet_marks):
-            if j >= len(idx_out):
-                continue
-            if len(self.u_outlet) == 0:
-                U = np.zeros(mesh.geometry.dim, dtype=float)
-            else:
-                U = np.asarray(self.u_outlet[idx_out[j]], dtype=float).reshape(mesh.geometry.dim,)
-            Uc = fem.Constant(mesh, dfx.default_scalar_type(U))
-            L_flux += ufl.dot(Uc, n) * v * ds(int(m))
+            Q = float(self.q_inlet[idx_in[j]]) if len(self.q_inlet) else 0.0
+            print("Flow target for marker", m, "is", Q)
+            scale = float(self._inlet_flux_scale_by_marker.get(int(m), 1.0))
+            Q *= scale
+            A_face = float(fem.assemble_scalar(fem.form(one * ds(int(m)))))
+            A_ckpt = float(self.a_inlet[idx_in[j]]) if len(self.a_inlet) else 0.0
+            self.inlet_marker_area_3d[j] = A_face
+            self.inlet_marker_area_1d[j] = A_ckpt
+            self.inlet_marker_q_target[j] = Q
+            # Enforce total terminal flow on the actual 3D marker area.
+            g = Q / A_face if A_face > 0.0 else 0.0
+            gc = fem.Constant(mesh, dfx.default_scalar_type(g))
+            # For u = -K grad(p), natural BC term is K grad(p).n = -u.n.
+            # To impose target u.n = g, RHS contribution must be -g * v.
+            L_flux += -gc * v * ds(int(m))
 
         return L_flux
+
+    def _get_inlet_marker_targets(self):
+        inlet_marks, _, _, _, idx_in, _ = self._get_terminal_marker_data()
+        q_target = np.zeros(len(inlet_marks), dtype=float)
+        for j, _m in enumerate(inlet_marks):
+            if j < len(idx_in) and len(self.q_inlet):
+                q_target[j] = float(self.q_inlet[idx_in[j]])
+        return inlet_marks.astype(int), q_target
+
+    def _measure_inlet_marker_flux_from_pressure(self, p_h):
+        inlet_marks = getattr(self, "inlet_terminal_markers", np.array([], dtype=int))
+        if len(inlet_marks) == 0:
+            return np.zeros(0, dtype=float)
+        ds = ufl.Measure("ds", domain=self.mesh, subdomain_data=self.facet_tags)
+        n = ufl.FacetNormal(self.mesh)
+        out = np.zeros(len(inlet_marks), dtype=float)
+        for j, m in enumerate(inlet_marks):
+            expr = -ufl.dot(self.K_tensor * ufl.grad(p_h), n) * ds(int(m))
+            out[j] = float(fem.assemble_scalar(fem.form(expr)))
+        return out
 
     # ========================================================
     # Step B: Build q_src density approximation for Darcy
@@ -461,29 +680,52 @@ class PerfusionSolver:
     # ========================================================
     # Step C: Dirichlet BCs at terminal pressures
     # ========================================================
-    # 
-    
     def _build_terminal_bcs(self, W):
+        """
+        Build Dirichlet pressure BCs on both inlet and outlet terminal facets
+        using pressures sampled from the arterial/venous trees.
+        """
         mesh = self.mesh
-        gdim = mesh.geometry.dim
-
-        dof_coords = W.tabulate_dof_coordinates()
-        tree = cKDTree(dof_coords)
-
+        fdim = mesh.topology.dim - 1
         bcs = []
+        inlet_marks, outlet_marks, _, _, idx_in, idx_out = self._get_terminal_marker_data()
 
-        def add_bc(xpts, pvals):
-            if len(xpts) == 0:
-                return
-            _, dofs = tree.query(xpts)
-            for d, pval in zip(dofs, pvals):
-                bc_val = fem.Constant(mesh, dfx.default_scalar_type(pval))
-                bc = fem.dirichletbc(bc_val,
-                                     np.array([d], dtype=np.int32), W)
-                bcs.append(bc)
+        mesh.topology.create_entities(fdim)
+        mesh.topology.create_connectivity(mesh.topology.dim, fdim)
 
-        # add_bc(self.x_inlet,  self.p_inlet)
-        # add_bc(self.x_outlet, self.p_outlet)
+        n_in = 0
+        for j, m in enumerate(inlet_marks):
+            if j >= len(idx_in) or len(self.p_inlet) == 0:
+                continue
+            facets = self.facet_tags.find(int(m))
+            if facets.size == 0:
+                continue
+            dofs = fem.locate_dofs_topological(W, fdim, facets)
+            if dofs.size == 0:
+                continue
+            pval = float(self.p_inlet[idx_in[j]])
+            bc_val = fem.Constant(mesh, dfx.default_scalar_type(pval))
+            bcs.append(fem.dirichletbc(bc_val, dofs, W))
+            n_in += 1
+
+        n_out = 0
+        for j, m in enumerate(outlet_marks):
+            if j >= len(idx_out) or len(self.p_outlet) == 0:
+                continue
+            facets = self.facet_tags.find(int(m))
+            if facets.size == 0:
+                continue
+            dofs = fem.locate_dofs_topological(W, fdim, facets)
+            if dofs.size == 0:
+                continue
+            pval = float(self.p_outlet[idx_out[j]])
+            bc_val = fem.Constant(mesh, dfx.default_scalar_type(pval))
+            bcs.append(fem.dirichletbc(bc_val, dofs, W))
+            n_out += 1
+
+        if mesh.comm.rank == 0:
+            print("Number of arterial terminal pressure BCs:", n_in)
+            print("Number of venous terminal pressure BCs:", n_out)
         return bcs
 
     def _build_pressure_penalty_fields(self, W, radius=0.2, gamma=10.0):
@@ -805,6 +1047,23 @@ class PerfusionSolver:
                 out.append(float(fem.assemble_scalar(fem.form(ufl.dot(u_h, ufl.FacetNormal(mesh)) * ds(int(m))))))
             return np.array(out, dtype=float)
 
+        def facet_flux_from_pressure(f):
+            """
+            Compute flux from solved pressure and conductivity tensor directly:
+              u = -K grad(p),  Q = ∫ u·n ds
+            This avoids projection-induced flux bias.
+            """
+            if len(f) == 0:
+                return np.zeros(0)
+            if not hasattr(self, "K_tensor"):
+                return facet_flux(f)
+            n = ufl.FacetNormal(mesh)
+            out = []
+            for m in f:
+                expr = -ufl.dot(self.K_tensor * ufl.grad(p_h), n) * ds(int(m))
+                out.append(float(fem.assemble_scalar(fem.form(expr))))
+            return np.array(out, dtype=float)
+
         # These replace point-wise pressure/velocity/flow samples at terminals
         p_inlet_raw  = facet_average_scalar(inlet_marks)
         p_outlet_raw = facet_average_scalar(outlet_marks)
@@ -812,8 +1071,8 @@ class PerfusionSolver:
         u_inlet_raw  = facet_average_vector(inlet_marks)
         u_outlet_raw = facet_average_vector(outlet_marks)
 
-        q_inlet_raw  = facet_flux(inlet_marks)
-        q_outlet_raw = facet_flux(outlet_marks)
+        q_inlet_raw  = facet_flux_from_pressure(inlet_marks)
+        q_outlet_raw = facet_flux_from_pressure(outlet_marks)
 
         # Representative coords: marker centroids (computed earlier in _build_terminal_flux_form)
         coords_in = getattr(self, "inlet_terminal_centroids",  np.zeros((len(inlet_marks), 3)))
@@ -837,20 +1096,38 @@ class PerfusionSolver:
         # ------------------------------------------------------------------
         # REORDER everything to match branchingData_0 / branchingData_1 order
         # ------------------------------------------------------------------
-        # defaults: Darcy order (in case branchingData not provided)
-        idx_in = idx_out = None
+        # Build target vectors in marker order first, then apply optional
+        # branchingData reordering so targets and measured values stay aligned.
+        def _safe_reindex(vals, idx):
+            arr = np.asarray(vals, dtype=float)
+            ids = np.asarray(idx, dtype=int)
+            if ids.size == 0:
+                return arr
+            if np.any(ids < 0) or np.any(ids >= len(arr)):
+                return arr
+            return arr[ids]
+
+        idx_in_marker = np.asarray(getattr(self, "inlet_marker_to_1d_idx", np.array([], dtype=int)), dtype=int)
+        idx_out_marker = np.asarray(getattr(self, "outlet_marker_to_1d_idx", np.array([], dtype=int)), dtype=int)
+
+        p_inlet_target_marker = _safe_reindex(self.p_inlet, idx_in_marker)
+        p_outlet_target_marker = _safe_reindex(self.p_outlet, idx_out_marker)
+        q_inlet_target_marker = _safe_reindex(self.q_inlet, idx_in_marker)
+
+        # defaults: marker-order output (in case branchingData not provided)
+        idx_in_branch = idx_out_branch = None
 
         if self.branch_coords_in is not None and len(self.branch_coords_in) > 0:
-            idx_in = self._build_reordering_indices(coords_in, self.branch_coords_in)
+            idx_in_branch = self._build_reordering_indices(coords_in, self.branch_coords_in)
         if self.branch_coords_out is not None and len(self.branch_coords_out) > 0:
-            idx_out = self._build_reordering_indices(coords_out, self.branch_coords_out)
+            idx_out_branch = self._build_reordering_indices(coords_out, self.branch_coords_out)
 
-        if idx_in is not None:
-            p_inlet   = p_inlet_raw[idx_in]
-            u_inlet   = u_inlet_raw[idx_in, :]
-            q_inlet   = q_inlet_raw[idx_in]
-            divu_in   = divu_inlet_raw[idx_in]
-            coords_in = self.x_inlet[idx_in, :]
+        if idx_in_branch is not None:
+            p_inlet   = p_inlet_raw[idx_in_branch]
+            u_inlet   = u_inlet_raw[idx_in_branch, :]
+            q_inlet   = q_inlet_raw[idx_in_branch]
+            divu_in   = divu_inlet_raw[idx_in_branch]
+            coords_in = self.x_inlet[idx_in_branch, :]
             ids_in    = self.branch_ids_in
         else:
             p_inlet   = p_inlet_raw
@@ -860,12 +1137,12 @@ class PerfusionSolver:
             coords_in = coords_in
             ids_in    = None
 
-        if idx_out is not None:
-            p_outlet   = p_outlet_raw[idx_out]
-            u_outlet   = u_outlet_raw[idx_out, :]
-            q_outlet   = q_outlet_raw[idx_out]
-            divu_out   = divu_outlet_raw[idx_out]
-            coords_out = self.x_outlet[idx_out, :]
+        if idx_out_branch is not None:
+            p_outlet   = p_outlet_raw[idx_out_branch]
+            u_outlet   = u_outlet_raw[idx_out_branch, :]
+            q_outlet   = q_outlet_raw[idx_out_branch]
+            divu_out   = divu_outlet_raw[idx_out_branch]
+            coords_out = self.x_outlet[idx_out_branch, :]
             ids_out    = self.branch_ids_out
         else:
             p_outlet   = p_outlet_raw
@@ -896,6 +1173,8 @@ class PerfusionSolver:
             # q = cell_vol * div(u) at terminals
             "q_inlet":         q_inlet.tolist(),
             "q_outlet":        q_outlet.tolist(),
+            # Inward-positive convention (often easier to compare to 1D inflow targets)
+            "q_inlet_inward":  (-q_inlet).tolist(),
             "divu_inlet":      divu_in.tolist(),
             "divu_outlet":     divu_out.tolist(),
             "cell_volume":     cell_vol,
@@ -908,6 +1187,38 @@ class PerfusionSolver:
             "coords_inlet":    coords_in.tolist(),
             "coords_outlet":   coords_out.tolist(),
         }
+
+        # Also store imposed inlet terminal flow targets (mapped to output order)
+        # so mismatches can be diagnosed without ambiguity.
+        if idx_in_branch is not None:
+            p_inlet_target = p_inlet_target_marker[idx_in_branch]
+        else:
+            p_inlet_target = p_inlet_target_marker
+        interface_bc["p_inlet_target"] = p_inlet_target.tolist()
+
+        if idx_out_branch is not None:
+            p_outlet_target = p_outlet_target_marker[idx_out_branch]
+        else:
+            p_outlet_target = p_outlet_target_marker
+        interface_bc["p_outlet_target"] = p_outlet_target.tolist()
+
+        if idx_in_branch is not None:
+            q_inlet_target = q_inlet_target_marker[idx_in_branch]
+        else:
+            q_inlet_target = q_inlet_target_marker
+        interface_bc["q_inlet_target"] = q_inlet_target.tolist()
+        if len(q_inlet_target) == len(q_inlet):
+            interface_bc["q_inlet_residual"] = (q_inlet - q_inlet_target).tolist()
+        if hasattr(self, "inlet_marker_area_3d"):
+            a3d = np.asarray(self.inlet_marker_area_3d, dtype=float)
+            interface_bc["inlet_area_3d_marker"] = a3d.tolist()
+        if hasattr(self, "inlet_marker_area_1d"):
+            a1d = np.asarray(self.inlet_marker_area_1d, dtype=float)
+            interface_bc["inlet_area_1d_checkpoint"] = a1d.tolist()
+            if "inlet_area_3d_marker" in interface_bc and len(a1d) == len(interface_bc["inlet_area_3d_marker"]):
+                a3d = np.asarray(interface_bc["inlet_area_3d_marker"], dtype=float)
+                ratio = a3d / np.maximum(a1d, 1e-20)
+                interface_bc["inlet_area_ratio_3d_over_1d"] = ratio.tolist()
 
         # optionally store branch IDs for sanity checking
         if ids_in is not None:
@@ -1154,7 +1465,11 @@ class PerfusionSolver:
         I = ufl.Identity(mesh.geometry.dim)
         e = ufl.as_vector((1.0, 0.0, 0.0))  # unit vector in x-direction
         K_tensor = K_perp * I + (K_par - K_perp) * ufl.outer(e, e)
+        self.K_tensor = K_tensor
         a = ufl.inner((K_tensor) * ufl.grad(p), ufl.grad(v)) * ufl.dx
+        if self.concave_bc_mode == "robin":
+            a_robin, _ = self._build_concave_robin_terms(p, v)
+            a += a_robin
 
         # a = kappa_over_mu * dot(grad(p), grad(v)) * ufl.dx
         # a = ufl.inner(Kfun * ufl.grad(p), ufl.grad(v)) * ufl.dx
@@ -1180,9 +1495,18 @@ class PerfusionSolver:
         # if mesh.comm.rank == 0:
         #     print("q_src  min/max:",  q_src.x.array.min(),  q_src.x.array.max())
 
-        L = q_src * v * ufl.dx + self._build_terminal_flux_form(v)
-        # Dirichlet BCs on concave inlet/outlet surfaces
-        bcs = self._build_wall_dirichlet_bcs(W)
+        # L = q_src * v * ufl.dx + self._build_terminal_flux_form(v)
+        # if self.concave_bc_mode == "robin":
+        #     _, L_robin = self._build_concave_robin_terms(p, v)
+        #     L += L_robin
+
+        L = q_src * v * ufl.dx 
+        # Dirichlet BCs:
+        # - Terminal pressures (arterial + venous) from 1D trees.
+        # - Concave inlet/outlet only in dirichlet mode.
+        bcs = self._build_terminal_bcs(W)
+        if self.concave_bc_mode == "dirichlet":
+            bcs = self._build_wall_dirichlet_bcs(W) + bcs
 
         problem = LinearProblem(
             a, L, bcs=bcs,
@@ -1282,12 +1606,13 @@ class PerfusionSolver:
         # # Post-process gauge using 1D outlet pressures
         # self._apply_pressure_gauge_postsolve(p_h)
 
-        # project velocity
-        V = fem.functionspace(mesh,
-                                element("DG", mesh.basix_cell(), 0,
-                                        shape=(mesh.geometry.dim,)))
+        # Project Darcy flux to an H(div)-conforming space so normal fluxes are
+        # single-valued across facets.
+        V = fem.functionspace(mesh, element("RT", mesh.basix_cell(), 1))
         projector = Projector(V)
-        u_h = projector(-Kfun * grad(p_h))
+        # Use the same anisotropic conductivity tensor as in the weak form
+        # so postprocessed fluxes match the solved PDE.
+        u_h = projector(-(K_tensor * grad(p_h)))
 
          # --- total leak flux across inlet / outlet facet markers ---
         # facet_tags: 1 = inlet surface, 2 = outlet surface
@@ -1381,30 +1706,63 @@ class Projector:
 # RUN
 # ===================================================================
 if __name__ == "__main__":
-    bioreactor_domain = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/bioreactor_well1.xdmf"
-    mesh_inlet_file   = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/tagged_branches_inlet.bp"
-    mesh_outlet_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/tagged_branches_outlet.bp"
-    pres_inlet_file   = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/pressure_checkpoint_inlet.bp"
-    pres_outlet_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/pressure_checkpoint_outlet.bp"
-    velocity_inlet_file   = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/velocity_checkpoint_inlet.bp"
-    velocity_outlet_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/velocity_checkpoint_outlet.bp"
-    facet_file       = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/mesh_tags_well1.xdmf"
+    ap = argparse.ArgumentParser(description="Run Darcy perfusion solve on prepared mesh/checkpoint files.")
+    ap.add_argument("--bioreactor-domain", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/bioreactor_well1.xdmf")
+    ap.add_argument("--facet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/mesh_tags_well1.xdmf")
+    ap.add_argument("--mesh-inlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/tagged_branches_inlet.bp")
+    ap.add_argument("--mesh-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/tagged_branches_outlet.bp")
+    ap.add_argument("--pres-inlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/pressure_checkpoint_inlet.bp")
+    ap.add_argument("--pres-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/pressure_checkpoint_outlet.bp")
+    ap.add_argument("--flow-inlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/flow_checkpoint_inlet.bp")
+    ap.add_argument("--flow-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/flow_checkpoint_outlet.bp")
+    ap.add_argument("--area-inlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/area_checkpoint_inlet.bp")
+    ap.add_argument("--area-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/area_checkpoint_outlet.bp")
+    ap.add_argument("--branching-in-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_0.csv")
+    ap.add_argument("--branching-out-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_1.csv")
+    ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.175, 0.9, 0.55])
+    ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.175, 0.9, 0.55])
+    ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet",
+                    help="Boundary model on concave arterial/venous faces.")
+    ap.add_argument("--lp-arterial", type=float, default=0.0,
+                    help="Robin transfer coefficient on arterial concave face (used when --concave-bc-mode robin).")
+    ap.add_argument("--lp-venous", type=float, default=0.0,
+                    help="Robin transfer coefficient on venous concave face (used when --concave-bc-mode robin).")
+    ap.add_argument("--inlet-flux-correction", action="store_true", default=False,
+                    help="Enable iterative per-terminal inlet flux correction loop.")
+    ap.add_argument("--inlet-flux-corr-max-iter", type=int, default=5,
+                    help="Maximum correction iterations when --inlet-flux-correction is enabled.")
+    ap.add_argument("--inlet-flux-corr-relax", type=float, default=0.5,
+                    help="Relaxation factor in [0,1] for inlet flux correction updates.")
+    ap.add_argument("--inlet-flux-corr-tol", type=float, default=0.05,
+                    help="Stop when max relative inlet flow error <= tol.")
+    ap.add_argument("--out-dir", default="", help="Optional output directory for out_darcy")
+    args = ap.parse_args()
 
-    # user-chosen coords near arterial / venous channel inlet/outlet
-    inlet_coord  = np.array([-0.175, 0.9, .55])  # fill with your values
-    outlet_coord = np.array([0.175, 0.9, .55])
-
-    branching_in_file  = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_0.csv"
-    branching_out_file = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_1.csv"
+    if args.out_dir:
+        current_dir = Path(args.out_dir).expanduser().resolve()
 
     solver = PerfusionSolver(
-        bioreactor_domain, facet_file,
-        mesh_inlet_file, mesh_outlet_file,
-        pres_inlet_file, pres_outlet_file,
-        velocity_inlet_file, velocity_outlet_file,
-        inlet_coord, outlet_coord,
-        branching_in_file=branching_in_file,
-        branching_out_file=branching_out_file,
+        args.bioreactor_domain,
+        args.facet_file,
+        args.mesh_inlet_file,
+        args.mesh_outlet_file,
+        args.pres_inlet_file,
+        args.pres_outlet_file,
+        args.flow_inlet_file,
+        args.flow_outlet_file,
+        np.array(args.coords_inlet, dtype=float),
+        np.array(args.coords_outlet, dtype=float),
+        area_inlet_file=args.area_inlet_file if args.area_inlet_file else None,
+        area_outlet_file=args.area_outlet_file if args.area_outlet_file else None,
+        concave_bc_mode=args.concave_bc_mode,
+        lp_arterial=args.lp_arterial,
+        lp_venous=args.lp_venous,
+        inlet_flux_correction=args.inlet_flux_correction,
+        inlet_flux_corr_max_iter=args.inlet_flux_corr_max_iter,
+        inlet_flux_corr_relax=args.inlet_flux_corr_relax,
+        inlet_flux_corr_tol=args.inlet_flux_corr_tol,
+        branching_in_file=args.branching_in_file if args.branching_in_file else None,
+        branching_out_file=args.branching_out_file if args.branching_out_file else None,
     )
     solver.setup()
  
