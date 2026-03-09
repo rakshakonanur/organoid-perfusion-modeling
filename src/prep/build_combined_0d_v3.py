@@ -62,6 +62,7 @@ import argparse
 import json
 import re
 import shutil
+import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -564,6 +565,21 @@ def find_organoid_files(input_dir: Path) -> Dict[int, Dict[str, Path]]:
             continue
         organoids.setdefault(oid, {})[side] = p
 
+    if not organoids:
+        for organoid_dir in sorted(input_dir.glob("organoid_*")):
+            if not organoid_dir.is_dir():
+                continue
+            oid = _infer_organoid_id(organoid_dir)
+            if oid is None:
+                continue
+            zero_d_dir = organoid_dir / "0D_Input_Files"
+            try:
+                inlet = _pick_solver_input(zero_d_dir / "inlet")
+                outlet = _pick_solver_input(zero_d_dir / "outlet")
+            except FileNotFoundError:
+                continue
+            organoids[oid] = {"inlet": inlet, "outlet": outlet}
+
     missing = []
     for oid, d in sorted(organoids.items()):
         if "inlet" not in d or "outlet" not in d:
@@ -580,6 +596,135 @@ def extract_zip_to_temp(zip_path: Path) -> Path:
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(td)
     return td
+
+
+def _pick_solver_input(side_dir: Path) -> Path:
+    cand = side_dir / "solver_0d_new.in"
+    if cand.exists():
+        return cand
+    raise FileNotFoundError(f"Could not find solver_0d_new.in under {side_dir}")
+
+
+def _ensure_organoid_aliases(organoid_dir: Path, organoid_id: int) -> Dict[str, Path]:
+    zero_d_dir = organoid_dir / "0D_Input_Files"
+    inlet_src = _pick_solver_input(zero_d_dir / "inlet")
+    outlet_src = _pick_solver_input(zero_d_dir / "outlet")
+
+    inlet_alias = organoid_dir / f"organoid_{organoid_id}_inlet.in"
+    outlet_alias = organoid_dir / f"organoid_{organoid_id}_outlet.in"
+
+    shutil.copy2(inlet_src, inlet_alias)
+    shutil.copy2(outlet_src, outlet_alias)
+    return {"inlet": inlet_alias, "outlet": outlet_alias}
+
+
+def _shift_numeric_column_in_csv(csv_path: Path, column: str, delta_y: float) -> None:
+    if abs(delta_y) == 0.0 or (not csv_path.exists()):
+        return
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return
+    if column not in df.columns:
+        return
+    vals = pd.to_numeric(df[column], errors="coerce")
+    mask = vals.notna()
+    if not mask.any():
+        return
+    df.loc[mask, column] = vals[mask] + float(delta_y)
+    df.to_csv(csv_path, index=False)
+
+
+def _shift_organoid_coordinate_files(organoid_dir: Path, delta_y: float) -> None:
+    if abs(delta_y) == 0.0:
+        return
+
+    for name in ("branchingData_0.csv", "branchingData_1.csv"):
+        bcsv = organoid_dir / name
+        _shift_numeric_column_in_csv(bcsv, "proximalCoordsY", delta_y)
+        _shift_numeric_column_in_csv(bcsv, "distalCoordsY", delta_y)
+
+    for side in ("inlet", "outlet"):
+        geom_csv = organoid_dir / "0D_Input_Files" / side / "geom.csv"
+        if not geom_csv.exists():
+            continue
+        try:
+            # geom.csv has no headers; shift 2nd and 5th columns (1-based).
+            gdf = pd.read_csv(geom_csv, header=None)
+        except Exception:
+            continue
+        for col_idx in (1, 4):
+            if col_idx >= gdf.shape[1]:
+                continue
+            vals = pd.to_numeric(gdf.iloc[:, col_idx], errors="coerce")
+            mask = vals.notna()
+            if mask.any():
+                gdf.loc[mask, col_idx] = vals[mask] + float(delta_y)
+        gdf.to_csv(geom_csv, header=False, index=False)
+
+
+def _next_trial_dir(trial_root: Path) -> Path:
+    nums: List[int] = []
+    for p in trial_root.iterdir():
+        if not p.is_dir():
+            continue
+        m = re.fullmatch(r"trial-(\d+)", p.name)
+        if m:
+            nums.append(int(m.group(1)))
+    return trial_root / f"trial-{max(nums, default=0) + 1}"
+
+
+def prepare_trial_directory(
+    source_dirs: List[Path],
+    trial_root: Path,
+    trial_name: str = "",
+    overwrite: bool = False,
+    dy_step: float = 0.6,
+    shift_sign: float = -1.0,
+    shift_coords: bool = True,
+) -> Path:
+    if len(source_dirs) != 4:
+        raise ValueError(f"Expected 4 source directories, got {len(source_dirs)}")
+
+    trial_root.mkdir(parents=True, exist_ok=True)
+    trial_dir = trial_root / trial_name if trial_name else _next_trial_dir(trial_root)
+
+    if trial_dir.exists():
+        if overwrite:
+            shutil.rmtree(trial_dir)
+        else:
+            raise FileExistsError(f"Trial directory already exists: {trial_dir}")
+
+    trial_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, src in enumerate(source_dirs, start=1):
+        if not src.exists():
+            raise FileNotFoundError(src)
+        dst = trial_dir / f"organoid_{i}"
+        shutil.copytree(src, dst)
+        _ensure_organoid_aliases(dst, i)
+        if shift_coords:
+            delta_y = float(shift_sign) * float(dy_step) * float(i - 1)
+            _shift_organoid_coordinate_files(dst, delta_y)
+
+    return trial_dir
+
+
+def _prompt_source_dirs() -> List[Path]:
+    print("Select synthetic vasculature input mode:", file=sys.stderr)
+    print("  1) Repeat one source folder for all 4 wells", file=sys.stderr)
+    print("  2) Use 4 different source folders", file=sys.stderr)
+    mode = input("Enter 1 or 2: ").strip()
+    if mode == "1":
+        src = Path(input("Enter the synthetic vasculature folder path: ").strip()).expanduser().resolve()
+        return [src, src, src, src]
+    if mode == "2":
+        out: List[Path] = []
+        for i in range(1, 5):
+            src = Path(input(f"Enter source folder for well {i}: ").strip()).expanduser().resolve()
+            out.append(src)
+        return out
+    raise ValueError(f"Unrecognized mode '{mode}'")
 
 
 # -----------------------------
@@ -622,8 +767,16 @@ def validate_model(model: Dict[str, Any]) -> None:
 # -----------------------------
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input-dir", type=str, default="/Users/rakshakonanur/Documents/Research/two-channel/input/trial-10", help="Directory containing organoid_#_inlet.in and organoid_#_outlet.in")
+    ap.add_argument("--input-dir", type=str, default="", help="Directory containing organoid_#_inlet.in and organoid_#_outlet.in")
     ap.add_argument("--synthetic-zip", type=str, default="", help="Zip containing organoid files (alternative to --input-dir)")
+    ap.add_argument("--source-folder", type=str, default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/030426/Run1_10branches", help="Single synthetic vasculature folder to repeat in all 4 wells")
+    ap.add_argument("--source-folders", nargs=4, default=None, help="Four synthetic vasculature folders, one per well")
+    ap.add_argument("--trial-root", type=str, default="./prepped", help="Parent directory where a trial-X folder will be created")
+    ap.add_argument("--trial-name", type=str, default="", help="Optional explicit trial folder name (e.g. trial-10)")
+    ap.add_argument("--overwrite-trial", action="store_true", help="Overwrite destination trial folder if it already exists")
+    ap.add_argument("--dy-step", type=float, default=0.6, help="Per-well shift in Y applied during trial folder creation")
+    ap.add_argument("--shift-sign", type=float, default=-1.0, help="Sign multiplier for Y shift (default: -1.0)")
+    ap.add_argument("--no-shift-coords", action="store_true", help="Disable Y-shifting of branchingData_*.csv and geom.csv during trial creation")
     ap.add_argument("--channel-xlsx", type=str, default="/Users/rakshakonanur/Documents/Research/two-channel/files/channel-resistance-sv.xlsx", help="Path to channel-resistance.xlsx (optional; fallback table used if missing)")
     ap.add_argument("--out", type=str, default="combined.in", help="Output combined .in file (JSON)")
     ap.add_argument("--map", type=str, default="rename_map.json", help="Output rename_map.json")
@@ -641,23 +794,61 @@ def main() -> None:
         print(print_connections_template())
         return
 
-    out_path = Path(args.out).resolve()
-    map_path = Path(args.map).resolve()
+    out_arg = args.out
+    map_arg = args.map
 
     temp_dir: Optional[Path] = None
     try:
+        input_dir: Path
         if args.synthetic_zip:
             zip_path = Path(args.synthetic_zip).resolve()
             if not zip_path.exists():
                 raise FileNotFoundError(zip_path)
             temp_dir = extract_zip_to_temp(zip_path)
             input_dir = temp_dir
+        elif args.source_folder or args.source_folders:
+            if args.source_folder and args.source_folders:
+                raise ValueError("Use either --source-folder or --source-folders, not both.")
+            if args.source_folder:
+                src = Path(args.source_folder).expanduser().resolve()
+                source_dirs = [src, src, src, src]
+            else:
+                source_dirs = [Path(p).expanduser().resolve() for p in args.source_folders]
+
+            trial_root = Path(args.trial_root).expanduser().resolve() if args.trial_root else Path.cwd().resolve()
+            input_dir = prepare_trial_directory(
+                source_dirs=source_dirs,
+                trial_root=trial_root,
+                trial_name=args.trial_name,
+                overwrite=args.overwrite_trial,
+                dy_step=args.dy_step,
+                shift_sign=args.shift_sign,
+                shift_coords=(not args.no_shift_coords),
+            )
+            print(f"[info] Created trial directory: {input_dir}")
         else:
-            if not args.input_dir:
-                raise ValueError("Provide either --input-dir or --synthetic-zip")
-            input_dir = Path(args.input_dir).resolve()
-            if not input_dir.exists():
-                raise FileNotFoundError(input_dir)
+            if args.input_dir:
+                input_dir = Path(args.input_dir).resolve()
+                if not input_dir.exists():
+                    raise FileNotFoundError(input_dir)
+            elif sys.stdin.isatty():
+                source_dirs = _prompt_source_dirs()
+                trial_root = Path(args.trial_root).expanduser().resolve() if args.trial_root else Path.cwd().resolve()
+                input_dir = prepare_trial_directory(
+                    source_dirs=source_dirs,
+                    trial_root=trial_root,
+                    trial_name=args.trial_name,
+                    overwrite=args.overwrite_trial,
+                    dy_step=args.dy_step,
+                    shift_sign=args.shift_sign,
+                    shift_coords=(not args.no_shift_coords),
+                )
+                print(f"[info] Created trial directory: {input_dir}")
+            else:
+                raise ValueError("Provide either --input-dir, --synthetic-zip, --source-folder, or --source-folders")
+
+        out_path = (input_dir / out_arg) if out_arg == "combined.in" else Path(out_arg).resolve()
+        map_path = (input_dir / map_arg) if map_arg == "rename_map.json" else Path(map_arg).resolve()
 
         organoids = find_organoid_files(input_dir)
 
