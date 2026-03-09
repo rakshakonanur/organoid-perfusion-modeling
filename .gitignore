@@ -14,6 +14,7 @@ src/synthetic-vasculature-generation/__pycache__/
 *.vtu
 *.vtp
 *.geo
+.DS_Store
 src/geometry/__pycache__/
 src/geometry/_remesh_tmp/
 src/geometry/_tmp_cut/
@@ -25,3 +26,10 @@ src/geometry/branched_network_inlet_well1.geo
 src/geometry/branched_network_outlet.geo
 src/geometry/branched_network_outlet_well1.geo
 src/synthetic-vasculature-generation/Forest_Output*
+files/excel/~$channel-resistance-sv.xlsx
+src/coupling-output/
+src/coupling/__pycache__/
+src/synthetic-vasculature-generation/tetgen-tmpfile_skipped.face
+src/synthetic-vasculature-generation/tetgen-tmpfile_skipped.node
+src/prep/coupled/
+src/prep/prepped/
