@@ -41,12 +41,12 @@ import gmsh
 import meshio
 import vtk
 from vtk.util.numpy_support import vtk_to_numpy
-from scipy.spatial import cKDTree
+from scipy.spatial import ConvexHull, cKDTree
 
 from mpi4py import MPI
 import adios4dolfinx
 import dolfinx as dfx
-from dolfinx.io import XDMFFile
+from dolfinx.io import XDMFFile, gmshio
 from dolfinx import mesh as dmesh
 from basix.ufl import element
 
@@ -140,6 +140,100 @@ def _organoid_series_from_base(base: str, n_wells: int, require_all: bool = Fals
                 raise FileNotFoundError(f"Missing per-well path for organoid_{i}: {cand}")
             out.append(str(base_p))
     return out
+
+
+def _normalize(v: np.ndarray) -> np.ndarray:
+    vv = np.asarray(v, dtype=float).reshape(-1)
+    if vv.size != 3:
+        return np.array([1.0, 0.0, 0.0], dtype=float)
+    n = float(np.linalg.norm(vv))
+    if n <= 0.0:
+        return np.array([1.0, 0.0, 0.0], dtype=float)
+    return vv / n
+
+
+def _terminal_row_mask(df: pd.DataFrame) -> np.ndarray:
+    child_cols = [c for c in df.columns if re.match(r"(?i)^child\d+$", str(c))]
+    if not child_cols:
+        return np.ones(len(df), dtype=bool)
+    child_df = df[child_cols]
+    empty = child_df.isna() | child_df.astype(str).apply(lambda s: s.str.strip() == "")
+    return empty.all(axis=1).to_numpy(dtype=bool)
+
+
+def terminal_interface_metadata_from_branching(csv_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extract terminal distal coordinates, axial normals and terminal areas.
+    Columns expected from your branchingData CSV:
+      distalCoordsX/Y/Z, W1/W2/W3, Radius (or Area).
+    """
+    df = pd.read_csv(csv_path)
+    if len(df) == 0:
+        return np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0,))
+
+    mask = _terminal_row_mask(df)
+    coords = df.loc[mask, ["distalCoordsX", "distalCoordsY", "distalCoordsZ"]].to_numpy(dtype=float)
+
+    if all(c in df.columns for c in ("W1", "W2", "W3")):
+        normals = df.loc[mask, ["W1", "W2", "W3"]].to_numpy(dtype=float)
+    else:
+        p0 = df.loc[mask, ["proximalCoordsX", "proximalCoordsY", "proximalCoordsZ"]].to_numpy(dtype=float)
+        normals = coords - p0
+    normals = np.vstack([_normalize(v) for v in normals]) if len(normals) else np.zeros((0, 3))
+
+    if "Area" in df.columns:
+        areas = df.loc[mask, "Area"].to_numpy(dtype=float)
+    elif "Radius" in df.columns:
+        r = df.loc[mask, "Radius"].to_numpy(dtype=float)
+        areas = np.pi * np.maximum(r, 0.0) ** 2
+    else:
+        areas = np.zeros((coords.shape[0],), dtype=float)
+
+    return coords, normals, areas
+
+
+def _drop_seed_terminal(
+    coords: np.ndarray,
+    normals: np.ndarray,
+    areas: np.ndarray,
+    seed: np.ndarray,
+    tol: float = 1e-3,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Remove any terminal exactly/very-near the seed coordinate."""
+    c = np.asarray(coords, dtype=float).reshape(-1, 3)
+    n = np.asarray(normals, dtype=float).reshape(-1, 3)
+    a = np.asarray(areas, dtype=float).reshape(-1)
+    if len(c) == 0:
+        return c, n, a
+    s = np.asarray(seed, dtype=float).reshape(3,)
+    keep = np.linalg.norm(c - s[None, :], axis=1) > float(tol)
+    return c[keep], n[keep], a[keep]
+
+
+def _drop_nearest_seed_terminal(
+    coords: np.ndarray,
+    normals: np.ndarray,
+    areas: np.ndarray,
+    seed: np.ndarray,
+    max_dist: float = 1e-2,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Drop exactly one terminal: the one nearest to `seed`, if close enough.
+    This is more robust than exact coordinate matching after translations/rounding.
+    """
+    c = np.asarray(coords, dtype=float).reshape(-1, 3)
+    n = np.asarray(normals, dtype=float).reshape(-1, 3)
+    a = np.asarray(areas, dtype=float).reshape(-1)
+    if len(c) == 0:
+        return c, n, a
+    s = np.asarray(seed, dtype=float).reshape(3,)
+    d = np.linalg.norm(c - s[None, :], axis=1)
+    i = int(np.argmin(d))
+    if float(d[i]) > float(max_dist):
+        return c, n, a
+    keep = np.ones(len(c), dtype=bool)
+    keep[i] = False
+    return c[keep], n[keep], a[keep]
 
 # ---------------------------------------------------------------------
 # 1D pipeline (kept from your original script)
@@ -673,6 +767,44 @@ def read_3d_mesh_from_vtu(vtu_file: str, xdmf_name: str,
     return mesh
 
 
+def read_3d_mesh_from_stl_with_embedded_terminals(
+    stl_file: str,
+    msh_file: str,
+    terminal_centers: np.ndarray,
+    terminal_normals: np.ndarray,
+    terminal_areas: np.ndarray,
+    terminal_markers: np.ndarray,
+    *,
+    wall_marker: int = 1,
+    char_len_min: float = 0.001,
+    char_len_max: float = 0.01,
+    disk_npts: int = 24,
+    terminal_refine_radius_factor: float = 2.5,
+    terminal_refine_h_factor: float = 0.35,
+) -> Tuple[dfx.mesh.Mesh, dfx.mesh.MeshTags]:
+    stl_to_mesh_gmsh_with_embedded_disks(
+        stl_file=stl_file,
+        msh_file=msh_file,
+        disk_centers=terminal_centers,
+        disk_normals=terminal_normals,
+        disk_areas=terminal_areas,
+        disk_markers=terminal_markers,
+        wall_marker=wall_marker,
+        char_len_min=char_len_min,
+        char_len_max=char_len_max,
+        disk_npts=disk_npts,
+        terminal_refine_radius_factor=terminal_refine_radius_factor,
+        terminal_refine_h_factor=terminal_refine_h_factor,
+    )
+    mesh, facet_tags = read_3d_mesh_and_tags_from_msh(msh_file)
+    tdim = mesh.topology.dim
+    fdim = tdim - 1
+    mesh.topology.create_entities(fdim)
+    mesh.topology.create_connectivity(fdim, 0)
+    mesh.topology.create_connectivity(tdim, fdim)
+    return mesh, facet_tags
+
+
 def _boundary_facets_and_geometry(mesh: dfx.mesh.Mesh):
     """Compute boundary facet list, centers, normals, adjacency."""
     tdim = mesh.topology.dim
@@ -935,6 +1067,245 @@ def stl_to_mesh_gmsh(stl_file, msh_file,char_len_min=0.001, char_len_max=0.01): 
     logger.info(f"Created mesh {current_dir/msh_file} from {stl_file}")
     gmsh.finalize()
 
+
+def _disk_basis_from_normal(n: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    n = _normalize(n)
+    ref = np.array([1.0, 0.0, 0.0], dtype=float)
+    if abs(float(np.dot(n, ref))) > 0.9:
+        ref = np.array([0.0, 1.0, 0.0], dtype=float)
+    u = np.cross(n, ref)
+    u = _normalize(u)
+    v = np.cross(n, u)
+    v = _normalize(v)
+    return u, v
+
+
+def _build_stl_inside_tester(stl_file: str, tol: float = 1e-9):
+    """
+    Build a robust point-in-volume tester from the STL surface using VTK.
+    Returns (inside_fn, cleanup_fn).
+    """
+    reader = vtk.vtkSTLReader()
+    reader.SetFileName(str(stl_file))
+    reader.Update()
+    surface = reader.GetOutput()
+
+    enclosed = vtk.vtkSelectEnclosedPoints()
+    enclosed.SetTolerance(float(tol))
+    enclosed.Initialize(surface)
+
+    def _inside(point: np.ndarray) -> bool:
+        p = np.asarray(point, dtype=float).reshape(3,)
+        return bool(enclosed.IsInsideSurface(float(p[0]), float(p[1]), float(p[2])))
+
+    def _cleanup() -> None:
+        try:
+            enclosed.Complete()
+        except Exception:
+            pass
+
+    return _inside, _cleanup
+
+
+def _trim_disk_to_volume(
+    center: np.ndarray,
+    normal: np.ndarray,
+    radius: float,
+    inside_fn,
+    *,
+    n_angles: int,
+) -> np.ndarray:
+    """
+    Keep the exact disk center/orientation/radius and trim only the portion that
+    lies outside the tissue volume by sampling interior points in the disk plane.
+    This works even when the disk center is outside the tissue volume.
+    """
+    c = np.asarray(center, dtype=float).reshape(3,)
+    n = _normalize(normal)
+    r = float(radius)
+    u, v = _disk_basis_from_normal(n)
+
+    pts3: List[np.ndarray] = []
+    pts2: List[np.ndarray] = []
+    nang = int(max(16, n_angles))
+    nr = 12
+    r_levels = np.linspace(0.0, r, nr + 1)
+    for rho in r_levels:
+        for j in range(nang):
+            th = 2.0 * np.pi * (j / float(nang))
+            d = np.cos(th) * u + np.sin(th) * v
+            p = c + rho * d
+            if inside_fn(p):
+                pts3.append(p)
+                pts2.append(np.array([rho * np.cos(th), rho * np.sin(th)], dtype=float))
+
+    if len(pts3) < 3:
+        return np.zeros((0, 3), dtype=float)
+
+    xy = np.asarray(pts2, dtype=float)
+    try:
+        hull = ConvexHull(xy)
+        hull_xy = xy[hull.vertices]
+    except Exception:
+        # Fallback ordering by polar angle around sampled cloud center.
+        ctr = xy.mean(axis=0)
+        ang = np.arctan2(xy[:, 1] - ctr[1], xy[:, 0] - ctr[0])
+        order = np.argsort(ang)
+        hull_xy = xy[order]
+
+    poly = np.zeros((len(hull_xy), 3), dtype=float)
+    for i, (x, y) in enumerate(hull_xy):
+        poly[i] = c + x * u + y * v
+    return poly
+
+
+def stl_to_mesh_gmsh_with_embedded_disks(
+    stl_file: str,
+    msh_file: str,
+    disk_centers: np.ndarray,
+    disk_normals: np.ndarray,
+    disk_areas: np.ndarray,
+    disk_markers: np.ndarray,
+    *,
+    wall_marker: int = 1,
+    char_len_min: float = 0.001,
+    char_len_max: float = 0.01,
+    disk_npts: int = 24,
+    terminal_refine_radius_factor: float = 2.5,
+    terminal_refine_h_factor: float = 0.35,
+    enable_optimization: bool = False,
+) -> None:
+    """
+    Build tetra mesh from STL and embed terminal disks as INTERNAL surfaces.
+    Each disk gets its own 2D physical marker: disk_base_marker + k.
+    """
+    centers = np.asarray(disk_centers, dtype=float).reshape(-1, 3)
+    normals = np.asarray(disk_normals, dtype=float).reshape(-1, 3)
+    areas = np.asarray(disk_areas, dtype=float).reshape(-1)
+    markers = np.asarray(disk_markers, dtype=np.int32).reshape(-1)
+    if len(centers) != len(normals) or len(centers) != len(areas) or len(centers) != len(markers):
+        raise ValueError("disk_centers/disk_normals/disk_areas/disk_markers must have identical length.")
+
+    inside_fn, inside_cleanup = _build_stl_inside_tester(stl_file)
+
+    gmsh.initialize()
+    gmsh.model.add("bioreactor_with_embedded_terminals")
+    gmsh.merge(str(stl_file))
+    gmsh.model.mesh.removeDuplicateNodes()
+
+    angle = 30
+    force_param = True
+    include_boundary = True
+    curve_angle = 180
+    gmsh.model.mesh.classifySurfaces(
+        angle * (np.pi / 180.0),
+        include_boundary,
+        force_param,
+        curve_angle * (np.pi / 180.0),
+    )
+    gmsh.model.mesh.createGeometry()
+    gmsh.model.mesh.createTopology()
+
+    boundary_surfaces = [s[1] for s in gmsh.model.getEntities(2)]
+    gmsh.model.geo.addSurfaceLoop(boundary_surfaces, 1)
+    vol = gmsh.model.geo.addVolume([1], 1)
+    gmsh.model.geo.synchronize()
+
+    disk_surfaces: List[int] = []
+    terminal_refine_specs: List[Tuple[np.ndarray, float]] = []
+    try:
+        for k, (c, n, a, marker) in enumerate(zip(centers, normals, areas, markers)):
+            if not np.isfinite(a) or float(a) <= 0.0:
+                continue
+            r = float(np.sqrt(float(a) / np.pi))
+            if r <= 0.0:
+                continue
+            poly_pts = _trim_disk_to_volume(
+                center=c,
+                normal=n,
+                radius=r,
+                inside_fn=inside_fn,
+                n_angles=disk_npts,
+            )
+            if len(poly_pts) < 3:
+                logger.warning(
+                    "Skipping terminal disk %d (marker=%d): no sufficient in-volume intersection at center=%s",
+                    int(k),
+                    int(marker),
+                    np.asarray(c, dtype=float),
+                )
+                continue
+            h_local = float(max(0.1 * float(char_len_min), min(float(char_len_max), 0.33 * r)))
+            pts = []
+            for x in poly_pts:
+                pts.append(gmsh.model.geo.addPoint(float(x[0]), float(x[1]), float(x[2]), h_local))
+            lines = []
+            for j in range(len(pts)):
+                lines.append(gmsh.model.geo.addLine(pts[j], pts[(j + 1) % len(pts)]))
+            loop = gmsh.model.geo.addCurveLoop(lines)
+            s = gmsh.model.geo.addPlaneSurface([loop])
+            disk_surfaces.append(s)
+            terminal_refine_specs.append((np.asarray(c, dtype=float).copy(), float(r)))
+            gmsh.model.geo.synchronize()
+            gmsh.model.addPhysicalGroup(2, [s], int(marker))
+            gmsh.model.setPhysicalName(2, int(marker), f"terminal_disk_{k}")
+    finally:
+        inside_cleanup()
+
+    gmsh.model.geo.synchronize()
+    if disk_surfaces:
+        gmsh.model.mesh.embed(2, disk_surfaces, 3, vol)
+
+    gmsh.model.addPhysicalGroup(3, [vol], 1)
+    gmsh.model.setPhysicalName(3, 1, "volume")
+    bnd_after = gmsh.model.getBoundary([(3, int(vol))], oriented=False, recursive=False)
+    boundary_surfaces_after = [e[1] for e in bnd_after if e[0] == 2]
+    disk_surface_set = set(int(s) for s in disk_surfaces)
+    wall_surfaces = [int(s) for s in boundary_surfaces_after if int(s) not in disk_surface_set]
+    if wall_surfaces:
+        gmsh.model.addPhysicalGroup(2, wall_surfaces, int(wall_marker))
+        gmsh.model.setPhysicalName(2, int(wall_marker), "outer_wall")
+
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", float(char_len_max))
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", float(char_len_min))
+    # Local volumetric refinement around terminal interfaces.
+    if terminal_refine_specs:
+        fields = []
+        rr_fac = float(max(1.0, terminal_refine_radius_factor))
+        hh_fac = float(max(0.05, terminal_refine_h_factor))
+        for c, r in terminal_refine_specs:
+            f = gmsh.model.mesh.field.add("Ball")
+            gmsh.model.mesh.field.setNumber(f, "XCenter", float(c[0]))
+            gmsh.model.mesh.field.setNumber(f, "YCenter", float(c[1]))
+            gmsh.model.mesh.field.setNumber(f, "ZCenter", float(c[2]))
+            gmsh.model.mesh.field.setNumber(f, "Radius", float(max(rr_fac * r, char_len_min)))
+            h_in = max(0.1 * float(char_len_min), min(float(char_len_max), hh_fac * float(r)))
+            gmsh.model.mesh.field.setNumber(f, "VIn", float(h_in))
+            gmsh.model.mesh.field.setNumber(f, "VOut", float(char_len_max))
+            fields.append(f)
+        if fields:
+            fmin = gmsh.model.mesh.field.add("Min")
+            gmsh.model.mesh.field.setNumbers(fmin, "FieldsList", fields)
+            gmsh.model.mesh.field.setAsBackgroundMesh(fmin)
+    gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+    # Embedded surfaces can trigger crashes in the optimizer on some builds;
+    # keep optimization off by default for robustness.
+    gmsh.option.setNumber("Mesh.Optimize", 1 if enable_optimization else 0)
+    gmsh.option.setNumber("Mesh.OptimizeNetgen", 1 if enable_optimization else 0)
+    gmsh.option.setNumber("Mesh.Smoothing", 0)
+    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+    gmsh.model.mesh.generate(3)
+    gmsh.write(str(current_dir / msh_file))
+    logger.info("Created embedded-disk mesh %s from %s", current_dir / msh_file, stl_file)
+    gmsh.finalize()
+
+
+def read_3d_mesh_and_tags_from_msh(msh_file: str) -> Tuple[dfx.mesh.Mesh, dfx.mesh.MeshTags]:
+    mesh, _, facet_tags = gmshio.read_from_msh(str(current_dir / msh_file), MPI.COMM_WORLD, 0, gdim=3)
+    if facet_tags is None:
+        raise RuntimeError(f"No facet tags read from {msh_file}")
+    return mesh, facet_tags
+
 def stl_to_mesh_ftet(
     stl_file,
     msh_file,
@@ -1073,6 +1444,46 @@ def build_facet_tags_for_mesh(
     return facet_tags
 
 
+def overlay_concave_markers(
+    mesh: dfx.mesh.Mesh,
+    facet_tags: dfx.mesh.MeshTags,
+    *,
+    coords_inlet: np.ndarray,
+    coords_outlet: np.ndarray,
+    arterial_concave_marker: int,
+    venous_concave_marker: int,
+    theta_concave_deg: float,
+    terminal_base_marker: int,
+) -> dfx.mesh.MeshTags:
+    """
+    Overlay concave wall markers on an existing facet tag set while preserving
+    embedded terminal markers (>= outlet_base_marker).
+    """
+    tdim = mesh.topology.dim
+    fdim = tdim - 1
+    facet_to_marker: Dict[int, int] = {
+        int(f): int(v) for f, v in zip(facet_tags.indices, facet_tags.values)
+    }
+
+    shifted_inlet = np.asarray(coords_inlet, dtype=float) + np.array([0.0, 0.1, 0.0], dtype=float)
+    shifted_outlet = np.asarray(coords_outlet, dtype=float) + np.array([0.0, 0.1, 0.0], dtype=float)
+    conc_art = tag_surface_from_seed(mesh, shifted_inlet, theta_deg=theta_concave_deg, marker=arterial_concave_marker)
+    conc_ven = tag_surface_from_seed(mesh, shifted_outlet, theta_deg=theta_concave_deg, marker=venous_concave_marker)
+
+    for f, v in zip(conc_art.indices, conc_art.values):
+        old = facet_to_marker.get(int(f), 0)
+        if old < int(terminal_base_marker):
+            facet_to_marker[int(f)] = int(v)
+    for f, v in zip(conc_ven.indices, conc_ven.values):
+        old = facet_to_marker.get(int(f), 0)
+        if old < int(terminal_base_marker):
+            facet_to_marker[int(f)] = int(v)
+
+    idx = np.array(sorted(facet_to_marker.keys()), dtype=np.int32)
+    vals = np.array([facet_to_marker[i] for i in idx], dtype=np.int32)
+    return dmesh.meshtags(mesh, fdim, idx, vals)
+
+
 def write_mesh_and_tags(mesh: dfx.mesh.Mesh, facet_tags: dfx.mesh.MeshTags, mesh_xdmf: str, tags_xdmf: str) -> None:
     tdim = mesh.topology.dim
     fdim = tdim - 1
@@ -1121,6 +1532,12 @@ class Files:
         # 3D input options
         tissue_vtu_list: Optional[Sequence[str]] = None,
         ftet_max_threads: Optional[int] = None,
+        gmsh_char_len_min: float = 0.0005,
+        gmsh_char_len_max: float = 0.01,
+        gmsh_disk_npts: int = 24,
+        embedded_disk_radius_scale: float = 1.0,
+        terminal_refine_radius_factor: float = 2.5,
+        terminal_refine_h_factor: float = 0.35,
         multiwell: bool = True,
         same_tissue_for_all_wells: bool = True,
         same_meshtags_for_all_wells: bool = False,
@@ -1210,7 +1627,11 @@ class Files:
         # 1) Build 1D per well using each organoid's already-translated inputs
         # --------------------------
         inlet_terminal_pts_by_well: List[np.ndarray] = []
+        inlet_terminal_normals_by_well: List[np.ndarray] = []
+        inlet_terminal_areas_by_well: List[np.ndarray] = []
         outlet_terminal_pts_by_well: List[np.ndarray] = []
+        outlet_terminal_normals_by_well: List[np.ndarray] = []
+        outlet_terminal_areas_by_well: List[np.ndarray] = []
         coords_inlet_by_well: List[np.ndarray] = []
         coords_outlet_by_well: List[np.ndarray] = []
 
@@ -1243,6 +1664,37 @@ class Files:
             if not Path(output_out_list[i - 1]).exists():
                 raise FileNotFoundError(f"Missing output_1d_outlet folder for well{i}: {output_out_list[i - 1]}")
 
+            in_meta_coords, in_meta_normals, in_meta_areas = terminal_interface_metadata_from_branching(
+                branching_in_list[i - 1]
+            )
+            out_meta_coords, out_meta_normals, out_meta_areas = terminal_interface_metadata_from_branching(
+                branching_out_list[i - 1]
+            )
+            in_meta_coords, in_meta_normals, in_meta_areas = _drop_seed_terminal(
+                in_meta_coords, in_meta_normals, in_meta_areas, c_in
+            )
+            out_meta_coords, out_meta_normals, out_meta_areas = _drop_seed_terminal(
+                out_meta_coords, out_meta_normals, out_meta_areas, c_out
+            )
+            in_meta_coords, in_meta_normals, in_meta_areas = _drop_seed_terminal(
+                in_meta_coords, in_meta_normals, in_meta_areas, self.coords_inlet
+            )
+            out_meta_coords, out_meta_normals, out_meta_areas = _drop_seed_terminal(
+                out_meta_coords, out_meta_normals, out_meta_areas, self.coords_outlet
+            )
+            in_meta_coords, in_meta_normals, in_meta_areas = _drop_nearest_seed_terminal(
+                in_meta_coords, in_meta_normals, in_meta_areas, c_in
+            )
+            out_meta_coords, out_meta_normals, out_meta_areas = _drop_nearest_seed_terminal(
+                out_meta_coords, out_meta_normals, out_meta_areas, c_out
+            )
+            in_meta_coords, in_meta_normals, in_meta_areas = _drop_nearest_seed_terminal(
+                in_meta_coords, in_meta_normals, in_meta_areas, self.coords_inlet
+            )
+            out_meta_coords, out_meta_normals, out_meta_areas = _drop_nearest_seed_terminal(
+                out_meta_coords, out_meta_normals, out_meta_areas, self.coords_outlet
+            )
+
             inlet_terminal_pts = import_branched_mesh(
                 branching_data_file=branching_in_list[i - 1],
                 output_1d=output_in_list[i - 1],
@@ -1261,8 +1713,69 @@ class Files:
                 fileprefix=suffix_out,
                 coords=c_out,
             )
-            inlet_terminal_pts_by_well.append(inlet_terminal_pts)
-            outlet_terminal_pts_by_well.append(outlet_terminal_pts)
+            if len(in_meta_coords) > 0:
+                inlet_terminal_pts_by_well.append(in_meta_coords)
+                if len(in_meta_normals) == len(in_meta_coords):
+                    inlet_terminal_normals_by_well.append(in_meta_normals)
+                else:
+                    inlet_terminal_normals_by_well.append(np.tile(np.array([1.0, 0.0, 0.0]), (len(in_meta_coords), 1)))
+                if len(in_meta_areas) == len(in_meta_coords):
+                    inlet_terminal_areas_by_well.append(in_meta_areas)
+                else:
+                    inlet_terminal_areas_by_well.append(np.full((len(in_meta_coords),), 1e-6, dtype=float))
+            else:
+                n_fallback_in = np.tile(_normalize(c_in - c_out), (len(inlet_terminal_pts), 1))
+                a_fallback_in = np.full((len(inlet_terminal_pts),), 1e-6, dtype=float)
+                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_seed_terminal(
+                    inlet_terminal_pts, n_fallback_in, a_fallback_in, c_in
+                )
+                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_seed_terminal(
+                    inlet_terminal_pts, n_fallback_in, a_fallback_in, self.coords_inlet
+                )
+                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_nearest_seed_terminal(
+                    inlet_terminal_pts, n_fallback_in, a_fallback_in, c_in
+                )
+                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_nearest_seed_terminal(
+                    inlet_terminal_pts, n_fallback_in, a_fallback_in, self.coords_inlet
+                )
+                inlet_terminal_pts_by_well.append(inlet_terminal_pts)
+                inlet_terminal_normals_by_well.append(n_fallback_in)
+                inlet_terminal_areas_by_well.append(a_fallback_in)
+            if len(out_meta_coords) > 0:
+                outlet_terminal_pts_by_well.append(out_meta_coords)
+                if len(out_meta_normals) == len(out_meta_coords):
+                    outlet_terminal_normals_by_well.append(out_meta_normals)
+                else:
+                    outlet_terminal_normals_by_well.append(np.tile(np.array([1.0, 0.0, 0.0]), (len(out_meta_coords), 1)))
+                if len(out_meta_areas) == len(out_meta_coords):
+                    outlet_terminal_areas_by_well.append(out_meta_areas)
+                else:
+                    outlet_terminal_areas_by_well.append(np.full((len(out_meta_coords),), 1e-6, dtype=float))
+            else:
+                n_fallback = np.tile(_normalize(c_out - c_in), (len(outlet_terminal_pts), 1))
+                a_fallback = np.full((len(outlet_terminal_pts),), 1e-6, dtype=float)
+                # Fallback if metadata unavailable: approximate normals from seed axis.
+                outlet_terminal_pts, n_fallback, a_fallback = _drop_seed_terminal(
+                    outlet_terminal_pts, n_fallback, a_fallback, c_out
+                )
+                outlet_terminal_pts, n_fallback, a_fallback = _drop_seed_terminal(
+                    outlet_terminal_pts, n_fallback, a_fallback, self.coords_outlet
+                )
+                outlet_terminal_pts, n_fallback, a_fallback = _drop_nearest_seed_terminal(
+                    outlet_terminal_pts, n_fallback, a_fallback, c_out
+                )
+                outlet_terminal_pts, n_fallback, a_fallback = _drop_nearest_seed_terminal(
+                    outlet_terminal_pts, n_fallback, a_fallback, self.coords_outlet
+                )
+                outlet_terminal_pts_by_well.append(outlet_terminal_pts)
+                outlet_terminal_normals_by_well.append(n_fallback)
+                outlet_terminal_areas_by_well.append(a_fallback)
+            logger.info(
+                "[terminals] well=%d inlet=%d outlet=%d",
+                i,
+                len(inlet_terminal_pts_by_well[-1]),
+                len(outlet_terminal_pts_by_well[-1]),
+            )
 
         # --------------------------
         # 2) Load/duplicate 3D and tag facets
@@ -1293,7 +1806,89 @@ class Files:
             return
 
         if tissue_vtu is None and tissue_stl is None:
-            raise ValueError("Provide tissue_vtu or tissue_vtu_list.")
+            raise ValueError("Provide tissue_vtu, tissue_stl, or tissue_vtu_list.")
+
+        # STL path: create embedded inlet/outlet terminal disk surfaces as physical groups.
+        if tissue_stl is not None:
+            if not multiwell:
+                terminal_centers = np.vstack([inlet_terminal_pts_by_well[0], outlet_terminal_pts_by_well[0]])
+                terminal_normals = np.vstack([inlet_terminal_normals_by_well[0], outlet_terminal_normals_by_well[0]])
+                terminal_areas = np.concatenate([inlet_terminal_areas_by_well[0], outlet_terminal_areas_by_well[0]])
+                terminal_markers = np.concatenate(
+                    [
+                        inlet_base_marker + np.arange(len(inlet_terminal_pts_by_well[0]), dtype=np.int32),
+                        outlet_base_marker + np.arange(len(outlet_terminal_pts_by_well[0]), dtype=np.int32),
+                    ]
+                )
+                mesh, facet_tags = read_3d_mesh_from_stl_with_embedded_terminals(
+                    stl_file=tissue_stl,
+                    msh_file="_tmp_bioreactor_embedded.msh",
+                    terminal_centers=terminal_centers,
+                    terminal_normals=terminal_normals,
+                    terminal_areas=terminal_areas,
+                    terminal_markers=terminal_markers,
+                    wall_marker=wall_marker,
+                    char_len_min=gmsh_char_len_min,
+                    char_len_max=gmsh_char_len_max,
+                    disk_npts=gmsh_disk_npts,
+                    terminal_refine_radius_factor=terminal_refine_radius_factor,
+                    terminal_refine_h_factor=terminal_refine_h_factor,
+                )
+                facet_tags = overlay_concave_markers(
+                    mesh,
+                    facet_tags,
+                    coords_inlet=coords_inlet_by_well[0],
+                    coords_outlet=coords_outlet_by_well[0],
+                    arterial_concave_marker=arterial_concave_marker,
+                    venous_concave_marker=venous_concave_marker,
+                    theta_concave_deg=theta_concave_deg,
+                    terminal_base_marker=inlet_base_marker,
+                )
+                write_mesh_and_tags(mesh, facet_tags, "bioreactor.xdmf", "mesh_tags.xdmf")
+                return
+
+            if same_tissue_for_all_wells:
+                terminal_centers = np.vstack([inlet_terminal_pts_by_well[0], outlet_terminal_pts_by_well[0]])
+                terminal_normals = np.vstack([inlet_terminal_normals_by_well[0], outlet_terminal_normals_by_well[0]])
+                terminal_areas = np.concatenate([inlet_terminal_areas_by_well[0], outlet_terminal_areas_by_well[0]])
+                terminal_markers = np.concatenate(
+                    [
+                        inlet_base_marker + np.arange(len(inlet_terminal_pts_by_well[0]), dtype=np.int32),
+                        outlet_base_marker + np.arange(len(outlet_terminal_pts_by_well[0]), dtype=np.int32),
+                    ]
+                )
+                mesh, facet_tags = read_3d_mesh_from_stl_with_embedded_terminals(
+                    stl_file=tissue_stl,
+                    msh_file="_tmp_bioreactor_embedded_base.msh",
+                    terminal_centers=terminal_centers,
+                    terminal_normals=terminal_normals,
+                    terminal_areas=terminal_areas,
+                    terminal_markers=terminal_markers,
+                    wall_marker=wall_marker,
+                    char_len_min=gmsh_char_len_min,
+                    char_len_max=gmsh_char_len_max,
+                    disk_npts=gmsh_disk_npts,
+                    terminal_refine_radius_factor=terminal_refine_radius_factor,
+                    terminal_refine_h_factor=terminal_refine_h_factor,
+                )
+                facet_tags = overlay_concave_markers(
+                    mesh,
+                    facet_tags,
+                    coords_inlet=coords_inlet_by_well[0],
+                    coords_outlet=coords_outlet_by_well[0],
+                    arterial_concave_marker=arterial_concave_marker,
+                    venous_concave_marker=venous_concave_marker,
+                    theta_concave_deg=theta_concave_deg,
+                    terminal_base_marker=inlet_base_marker,
+                )
+                X0 = mesh.geometry.x.copy()
+                for i in range(1, n_wells + 1):
+                    dy = well_spacing_y * (i - 1)
+                    mesh.geometry.x[:] = X0 + np.array([0.0, dy, 0.0], dtype=X0.dtype)
+                    write_mesh_and_tags(mesh, facet_tags, f"bioreactor_well{i}.xdmf", f"mesh_tags_well{i}.xdmf")
+                mesh.geometry.x[:] = X0
+                return
+            raise ValueError("For STL workflow, same_tissue_for_all_wells=False is not yet supported.")
 
         if not multiwell:
             mesh = read_3d_mesh_from_vtu(tissue_vtu, xdmf_name="_tmp_bioreactor.xdmf")
@@ -1388,14 +1983,14 @@ class Files:
 if __name__ == "__main__":
     # Example usage (update paths)
     Files(
-        tissue_stl=None,
-        tissue_vtu = "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/tissue_domain_volume.vtu",
-        output_1d_inlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/0D_Input_Files/inlet",
-        output_1d_outlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/0D_Input_Files/outlet",
-        branching_data_inlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/branchingData_0.csv",
-        branching_data_outlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022626/Run15_10branches/branchingData_1.csv",
-        coords_inlet=[-.175, 0.9, .55],
-        coords_outlet=[.175, 0.9, .55],
+        tissue_stl= "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/original/organoid-1.stl",
+        tissue_vtu = None,
+        output_1d_inlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/030426/Run1_10branches/0D_Input_Files/inlet",
+        output_1d_outlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/030426/Run1_10branches/0D_Input_Files/outlet",
+        branching_data_inlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/030426/Run1_10branches/branchingData_0.csv",
+        branching_data_outlet="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/030426/Run1_10branches/branchingData_1.csv",
+        coords_inlet=[-.18, 0.9, .55],
+        coords_outlet=[.18, 0.9, .55],
         ftet_max_threads=24,
         multiwell=True,
         same_tissue_for_all_wells=True,
