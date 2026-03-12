@@ -1,36 +1,36 @@
 [generate-1d-mesh] INFO - Parse arguments ...
-[generate-1d-mesh] INFO - Model order: 0
-[generate-1d-mesh] INFO - Centerlines input file: /Users/rakshakonanur/Documents/Research/two-channel/simvascular/u_bend/ROMSimulations/rom/centerlines.vtp
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Centerlines input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/rom/centerlines.vtp
 [generate-1d-mesh] INFO - Compute centerlines: False
 [generate-1d-mesh] INFO - Density: 1.060000
-[generate-1d-mesh] INFO - Element size: 0.100000
-[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/two-channel/simvascular/u_bend/ROMSimulations/rom/steady_3d.flow
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/rom/steady_3d.flow
 [generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
 [generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
 [generate-1d-mesh] INFO - Material model: LINEAR
 [generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
 [generate-1d-mesh] INFO - Model name: u-bend
-[generate-1d-mesh] INFO - Model order: 0
+[generate-1d-mesh] INFO - Model order: 1
 [generate-1d-mesh] INFO - Number of time steps: 100
-[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/two-channel/simvascular/u_bend/ROMSimulations/rom
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/rom
 [generate-1d-mesh] INFO - Outflow bc type: ['rcrt.dat']
-[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/two-channel/simvascular/u_bend/ROMSimulations/rom/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/rom/outlet_face_names.dat'.
 [generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 1000
 [generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
 [generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
 [generate-1d-mesh] INFO - Save data frequency: 1
-[generate-1d-mesh] INFO - Solver output file: solver_0d.json
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
 [generate-1d-mesh] INFO - Simulation time step: 0.010000
 [generate-1d-mesh] INFO - Uniform boundary conditions: False
 [generate-1d-mesh] INFO - Units: cm
 [generate-1d-mesh] INFO - Viscosity: 0.040000
 [generate-1d-mesh] INFO - Wall properties are uniform.
-[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/two-channel/simvascular/u_bend/ROMSimulations/rom/centerlines.vtp
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/rom/centerlines.vtp
 [generate-1d-mesh] INFO -    Number of points: 5257 
 [generate-1d-mesh] INFO -    Number of cells: 5256 
 [generate-1d-mesh] INFO -    Number of arrays: 0
 [generate-1d-mesh] INFO - Generate the 1D mesh ...
-[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/two-channel/simvascular/u_bend/ROMSimulations/rom/outlet_face_names.dat
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/rom/outlet_face_names.dat
 [generate-1d-mesh] INFO - Number of model outlet faces names: 1
 [generate-1d-mesh] INFO - Outlet face names: ['outlet']
 [generate-1d-mesh] INFO - Number of centerline branches: 1
@@ -40,4 +40,331 @@
 [generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
 [generate-1d-mesh] INFO - Surface outlet boundary condition type rcr
 [generate-1d-mesh] INFO - Read inflow BC ...
-[generate-1d-mesh] INFO - Generated 1000 segments, 1001 nodes and 1000 elements.
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: rcr
+[generate-1d-mesh] INFO - Generated 1000 segments, 1001 nodes and 41184 elements.
+[generate-1d-mesh] INFO - Parse arguments ...
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Centerlines input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO - Compute centerlines: False
+[generate-1d-mesh] INFO - Density: 1.060000
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/steady_3d.flow
+[generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
+[generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
+[generate-1d-mesh] INFO - Material model: LINEAR
+[generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
+[generate-1d-mesh] INFO - Model name: u-bend
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Number of time steps: 100
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026
+[generate-1d-mesh] INFO - Outflow bc type: ['rcrt.dat']
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 100
+[generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
+[generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
+[generate-1d-mesh] INFO - Save data frequency: 1
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
+[generate-1d-mesh] INFO - Simulation time step: 0.010000
+[generate-1d-mesh] INFO - Uniform boundary conditions: False
+[generate-1d-mesh] INFO - Units: cm
+[generate-1d-mesh] INFO - Viscosity: 0.040000
+[generate-1d-mesh] INFO - Wall properties are uniform.
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO -    Number of points: 5255 
+[generate-1d-mesh] INFO -    Number of cells: 5254 
+[generate-1d-mesh] INFO -    Number of arrays: 0
+[generate-1d-mesh] INFO - Generate the 1D mesh ...
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat
+[generate-1d-mesh] INFO - Number of model outlet faces names: 1
+[generate-1d-mesh] INFO - Outlet face names: ['outlet']
+[generate-1d-mesh] INFO - Number of centerline branches: 1
+[generate-1d-mesh] INFO - Number of centerline bifurcations: 0
+[generate-1d-mesh] INFO - Number of svOneDSolver branches: 100
+[generate-1d-mesh] INFO - Number of svOneDSolver joints: 99
+[generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
+[generate-1d-mesh] INFO - Surface outlet boundary condition type rcr
+[generate-1d-mesh] INFO - Read inflow BC ...
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: rcr
+[generate-1d-mesh] INFO - Generated 100 segments, 101 nodes and 1861 elements.
+[generate-1d-mesh] INFO - Parse arguments ...
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Centerlines input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO - Compute centerlines: False
+[generate-1d-mesh] INFO - Density: 1.060000
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/steady_3d.flow
+[generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
+[generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
+[generate-1d-mesh] INFO - Material model: LINEAR
+[generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
+[generate-1d-mesh] INFO - Model name: u-bend
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Number of time steps: 1000
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026
+[generate-1d-mesh] INFO - Outflow bc type: ['rcrt.dat']
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 100
+[generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
+[generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
+[generate-1d-mesh] INFO - Save data frequency: 10
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
+[generate-1d-mesh] INFO - Simulation time step: 0.001000
+[generate-1d-mesh] INFO - Uniform boundary conditions: False
+[generate-1d-mesh] INFO - Units: cm
+[generate-1d-mesh] INFO - Viscosity: 0.040000
+[generate-1d-mesh] INFO - Wall properties are uniform.
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO -    Number of points: 5255 
+[generate-1d-mesh] INFO -    Number of cells: 5254 
+[generate-1d-mesh] INFO -    Number of arrays: 0
+[generate-1d-mesh] INFO - Generate the 1D mesh ...
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat
+[generate-1d-mesh] INFO - Number of model outlet faces names: 1
+[generate-1d-mesh] INFO - Outlet face names: ['outlet']
+[generate-1d-mesh] INFO - Number of centerline branches: 1
+[generate-1d-mesh] INFO - Number of centerline bifurcations: 0
+[generate-1d-mesh] INFO - Number of svOneDSolver branches: 100
+[generate-1d-mesh] INFO - Number of svOneDSolver joints: 99
+[generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
+[generate-1d-mesh] INFO - Surface outlet boundary condition type rcr
+[generate-1d-mesh] INFO - Read inflow BC ...
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: rcr
+[generate-1d-mesh] INFO - Generated 100 segments, 101 nodes and 1861 elements.
+[generate-1d-mesh] INFO - Parse arguments ...
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Centerlines input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO - Compute centerlines: False
+[generate-1d-mesh] INFO - Density: 1.060000
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/steady_3d.flow
+[generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
+[generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
+[generate-1d-mesh] INFO - Material model: LINEAR
+[generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
+[generate-1d-mesh] INFO - Model name: u-bend
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Number of time steps: 1000
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026
+[generate-1d-mesh] INFO - Outflow bc type: ['resistance.dat']
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 100
+[generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
+[generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
+[generate-1d-mesh] INFO - Save data frequency: 10
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
+[generate-1d-mesh] INFO - Simulation time step: 0.001000
+[generate-1d-mesh] INFO - Uniform boundary conditions: False
+[generate-1d-mesh] INFO - Units: cm
+[generate-1d-mesh] INFO - Viscosity: 0.040000
+[generate-1d-mesh] INFO - Wall properties are uniform.
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO -    Number of points: 5255 
+[generate-1d-mesh] INFO -    Number of cells: 5254 
+[generate-1d-mesh] INFO -    Number of arrays: 0
+[generate-1d-mesh] INFO - Generate the 1D mesh ...
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat
+[generate-1d-mesh] INFO - Number of model outlet faces names: 1
+[generate-1d-mesh] INFO - Outlet face names: ['outlet']
+[generate-1d-mesh] INFO - Number of centerline branches: 1
+[generate-1d-mesh] INFO - Number of centerline bifurcations: 0
+[generate-1d-mesh] INFO - Number of svOneDSolver branches: 100
+[generate-1d-mesh] INFO - Number of svOneDSolver joints: 99
+[generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
+[generate-1d-mesh] INFO - Surface outlet boundary condition type resistance
+[generate-1d-mesh] INFO - Read inflow BC ...
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: resistance
+[generate-1d-mesh] INFO - Generated 100 segments, 101 nodes and 1861 elements.
+simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO - Compute centerlines: False
+[generate-1d-mesh] INFO - Density: 1.060000
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/steady_3d.flow
+[generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
+[generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
+[generate-1d-mesh] INFO - Material model: LINEAR
+[generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
+[generate-1d-mesh] INFO - Model name: u-bend
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Number of time steps: 1000
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026
+[generate-1d-mesh] INFO - Outflow bc type: ['resistance.dat']
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 100
+[generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
+[generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
+[generate-1d-mesh] INFO - Save data frequency: 10
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
+[generate-1d-mesh] INFO - Simulation time step: 0.001000
+[generate-1d-mesh] INFO - Uniform boundary conditions: False
+[generate-1d-mesh] INFO - Units: cm
+[generate-1d-mesh] INFO - Viscosity: 0.040000
+[generate-1d-mesh] INFO - Wall properties are uniform.
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO -    Number of points: 5255 
+[generate-1d-mesh] INFO -    Number of cells: 5254 
+[generate-1d-mesh] INFO -    Number of arrays: 0
+[generate-1d-mesh] INFO - Generate the 1D mesh ...
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat
+[generate-1d-mesh] INFO - Number of model outlet faces names: 1
+[generate-1d-mesh] INFO - Outlet face names: ['outlet']
+[generate-1d-mesh] INFO - Number of centerline branches: 1
+[generate-1d-mesh] INFO - Number of centerline bifurcations: 0
+[generate-1d-mesh] INFO - Number of svOneDSolver branches: 100
+[generate-1d-mesh] INFO - Number of svOneDSolver joints: 99
+[generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
+[generate-1d-mesh] INFO - Surface outlet boundary condition type resistance
+[generate-1d-mesh] INFO - Read inflow BC ...
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: resistance
+[generate-1d-mesh] INFO - Generated 100 segments, 101 nodes and 1861 elements.
+simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO - Compute centerlines: False
+[generate-1d-mesh] INFO - Density: 1.060000
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/steady_3d.flow
+[generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
+[generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
+[generate-1d-mesh] INFO - Material model: LINEAR
+[generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
+[generate-1d-mesh] INFO - Model name: u-bend
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Number of time steps: 1000
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026
+[generate-1d-mesh] INFO - Outflow bc type: ['resistance.dat']
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 100
+[generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
+[generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
+[generate-1d-mesh] INFO - Save data frequency: 10
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
+[generate-1d-mesh] INFO - Simulation time step: 0.001000
+[generate-1d-mesh] INFO - Uniform boundary conditions: False
+[generate-1d-mesh] INFO - Units: cm
+[generate-1d-mesh] INFO - Viscosity: 0.040000
+[generate-1d-mesh] INFO - Wall properties are uniform.
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO -    Number of points: 5255 
+[generate-1d-mesh] INFO -    Number of cells: 5254 
+[generate-1d-mesh] INFO -    Number of arrays: 0
+[generate-1d-mesh] INFO - Generate the 1D mesh ...
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat
+[generate-1d-mesh] INFO - Number of model outlet faces names: 1
+[generate-1d-mesh] INFO - Outlet face names: ['outlet']
+[generate-1d-mesh] INFO - Number of centerline branches: 1
+[generate-1d-mesh] INFO - Number of centerline bifurcations: 0
+[generate-1d-mesh] INFO - Number of svOneDSolver branches: 100
+[generate-1d-mesh] INFO - Number of svOneDSolver joints: 99
+[generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
+[generate-1d-mesh] INFO - Surface outlet boundary condition type resistance
+[generate-1d-mesh] INFO - Read inflow BC ...
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: resistance
+[generate-1d-mesh] INFO - Generated 100 segments, 101 nodes and 1861 elements.
+guments ...
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Centerlines input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO - Compute centerlines: False
+[generate-1d-mesh] INFO - Density: 1.060000
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/steady_3d.flow
+[generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
+[generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
+[generate-1d-mesh] INFO - Material model: LINEAR
+[generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
+[generate-1d-mesh] INFO - Model name: u-bend
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Number of time steps: 1000
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026
+[generate-1d-mesh] INFO - Outflow bc type: ['resistance.dat']
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 100
+[generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
+[generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
+[generate-1d-mesh] INFO - Save data frequency: 10
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
+[generate-1d-mesh] INFO - Simulation time step: 0.001000
+[generate-1d-mesh] INFO - Uniform boundary conditions: False
+[generate-1d-mesh] INFO - Units: cm
+[generate-1d-mesh] INFO - Viscosity: 0.040000
+[generate-1d-mesh] INFO - Wall properties are uniform.
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO -    Number of points: 5255 
+[generate-1d-mesh] INFO -    Number of cells: 5254 
+[generate-1d-mesh] INFO -    Number of arrays: 0
+[generate-1d-mesh] INFO - Generate the 1D mesh ...
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat
+[generate-1d-mesh] INFO - Number of model outlet faces names: 1
+[generate-1d-mesh] INFO - Outlet face names: ['outlet']
+[generate-1d-mesh] INFO - Number of centerline branches: 1
+[generate-1d-mesh] INFO - Number of centerline bifurcations: 0
+[generate-1d-mesh] INFO - Number of svOneDSolver branches: 100
+[generate-1d-mesh] INFO - Number of svOneDSolver joints: 99
+[generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
+[generate-1d-mesh] INFO - Surface outlet boundary condition type resistance
+[generate-1d-mesh] INFO - Read inflow BC ...
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: resistance
+[generate-1d-mesh] INFO - Generated 100 segments, 101 nodes and 1861 elements.
+simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO - Compute centerlines: False
+[generate-1d-mesh] INFO - Density: 1.060000
+[generate-1d-mesh] INFO - Element size: 0.010000
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/steady_3d.flow
+[generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
+[generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
+[generate-1d-mesh] INFO - Material model: LINEAR
+[generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
+[generate-1d-mesh] INFO - Model name: u-bend
+[generate-1d-mesh] INFO - Model order: 1
+[generate-1d-mesh] INFO - Number of time steps: 1000
+[generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026
+[generate-1d-mesh] INFO - Outflow bc type: ['resistance.dat']
+[generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat'.
+[generate-1d-mesh] INFO - Minimum number of sub-segments per master-segment: 100
+[generate-1d-mesh] INFO - Sub-segment size in vessel master-segment: 9999
+[generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
+[generate-1d-mesh] INFO - Save data frequency: 10
+[generate-1d-mesh] INFO - Solver output file: solver_1d.in
+[generate-1d-mesh] INFO - Simulation time step: 0.001000
+[generate-1d-mesh] INFO - Uniform boundary conditions: False
+[generate-1d-mesh] INFO - Units: cm
+[generate-1d-mesh] INFO - Viscosity: 0.040000
+[generate-1d-mesh] INFO - Wall properties are uniform.
+[generate-1d-mesh] INFO - Read centerlines from the file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/centerlines.vtp
+[generate-1d-mesh] INFO -    Number of points: 5255 
+[generate-1d-mesh] INFO -    Number of cells: 5254 
+[generate-1d-mesh] INFO -    Number of arrays: 0
+[generate-1d-mesh] INFO - Generate the 1D mesh ...
+[generate-1d-mesh] INFO - Read model outlet face names from: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/031026/outlet_face_names.dat
+[generate-1d-mesh] INFO - Number of model outlet faces names: 1
+[generate-1d-mesh] INFO - Outlet face names: ['outlet']
+[generate-1d-mesh] INFO - Number of centerline branches: 1
+[generate-1d-mesh] INFO - Number of centerline bifurcations: 0
+[generate-1d-mesh] INFO - Number of svOneDSolver branches: 100
+[generate-1d-mesh] INFO - Number of svOneDSolver joints: 99
+[generate-1d-mesh] INFO - Set variable outflow boundary conditions ...
+[generate-1d-mesh] INFO - Surface outlet boundary condition type resistance
+[generate-1d-mesh] INFO - Read inflow BC ...
+[generate-1d-mesh] INFO - Write solver file.
+[generate-1d-mesh] INFO - Write solver segment section ...
+[generate-1d-mesh] INFO - Uniform BC: False
+[generate-1d-mesh] INFO - Outflow BC: resistance
+[generate-1d-mesh] INFO - Generated 100 segments, 101 nodes and 1861 elements.

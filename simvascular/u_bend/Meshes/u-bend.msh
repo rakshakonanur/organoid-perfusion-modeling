@@ -6,7 +6,7 @@
                 <command content="option surface 1"/>
                 <command content="option volume 1"/>
                 <command content="option UseMMG 1"/>
-                <command content="option GlobalEdgeSize 0.025"/>
+                <command content="option GlobalEdgeSize 0.0499"/>
                 <command content="setWalls"/>
                 <command content="option Optimization 3"/>
                 <command content="option QualityRatio 1.4"/>

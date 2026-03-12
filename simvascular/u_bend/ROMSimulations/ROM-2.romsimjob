@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<mitk_job model_name="u-bend" model_order="0" mesh_name="" status="Simulation done" version="1.0">
+<mitk_job model_name="u-bend" model_order="1" mesh_name="" status="Simulation failed" version="1.0">
     <job>
         <model_props/>
         <basic_props>
@@ -11,8 +11,8 @@
                 <prop key="Analytic Shape" value="parabolic"/>
                 <prop key="BC Type" value="Prescribed Velocities"/>
                 <prop key="Flip Normal" value="False"/>
-                <prop key="Flow Rate" value="0.0 -68.8
-1.0 -68.8"/>
+                <prop key="Flow Rate" value="0.0 2.5e-2
+1.0 2.5e-2"/>
                 <prop key="Fourier Modes" value="10"/>
                 <prop key="Original File" value="steady_3d.flow"/>
                 <prop key="Period" value="1.0"/>
@@ -22,8 +22,8 @@
                 <prop key="BC Type" value="RCR"/>
                 <prop key="C Values" value="0"/>
                 <prop key="Pressure" value="0"/>
-                <prop key="R Values" value="1000 0"/>
-                <prop key="Values" value="1000 0 0"/>
+                <prop key="R Values" value="10 0"/>
+                <prop key="Values" value="10 0 0"/>
             </cap>
         </cap_props>
         <convert_results_props>
@@ -34,7 +34,7 @@
         </convert_results_props>
         <mesh_props>
             <prop key="Adaptive Meshing" value="0"/>
-            <prop key="Number of segments per branch" value="10"/>
+            <prop key="Number of segments per branch" value="100"/>
         </mesh_props>
         <wall_props>
             <prop key="Linear Material Ehr" value="1.0e7"/>

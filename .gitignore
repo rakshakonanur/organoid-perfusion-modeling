@@ -33,3 +33,6 @@ src/synthetic-vasculature-generation/tetgen-tmpfile_skipped.face
 src/synthetic-vasculature-generation/tetgen-tmpfile_skipped.node
 src/prep/coupled/
 src/prep/prepped/
+simvascular/u-bend-updated/
+simvascular/u_bend/
+src/coupling-output-full-geometry/

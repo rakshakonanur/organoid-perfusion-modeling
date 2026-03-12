@@ -1,1019 +1,1034 @@
-[DEBUG MESSAGE] Starting svZeroDSolver
-[DEBUG MESSAGE] Read simulation parameters
-[DEBUG MESSAGE] Loading simulation parameters
-[DEBUG MESSAGE] Finished loading simulation parameters
-[DEBUG MESSAGE] Load model
-[DEBUG MESSAGE] Loading model
-[DEBUG MESSAGE] Loading vessels
-[DEBUG MESSAGE] Created boundary condition INFLOW
-[DEBUG MESSAGE] Created boundary condition RCR_0
-[DEBUG MESSAGE] Created junction J0
-[DEBUG MESSAGE] Created junction J1
-[DEBUG MESSAGE] Created junction J2
-[DEBUG MESSAGE] Created junction J3
-[DEBUG MESSAGE] Created junction J4
-[DEBUG MESSAGE] Created junction J5
-[DEBUG MESSAGE] Created junction J6
-[DEBUG MESSAGE] Created junction J7
-[DEBUG MESSAGE] Created junction J8
-[DEBUG MESSAGE] Created junction J9
-[DEBUG MESSAGE] Created junction J10
-[DEBUG MESSAGE] Created junction J11
-[DEBUG MESSAGE] Created junction J12
-[DEBUG MESSAGE] Created junction J13
-[DEBUG MESSAGE] Created junction J14
-[DEBUG MESSAGE] Created junction J15
-[DEBUG MESSAGE] Created junction J16
-[DEBUG MESSAGE] Created junction J17
-[DEBUG MESSAGE] Created junction J18
-[DEBUG MESSAGE] Created junction J19
-[DEBUG MESSAGE] Created junction J20
-[DEBUG MESSAGE] Created junction J21
-[DEBUG MESSAGE] Created junction J22
-[DEBUG MESSAGE] Created junction J23
-[DEBUG MESSAGE] Created junction J24
-[DEBUG MESSAGE] Created junction J25
-[DEBUG MESSAGE] Created junction J26
-[DEBUG MESSAGE] Created junction J27
-[DEBUG MESSAGE] Created junction J28
-[DEBUG MESSAGE] Created junction J29
-[DEBUG MESSAGE] Created junction J30
-[DEBUG MESSAGE] Created junction J31
-[DEBUG MESSAGE] Created junction J32
-[DEBUG MESSAGE] Created junction J33
-[DEBUG MESSAGE] Created junction J34
-[DEBUG MESSAGE] Created junction J35
-[DEBUG MESSAGE] Created junction J36
-[DEBUG MESSAGE] Created junction J37
-[DEBUG MESSAGE] Created junction J38
-[DEBUG MESSAGE] Created junction J39
-[DEBUG MESSAGE] Created junction J40
-[DEBUG MESSAGE] Created junction J41
-[DEBUG MESSAGE] Created junction J42
-[DEBUG MESSAGE] Created junction J43
-[DEBUG MESSAGE] Created junction J44
-[DEBUG MESSAGE] Created junction J45
-[DEBUG MESSAGE] Created junction J46
-[DEBUG MESSAGE] Created junction J47
-[DEBUG MESSAGE] Created junction J48
-[DEBUG MESSAGE] Created junction J49
-[DEBUG MESSAGE] Created junction J50
-[DEBUG MESSAGE] Created junction J51
-[DEBUG MESSAGE] Created junction J52
-[DEBUG MESSAGE] Created junction J53
-[DEBUG MESSAGE] Created junction J54
-[DEBUG MESSAGE] Created junction J55
-[DEBUG MESSAGE] Created junction J56
-[DEBUG MESSAGE] Created junction J57
-[DEBUG MESSAGE] Created junction J58
-[DEBUG MESSAGE] Created junction J59
-[DEBUG MESSAGE] Created junction J60
-[DEBUG MESSAGE] Created junction J61
-[DEBUG MESSAGE] Created junction J62
-[DEBUG MESSAGE] Created junction J63
-[DEBUG MESSAGE] Created junction J64
-[DEBUG MESSAGE] Created junction J65
-[DEBUG MESSAGE] Created junction J66
-[DEBUG MESSAGE] Created junction J67
-[DEBUG MESSAGE] Created junction J68
-[DEBUG MESSAGE] Created junction J69
-[DEBUG MESSAGE] Created junction J70
-[DEBUG MESSAGE] Created junction J71
-[DEBUG MESSAGE] Created junction J72
-[DEBUG MESSAGE] Created junction J73
-[DEBUG MESSAGE] Created junction J74
-[DEBUG MESSAGE] Created junction J75
-[DEBUG MESSAGE] Created junction J76
-[DEBUG MESSAGE] Created junction J77
-[DEBUG MESSAGE] Created junction J78
-[DEBUG MESSAGE] Created junction J79
-[DEBUG MESSAGE] Created junction J80
-[DEBUG MESSAGE] Created junction J81
-[DEBUG MESSAGE] Created junction J82
-[DEBUG MESSAGE] Created junction J83
-[DEBUG MESSAGE] Created junction J84
-[DEBUG MESSAGE] Created junction J85
-[DEBUG MESSAGE] Created junction J86
-[DEBUG MESSAGE] Created junction J87
-[DEBUG MESSAGE] Created junction J88
-[DEBUG MESSAGE] Created junction J89
-[DEBUG MESSAGE] Created junction J90
-[DEBUG MESSAGE] Created junction J91
-[DEBUG MESSAGE] Created junction J92
-[DEBUG MESSAGE] Created junction J93
-[DEBUG MESSAGE] Created junction J94
-[DEBUG MESSAGE] Created junction J95
-[DEBUG MESSAGE] Created junction J96
-[DEBUG MESSAGE] Created junction J97
-[DEBUG MESSAGE] Created junction J98
-[DEBUG MESSAGE] Created junction J99
-[DEBUG MESSAGE] Created junction J100
-[DEBUG MESSAGE] Created junction J101
-[DEBUG MESSAGE] Created junction J102
-[DEBUG MESSAGE] Created junction J103
-[DEBUG MESSAGE] Created junction J104
-[DEBUG MESSAGE] Created junction J105
-[DEBUG MESSAGE] Created junction J106
-[DEBUG MESSAGE] Created junction J107
-[DEBUG MESSAGE] Created junction J108
-[DEBUG MESSAGE] Created junction J109
-[DEBUG MESSAGE] Created junction J110
-[DEBUG MESSAGE] Created junction J111
-[DEBUG MESSAGE] Created junction J112
-[DEBUG MESSAGE] Created junction J113
-[DEBUG MESSAGE] Created junction J114
-[DEBUG MESSAGE] Created junction J115
-[DEBUG MESSAGE] Created junction J116
-[DEBUG MESSAGE] Created junction J117
-[DEBUG MESSAGE] Created junction J118
-[DEBUG MESSAGE] Created junction J119
-[DEBUG MESSAGE] Created junction J120
-[DEBUG MESSAGE] Created junction J121
-[DEBUG MESSAGE] Created junction J122
-[DEBUG MESSAGE] Created junction J123
-[DEBUG MESSAGE] Created junction J124
-[DEBUG MESSAGE] Created junction J125
-[DEBUG MESSAGE] Created junction J126
-[DEBUG MESSAGE] Created junction J127
-[DEBUG MESSAGE] Created junction J128
-[DEBUG MESSAGE] Created junction J129
-[DEBUG MESSAGE] Created junction J130
-[DEBUG MESSAGE] Created junction J131
-[DEBUG MESSAGE] Created junction J132
-[DEBUG MESSAGE] Created junction J133
-[DEBUG MESSAGE] Created junction J134
-[DEBUG MESSAGE] Created junction J135
-[DEBUG MESSAGE] Created junction J136
-[DEBUG MESSAGE] Created junction J137
-[DEBUG MESSAGE] Created junction J138
-[DEBUG MESSAGE] Created junction J139
-[DEBUG MESSAGE] Created junction J140
-[DEBUG MESSAGE] Created junction J141
-[DEBUG MESSAGE] Created junction J142
-[DEBUG MESSAGE] Created junction J143
-[DEBUG MESSAGE] Created junction J144
-[DEBUG MESSAGE] Created junction J145
-[DEBUG MESSAGE] Created junction J146
-[DEBUG MESSAGE] Created junction J147
-[DEBUG MESSAGE] Created junction J148
-[DEBUG MESSAGE] Created junction J149
-[DEBUG MESSAGE] Created junction J150
-[DEBUG MESSAGE] Created junction J151
-[DEBUG MESSAGE] Created junction J152
-[DEBUG MESSAGE] Created junction J153
-[DEBUG MESSAGE] Created junction J154
-[DEBUG MESSAGE] Created junction J155
-[DEBUG MESSAGE] Created junction J156
-[DEBUG MESSAGE] Created junction J157
-[DEBUG MESSAGE] Created junction J158
-[DEBUG MESSAGE] Created junction J159
-[DEBUG MESSAGE] Created junction J160
-[DEBUG MESSAGE] Created junction J161
-[DEBUG MESSAGE] Created junction J162
-[DEBUG MESSAGE] Created junction J163
-[DEBUG MESSAGE] Created junction J164
-[DEBUG MESSAGE] Created junction J165
-[DEBUG MESSAGE] Created junction J166
-[DEBUG MESSAGE] Created junction J167
-[DEBUG MESSAGE] Created junction J168
-[DEBUG MESSAGE] Created junction J169
-[DEBUG MESSAGE] Created junction J170
-[DEBUG MESSAGE] Created junction J171
-[DEBUG MESSAGE] Created junction J172
-[DEBUG MESSAGE] Created junction J173
-[DEBUG MESSAGE] Created junction J174
-[DEBUG MESSAGE] Created junction J175
-[DEBUG MESSAGE] Created junction J176
-[DEBUG MESSAGE] Created junction J177
-[DEBUG MESSAGE] Created junction J178
-[DEBUG MESSAGE] Created junction J179
-[DEBUG MESSAGE] Created junction J180
-[DEBUG MESSAGE] Created junction J181
-[DEBUG MESSAGE] Created junction J182
-[DEBUG MESSAGE] Created junction J183
-[DEBUG MESSAGE] Created junction J184
-[DEBUG MESSAGE] Created junction J185
-[DEBUG MESSAGE] Created junction J186
-[DEBUG MESSAGE] Created junction J187
-[DEBUG MESSAGE] Created junction J188
-[DEBUG MESSAGE] Created junction J189
-[DEBUG MESSAGE] Created junction J190
-[DEBUG MESSAGE] Created junction J191
-[DEBUG MESSAGE] Created junction J192
-[DEBUG MESSAGE] Created junction J193
-[DEBUG MESSAGE] Created junction J194
-[DEBUG MESSAGE] Created junction J195
-[DEBUG MESSAGE] Created junction J196
-[DEBUG MESSAGE] Created junction J197
-[DEBUG MESSAGE] Created junction J198
-[DEBUG MESSAGE] Created junction J199
-[DEBUG MESSAGE] Created junction J200
-[DEBUG MESSAGE] Created junction J201
-[DEBUG MESSAGE] Created junction J202
-[DEBUG MESSAGE] Created junction J203
-[DEBUG MESSAGE] Created junction J204
-[DEBUG MESSAGE] Created junction J205
-[DEBUG MESSAGE] Created junction J206
-[DEBUG MESSAGE] Created junction J207
-[DEBUG MESSAGE] Created junction J208
-[DEBUG MESSAGE] Created junction J209
-[DEBUG MESSAGE] Created junction J210
-[DEBUG MESSAGE] Created junction J211
-[DEBUG MESSAGE] Created junction J212
-[DEBUG MESSAGE] Created junction J213
-[DEBUG MESSAGE] Created junction J214
-[DEBUG MESSAGE] Created junction J215
-[DEBUG MESSAGE] Created junction J216
-[DEBUG MESSAGE] Created junction J217
-[DEBUG MESSAGE] Created junction J218
-[DEBUG MESSAGE] Created junction J219
-[DEBUG MESSAGE] Created junction J220
-[DEBUG MESSAGE] Created junction J221
-[DEBUG MESSAGE] Created junction J222
-[DEBUG MESSAGE] Created junction J223
-[DEBUG MESSAGE] Created junction J224
-[DEBUG MESSAGE] Created junction J225
-[DEBUG MESSAGE] Created junction J226
-[DEBUG MESSAGE] Created junction J227
-[DEBUG MESSAGE] Created junction J228
-[DEBUG MESSAGE] Created junction J229
-[DEBUG MESSAGE] Created junction J230
-[DEBUG MESSAGE] Created junction J231
-[DEBUG MESSAGE] Created junction J232
-[DEBUG MESSAGE] Created junction J233
-[DEBUG MESSAGE] Created junction J234
-[DEBUG MESSAGE] Created junction J235
-[DEBUG MESSAGE] Created junction J236
-[DEBUG MESSAGE] Created junction J237
-[DEBUG MESSAGE] Created junction J238
-[DEBUG MESSAGE] Created junction J239
-[DEBUG MESSAGE] Created junction J240
-[DEBUG MESSAGE] Created junction J241
-[DEBUG MESSAGE] Created junction J242
-[DEBUG MESSAGE] Created junction J243
-[DEBUG MESSAGE] Created junction J244
-[DEBUG MESSAGE] Created junction J245
-[DEBUG MESSAGE] Created junction J246
-[DEBUG MESSAGE] Created junction J247
-[DEBUG MESSAGE] Created junction J248
-[DEBUG MESSAGE] Created junction J249
-[DEBUG MESSAGE] Created junction J250
-[DEBUG MESSAGE] Created junction J251
-[DEBUG MESSAGE] Created junction J252
-[DEBUG MESSAGE] Created junction J253
-[DEBUG MESSAGE] Created junction J254
-[DEBUG MESSAGE] Created junction J255
-[DEBUG MESSAGE] Created junction J256
-[DEBUG MESSAGE] Created junction J257
-[DEBUG MESSAGE] Created junction J258
-[DEBUG MESSAGE] Created junction J259
-[DEBUG MESSAGE] Created junction J260
-[DEBUG MESSAGE] Created junction J261
-[DEBUG MESSAGE] Created junction J262
-[DEBUG MESSAGE] Created junction J263
-[DEBUG MESSAGE] Created junction J264
-[DEBUG MESSAGE] Created junction J265
-[DEBUG MESSAGE] Created junction J266
-[DEBUG MESSAGE] Created junction J267
-[DEBUG MESSAGE] Created junction J268
-[DEBUG MESSAGE] Created junction J269
-[DEBUG MESSAGE] Created junction J270
-[DEBUG MESSAGE] Created junction J271
-[DEBUG MESSAGE] Created junction J272
-[DEBUG MESSAGE] Created junction J273
-[DEBUG MESSAGE] Created junction J274
-[DEBUG MESSAGE] Created junction J275
-[DEBUG MESSAGE] Created junction J276
-[DEBUG MESSAGE] Created junction J277
-[DEBUG MESSAGE] Created junction J278
-[DEBUG MESSAGE] Created junction J279
-[DEBUG MESSAGE] Created junction J280
-[DEBUG MESSAGE] Created junction J281
-[DEBUG MESSAGE] Created junction J282
-[DEBUG MESSAGE] Created junction J283
-[DEBUG MESSAGE] Created junction J284
-[DEBUG MESSAGE] Created junction J285
-[DEBUG MESSAGE] Created junction J286
-[DEBUG MESSAGE] Created junction J287
-[DEBUG MESSAGE] Created junction J288
-[DEBUG MESSAGE] Created junction J289
-[DEBUG MESSAGE] Created junction J290
-[DEBUG MESSAGE] Created junction J291
-[DEBUG MESSAGE] Created junction J292
-[DEBUG MESSAGE] Created junction J293
-[DEBUG MESSAGE] Created junction J294
-[DEBUG MESSAGE] Created junction J295
-[DEBUG MESSAGE] Created junction J296
-[DEBUG MESSAGE] Created junction J297
-[DEBUG MESSAGE] Created junction J298
-[DEBUG MESSAGE] Created junction J299
-[DEBUG MESSAGE] Created junction J300
-[DEBUG MESSAGE] Created junction J301
-[DEBUG MESSAGE] Created junction J302
-[DEBUG MESSAGE] Created junction J303
-[DEBUG MESSAGE] Created junction J304
-[DEBUG MESSAGE] Created junction J305
-[DEBUG MESSAGE] Created junction J306
-[DEBUG MESSAGE] Created junction J307
-[DEBUG MESSAGE] Created junction J308
-[DEBUG MESSAGE] Created junction J309
-[DEBUG MESSAGE] Created junction J310
-[DEBUG MESSAGE] Created junction J311
-[DEBUG MESSAGE] Created junction J312
-[DEBUG MESSAGE] Created junction J313
-[DEBUG MESSAGE] Created junction J314
-[DEBUG MESSAGE] Created junction J315
-[DEBUG MESSAGE] Created junction J316
-[DEBUG MESSAGE] Created junction J317
-[DEBUG MESSAGE] Created junction J318
-[DEBUG MESSAGE] Created junction J319
-[DEBUG MESSAGE] Created junction J320
-[DEBUG MESSAGE] Created junction J321
-[DEBUG MESSAGE] Created junction J322
-[DEBUG MESSAGE] Created junction J323
-[DEBUG MESSAGE] Created junction J324
-[DEBUG MESSAGE] Created junction J325
-[DEBUG MESSAGE] Created junction J326
-[DEBUG MESSAGE] Created junction J327
-[DEBUG MESSAGE] Created junction J328
-[DEBUG MESSAGE] Created junction J329
-[DEBUG MESSAGE] Created junction J330
-[DEBUG MESSAGE] Created junction J331
-[DEBUG MESSAGE] Created junction J332
-[DEBUG MESSAGE] Created junction J333
-[DEBUG MESSAGE] Created junction J334
-[DEBUG MESSAGE] Created junction J335
-[DEBUG MESSAGE] Created junction J336
-[DEBUG MESSAGE] Created junction J337
-[DEBUG MESSAGE] Created junction J338
-[DEBUG MESSAGE] Created junction J339
-[DEBUG MESSAGE] Created junction J340
-[DEBUG MESSAGE] Created junction J341
-[DEBUG MESSAGE] Created junction J342
-[DEBUG MESSAGE] Created junction J343
-[DEBUG MESSAGE] Created junction J344
-[DEBUG MESSAGE] Created junction J345
-[DEBUG MESSAGE] Created junction J346
-[DEBUG MESSAGE] Created junction J347
-[DEBUG MESSAGE] Created junction J348
-[DEBUG MESSAGE] Created junction J349
-[DEBUG MESSAGE] Created junction J350
-[DEBUG MESSAGE] Created junction J351
-[DEBUG MESSAGE] Created junction J352
-[DEBUG MESSAGE] Created junction J353
-[DEBUG MESSAGE] Created junction J354
-[DEBUG MESSAGE] Created junction J355
-[DEBUG MESSAGE] Created junction J356
-[DEBUG MESSAGE] Created junction J357
-[DEBUG MESSAGE] Created junction J358
-[DEBUG MESSAGE] Created junction J359
-[DEBUG MESSAGE] Created junction J360
-[DEBUG MESSAGE] Created junction J361
-[DEBUG MESSAGE] Created junction J362
-[DEBUG MESSAGE] Created junction J363
-[DEBUG MESSAGE] Created junction J364
-[DEBUG MESSAGE] Created junction J365
-[DEBUG MESSAGE] Created junction J366
-[DEBUG MESSAGE] Created junction J367
-[DEBUG MESSAGE] Created junction J368
-[DEBUG MESSAGE] Created junction J369
-[DEBUG MESSAGE] Created junction J370
-[DEBUG MESSAGE] Created junction J371
-[DEBUG MESSAGE] Created junction J372
-[DEBUG MESSAGE] Created junction J373
-[DEBUG MESSAGE] Created junction J374
-[DEBUG MESSAGE] Created junction J375
-[DEBUG MESSAGE] Created junction J376
-[DEBUG MESSAGE] Created junction J377
-[DEBUG MESSAGE] Created junction J378
-[DEBUG MESSAGE] Created junction J379
-[DEBUG MESSAGE] Created junction J380
-[DEBUG MESSAGE] Created junction J381
-[DEBUG MESSAGE] Created junction J382
-[DEBUG MESSAGE] Created junction J383
-[DEBUG MESSAGE] Created junction J384
-[DEBUG MESSAGE] Created junction J385
-[DEBUG MESSAGE] Created junction J386
-[DEBUG MESSAGE] Created junction J387
-[DEBUG MESSAGE] Created junction J388
-[DEBUG MESSAGE] Created junction J389
-[DEBUG MESSAGE] Created junction J390
-[DEBUG MESSAGE] Created junction J391
-[DEBUG MESSAGE] Created junction J392
-[DEBUG MESSAGE] Created junction J393
-[DEBUG MESSAGE] Created junction J394
-[DEBUG MESSAGE] Created junction J395
-[DEBUG MESSAGE] Created junction J396
-[DEBUG MESSAGE] Created junction J397
-[DEBUG MESSAGE] Created junction J398
-[DEBUG MESSAGE] Created junction J399
-[DEBUG MESSAGE] Created junction J400
-[DEBUG MESSAGE] Created junction J401
-[DEBUG MESSAGE] Created junction J402
-[DEBUG MESSAGE] Created junction J403
-[DEBUG MESSAGE] Created junction J404
-[DEBUG MESSAGE] Created junction J405
-[DEBUG MESSAGE] Created junction J406
-[DEBUG MESSAGE] Created junction J407
-[DEBUG MESSAGE] Created junction J408
-[DEBUG MESSAGE] Created junction J409
-[DEBUG MESSAGE] Created junction J410
-[DEBUG MESSAGE] Created junction J411
-[DEBUG MESSAGE] Created junction J412
-[DEBUG MESSAGE] Created junction J413
-[DEBUG MESSAGE] Created junction J414
-[DEBUG MESSAGE] Created junction J415
-[DEBUG MESSAGE] Created junction J416
-[DEBUG MESSAGE] Created junction J417
-[DEBUG MESSAGE] Created junction J418
-[DEBUG MESSAGE] Created junction J419
-[DEBUG MESSAGE] Created junction J420
-[DEBUG MESSAGE] Created junction J421
-[DEBUG MESSAGE] Created junction J422
-[DEBUG MESSAGE] Created junction J423
-[DEBUG MESSAGE] Created junction J424
-[DEBUG MESSAGE] Created junction J425
-[DEBUG MESSAGE] Created junction J426
-[DEBUG MESSAGE] Created junction J427
-[DEBUG MESSAGE] Created junction J428
-[DEBUG MESSAGE] Created junction J429
-[DEBUG MESSAGE] Created junction J430
-[DEBUG MESSAGE] Created junction J431
-[DEBUG MESSAGE] Created junction J432
-[DEBUG MESSAGE] Created junction J433
-[DEBUG MESSAGE] Created junction J434
-[DEBUG MESSAGE] Created junction J435
-[DEBUG MESSAGE] Created junction J436
-[DEBUG MESSAGE] Created junction J437
-[DEBUG MESSAGE] Created junction J438
-[DEBUG MESSAGE] Created junction J439
-[DEBUG MESSAGE] Created junction J440
-[DEBUG MESSAGE] Created junction J441
-[DEBUG MESSAGE] Created junction J442
-[DEBUG MESSAGE] Created junction J443
-[DEBUG MESSAGE] Created junction J444
-[DEBUG MESSAGE] Created junction J445
-[DEBUG MESSAGE] Created junction J446
-[DEBUG MESSAGE] Created junction J447
-[DEBUG MESSAGE] Created junction J448
-[DEBUG MESSAGE] Created junction J449
-[DEBUG MESSAGE] Created junction J450
-[DEBUG MESSAGE] Created junction J451
-[DEBUG MESSAGE] Created junction J452
-[DEBUG MESSAGE] Created junction J453
-[DEBUG MESSAGE] Created junction J454
-[DEBUG MESSAGE] Created junction J455
-[DEBUG MESSAGE] Created junction J456
-[DEBUG MESSAGE] Created junction J457
-[DEBUG MESSAGE] Created junction J458
-[DEBUG MESSAGE] Created junction J459
-[DEBUG MESSAGE] Created junction J460
-[DEBUG MESSAGE] Created junction J461
-[DEBUG MESSAGE] Created junction J462
-[DEBUG MESSAGE] Created junction J463
-[DEBUG MESSAGE] Created junction J464
-[DEBUG MESSAGE] Created junction J465
-[DEBUG MESSAGE] Created junction J466
-[DEBUG MESSAGE] Created junction J467
-[DEBUG MESSAGE] Created junction J468
-[DEBUG MESSAGE] Created junction J469
-[DEBUG MESSAGE] Created junction J470
-[DEBUG MESSAGE] Created junction J471
-[DEBUG MESSAGE] Created junction J472
-[DEBUG MESSAGE] Created junction J473
-[DEBUG MESSAGE] Created junction J474
-[DEBUG MESSAGE] Created junction J475
-[DEBUG MESSAGE] Created junction J476
-[DEBUG MESSAGE] Created junction J477
-[DEBUG MESSAGE] Created junction J478
-[DEBUG MESSAGE] Created junction J479
-[DEBUG MESSAGE] Created junction J480
-[DEBUG MESSAGE] Created junction J481
-[DEBUG MESSAGE] Created junction J482
-[DEBUG MESSAGE] Created junction J483
-[DEBUG MESSAGE] Created junction J484
-[DEBUG MESSAGE] Created junction J485
-[DEBUG MESSAGE] Created junction J486
-[DEBUG MESSAGE] Created junction J487
-[DEBUG MESSAGE] Created junction J488
-[DEBUG MESSAGE] Created junction J489
-[DEBUG MESSAGE] Created junction J490
-[DEBUG MESSAGE] Created junction J491
-[DEBUG MESSAGE] Created junction J492
-[DEBUG MESSAGE] Created junction J493
-[DEBUG MESSAGE] Created junction J494
-[DEBUG MESSAGE] Created junction J495
-[DEBUG MESSAGE] Created junction J496
-[DEBUG MESSAGE] Created junction J497
-[DEBUG MESSAGE] Created junction J498
-[DEBUG MESSAGE] Created junction J499
-[DEBUG MESSAGE] Created junction J500
-[DEBUG MESSAGE] Created junction J501
-[DEBUG MESSAGE] Created junction J502
-[DEBUG MESSAGE] Created junction J503
-[DEBUG MESSAGE] Created junction J504
-[DEBUG MESSAGE] Created junction J505
-[DEBUG MESSAGE] Created junction J506
-[DEBUG MESSAGE] Created junction J507
-[DEBUG MESSAGE] Created junction J508
-[DEBUG MESSAGE] Created junction J509
-[DEBUG MESSAGE] Created junction J510
-[DEBUG MESSAGE] Created junction J511
-[DEBUG MESSAGE] Created junction J512
-[DEBUG MESSAGE] Created junction J513
-[DEBUG MESSAGE] Created junction J514
-[DEBUG MESSAGE] Created junction J515
-[DEBUG MESSAGE] Created junction J516
-[DEBUG MESSAGE] Created junction J517
-[DEBUG MESSAGE] Created junction J518
-[DEBUG MESSAGE] Created junction J519
-[DEBUG MESSAGE] Created junction J520
-[DEBUG MESSAGE] Created junction J521
-[DEBUG MESSAGE] Created junction J522
-[DEBUG MESSAGE] Created junction J523
-[DEBUG MESSAGE] Created junction J524
-[DEBUG MESSAGE] Created junction J525
-[DEBUG MESSAGE] Created junction J526
-[DEBUG MESSAGE] Created junction J527
-[DEBUG MESSAGE] Created junction J528
-[DEBUG MESSAGE] Created junction J529
-[DEBUG MESSAGE] Created junction J530
-[DEBUG MESSAGE] Created junction J531
-[DEBUG MESSAGE] Created junction J532
-[DEBUG MESSAGE] Created junction J533
-[DEBUG MESSAGE] Created junction J534
-[DEBUG MESSAGE] Created junction J535
-[DEBUG MESSAGE] Created junction J536
-[DEBUG MESSAGE] Created junction J537
-[DEBUG MESSAGE] Created junction J538
-[DEBUG MESSAGE] Created junction J539
-[DEBUG MESSAGE] Created junction J540
-[DEBUG MESSAGE] Created junction J541
-[DEBUG MESSAGE] Created junction J542
-[DEBUG MESSAGE] Created junction J543
-[DEBUG MESSAGE] Created junction J544
-[DEBUG MESSAGE] Created junction J545
-[DEBUG MESSAGE] Created junction J546
-[DEBUG MESSAGE] Created junction J547
-[DEBUG MESSAGE] Created junction J548
-[DEBUG MESSAGE] Created junction J549
-[DEBUG MESSAGE] Created junction J550
-[DEBUG MESSAGE] Created junction J551
-[DEBUG MESSAGE] Created junction J552
-[DEBUG MESSAGE] Created junction J553
-[DEBUG MESSAGE] Created junction J554
-[DEBUG MESSAGE] Created junction J555
-[DEBUG MESSAGE] Created junction J556
-[DEBUG MESSAGE] Created junction J557
-[DEBUG MESSAGE] Created junction J558
-[DEBUG MESSAGE] Created junction J559
-[DEBUG MESSAGE] Created junction J560
-[DEBUG MESSAGE] Created junction J561
-[DEBUG MESSAGE] Created junction J562
-[DEBUG MESSAGE] Created junction J563
-[DEBUG MESSAGE] Created junction J564
-[DEBUG MESSAGE] Created junction J565
-[DEBUG MESSAGE] Created junction J566
-[DEBUG MESSAGE] Created junction J567
-[DEBUG MESSAGE] Created junction J568
-[DEBUG MESSAGE] Created junction J569
-[DEBUG MESSAGE] Created junction J570
-[DEBUG MESSAGE] Created junction J571
-[DEBUG MESSAGE] Created junction J572
-[DEBUG MESSAGE] Created junction J573
-[DEBUG MESSAGE] Created junction J574
-[DEBUG MESSAGE] Created junction J575
-[DEBUG MESSAGE] Created junction J576
-[DEBUG MESSAGE] Created junction J577
-[DEBUG MESSAGE] Created junction J578
-[DEBUG MESSAGE] Created junction J579
-[DEBUG MESSAGE] Created junction J580
-[DEBUG MESSAGE] Created junction J581
-[DEBUG MESSAGE] Created junction J582
-[DEBUG MESSAGE] Created junction J583
-[DEBUG MESSAGE] Created junction J584
-[DEBUG MESSAGE] Created junction J585
-[DEBUG MESSAGE] Created junction J586
-[DEBUG MESSAGE] Created junction J587
-[DEBUG MESSAGE] Created junction J588
-[DEBUG MESSAGE] Created junction J589
-[DEBUG MESSAGE] Created junction J590
-[DEBUG MESSAGE] Created junction J591
-[DEBUG MESSAGE] Created junction J592
-[DEBUG MESSAGE] Created junction J593
-[DEBUG MESSAGE] Created junction J594
-[DEBUG MESSAGE] Created junction J595
-[DEBUG MESSAGE] Created junction J596
-[DEBUG MESSAGE] Created junction J597
-[DEBUG MESSAGE] Created junction J598
-[DEBUG MESSAGE] Created junction J599
-[DEBUG MESSAGE] Created junction J600
-[DEBUG MESSAGE] Created junction J601
-[DEBUG MESSAGE] Created junction J602
-[DEBUG MESSAGE] Created junction J603
-[DEBUG MESSAGE] Created junction J604
-[DEBUG MESSAGE] Created junction J605
-[DEBUG MESSAGE] Created junction J606
-[DEBUG MESSAGE] Created junction J607
-[DEBUG MESSAGE] Created junction J608
-[DEBUG MESSAGE] Created junction J609
-[DEBUG MESSAGE] Created junction J610
-[DEBUG MESSAGE] Created junction J611
-[DEBUG MESSAGE] Created junction J612
-[DEBUG MESSAGE] Created junction J613
-[DEBUG MESSAGE] Created junction J614
-[DEBUG MESSAGE] Created junction J615
-[DEBUG MESSAGE] Created junction J616
-[DEBUG MESSAGE] Created junction J617
-[DEBUG MESSAGE] Created junction J618
-[DEBUG MESSAGE] Created junction J619
-[DEBUG MESSAGE] Created junction J620
-[DEBUG MESSAGE] Created junction J621
-[DEBUG MESSAGE] Created junction J622
-[DEBUG MESSAGE] Created junction J623
-[DEBUG MESSAGE] Created junction J624
-[DEBUG MESSAGE] Created junction J625
-[DEBUG MESSAGE] Created junction J626
-[DEBUG MESSAGE] Created junction J627
-[DEBUG MESSAGE] Created junction J628
-[DEBUG MESSAGE] Created junction J629
-[DEBUG MESSAGE] Created junction J630
-[DEBUG MESSAGE] Created junction J631
-[DEBUG MESSAGE] Created junction J632
-[DEBUG MESSAGE] Created junction J633
-[DEBUG MESSAGE] Created junction J634
-[DEBUG MESSAGE] Created junction J635
-[DEBUG MESSAGE] Created junction J636
-[DEBUG MESSAGE] Created junction J637
-[DEBUG MESSAGE] Created junction J638
-[DEBUG MESSAGE] Created junction J639
-[DEBUG MESSAGE] Created junction J640
-[DEBUG MESSAGE] Created junction J641
-[DEBUG MESSAGE] Created junction J642
-[DEBUG MESSAGE] Created junction J643
-[DEBUG MESSAGE] Created junction J644
-[DEBUG MESSAGE] Created junction J645
-[DEBUG MESSAGE] Created junction J646
-[DEBUG MESSAGE] Created junction J647
-[DEBUG MESSAGE] Created junction J648
-[DEBUG MESSAGE] Created junction J649
-[DEBUG MESSAGE] Created junction J650
-[DEBUG MESSAGE] Created junction J651
-[DEBUG MESSAGE] Created junction J652
-[DEBUG MESSAGE] Created junction J653
-[DEBUG MESSAGE] Created junction J654
-[DEBUG MESSAGE] Created junction J655
-[DEBUG MESSAGE] Created junction J656
-[DEBUG MESSAGE] Created junction J657
-[DEBUG MESSAGE] Created junction J658
-[DEBUG MESSAGE] Created junction J659
-[DEBUG MESSAGE] Created junction J660
-[DEBUG MESSAGE] Created junction J661
-[DEBUG MESSAGE] Created junction J662
-[DEBUG MESSAGE] Created junction J663
-[DEBUG MESSAGE] Created junction J664
-[DEBUG MESSAGE] Created junction J665
-[DEBUG MESSAGE] Created junction J666
-[DEBUG MESSAGE] Created junction J667
-[DEBUG MESSAGE] Created junction J668
-[DEBUG MESSAGE] Created junction J669
-[DEBUG MESSAGE] Created junction J670
-[DEBUG MESSAGE] Created junction J671
-[DEBUG MESSAGE] Created junction J672
-[DEBUG MESSAGE] Created junction J673
-[DEBUG MESSAGE] Created junction J674
-[DEBUG MESSAGE] Created junction J675
-[DEBUG MESSAGE] Created junction J676
-[DEBUG MESSAGE] Created junction J677
-[DEBUG MESSAGE] Created junction J678
-[DEBUG MESSAGE] Created junction J679
-[DEBUG MESSAGE] Created junction J680
-[DEBUG MESSAGE] Created junction J681
-[DEBUG MESSAGE] Created junction J682
-[DEBUG MESSAGE] Created junction J683
-[DEBUG MESSAGE] Created junction J684
-[DEBUG MESSAGE] Created junction J685
-[DEBUG MESSAGE] Created junction J686
-[DEBUG MESSAGE] Created junction J687
-[DEBUG MESSAGE] Created junction J688
-[DEBUG MESSAGE] Created junction J689
-[DEBUG MESSAGE] Created junction J690
-[DEBUG MESSAGE] Created junction J691
-[DEBUG MESSAGE] Created junction J692
-[DEBUG MESSAGE] Created junction J693
-[DEBUG MESSAGE] Created junction J694
-[DEBUG MESSAGE] Created junction J695
-[DEBUG MESSAGE] Created junction J696
-[DEBUG MESSAGE] Created junction J697
-[DEBUG MESSAGE] Created junction J698
-[DEBUG MESSAGE] Created junction J699
-[DEBUG MESSAGE] Created junction J700
-[DEBUG MESSAGE] Created junction J701
-[DEBUG MESSAGE] Created junction J702
-[DEBUG MESSAGE] Created junction J703
-[DEBUG MESSAGE] Created junction J704
-[DEBUG MESSAGE] Created junction J705
-[DEBUG MESSAGE] Created junction J706
-[DEBUG MESSAGE] Created junction J707
-[DEBUG MESSAGE] Created junction J708
-[DEBUG MESSAGE] Created junction J709
-[DEBUG MESSAGE] Created junction J710
-[DEBUG MESSAGE] Created junction J711
-[DEBUG MESSAGE] Created junction J712
-[DEBUG MESSAGE] Created junction J713
-[DEBUG MESSAGE] Created junction J714
-[DEBUG MESSAGE] Created junction J715
-[DEBUG MESSAGE] Created junction J716
-[DEBUG MESSAGE] Created junction J717
-[DEBUG MESSAGE] Created junction J718
-[DEBUG MESSAGE] Created junction J719
-[DEBUG MESSAGE] Created junction J720
-[DEBUG MESSAGE] Created junction J721
-[DEBUG MESSAGE] Created junction J722
-[DEBUG MESSAGE] Created junction J723
-[DEBUG MESSAGE] Created junction J724
-[DEBUG MESSAGE] Created junction J725
-[DEBUG MESSAGE] Created junction J726
-[DEBUG MESSAGE] Created junction J727
-[DEBUG MESSAGE] Created junction J728
-[DEBUG MESSAGE] Created junction J729
-[DEBUG MESSAGE] Created junction J730
-[DEBUG MESSAGE] Created junction J731
-[DEBUG MESSAGE] Created junction J732
-[DEBUG MESSAGE] Created junction J733
-[DEBUG MESSAGE] Created junction J734
-[DEBUG MESSAGE] Created junction J735
-[DEBUG MESSAGE] Created junction J736
-[DEBUG MESSAGE] Created junction J737
-[DEBUG MESSAGE] Created junction J738
-[DEBUG MESSAGE] Created junction J739
-[DEBUG MESSAGE] Created junction J740
-[DEBUG MESSAGE] Created junction J741
-[DEBUG MESSAGE] Created junction J742
-[DEBUG MESSAGE] Created junction J743
-[DEBUG MESSAGE] Created junction J744
-[DEBUG MESSAGE] Created junction J745
-[DEBUG MESSAGE] Created junction J746
-[DEBUG MESSAGE] Created junction J747
-[DEBUG MESSAGE] Created junction J748
-[DEBUG MESSAGE] Created junction J749
-[DEBUG MESSAGE] Created junction J750
-[DEBUG MESSAGE] Created junction J751
-[DEBUG MESSAGE] Created junction J752
-[DEBUG MESSAGE] Created junction J753
-[DEBUG MESSAGE] Created junction J754
-[DEBUG MESSAGE] Created junction J755
-[DEBUG MESSAGE] Created junction J756
-[DEBUG MESSAGE] Created junction J757
-[DEBUG MESSAGE] Created junction J758
-[DEBUG MESSAGE] Created junction J759
-[DEBUG MESSAGE] Created junction J760
-[DEBUG MESSAGE] Created junction J761
-[DEBUG MESSAGE] Created junction J762
-[DEBUG MESSAGE] Created junction J763
-[DEBUG MESSAGE] Created junction J764
-[DEBUG MESSAGE] Created junction J765
-[DEBUG MESSAGE] Created junction J766
-[DEBUG MESSAGE] Created junction J767
-[DEBUG MESSAGE] Created junction J768
-[DEBUG MESSAGE] Created junction J769
-[DEBUG MESSAGE] Created junction J770
-[DEBUG MESSAGE] Created junction J771
-[DEBUG MESSAGE] Created junction J772
-[DEBUG MESSAGE] Created junction J773
-[DEBUG MESSAGE] Created junction J774
-[DEBUG MESSAGE] Created junction J775
-[DEBUG MESSAGE] Created junction J776
-[DEBUG MESSAGE] Created junction J777
-[DEBUG MESSAGE] Created junction J778
-[DEBUG MESSAGE] Created junction J779
-[DEBUG MESSAGE] Created junction J780
-[DEBUG MESSAGE] Created junction J781
-[DEBUG MESSAGE] Created junction J782
-[DEBUG MESSAGE] Created junction J783
-[DEBUG MESSAGE] Created junction J784
-[DEBUG MESSAGE] Created junction J785
-[DEBUG MESSAGE] Created junction J786
-[DEBUG MESSAGE] Created junction J787
-[DEBUG MESSAGE] Created junction J788
-[DEBUG MESSAGE] Created junction J789
-[DEBUG MESSAGE] Created junction J790
-[DEBUG MESSAGE] Created junction J791
-[DEBUG MESSAGE] Created junction J792
-[DEBUG MESSAGE] Created junction J793
-[DEBUG MESSAGE] Created junction J794
-[DEBUG MESSAGE] Created junction J795
-[DEBUG MESSAGE] Created junction J796
-[DEBUG MESSAGE] Created junction J797
-[DEBUG MESSAGE] Created junction J798
-[DEBUG MESSAGE] Created junction J799
-[DEBUG MESSAGE] Created junction J800
-[DEBUG MESSAGE] Created junction J801
-[DEBUG MESSAGE] Created junction J802
-[DEBUG MESSAGE] Created junction J803
-[DEBUG MESSAGE] Created junction J804
-[DEBUG MESSAGE] Created junction J805
-[DEBUG MESSAGE] Created junction J806
-[DEBUG MESSAGE] Created junction J807
-[DEBUG MESSAGE] Created junction J808
-[DEBUG MESSAGE] Created junction J809
-[DEBUG MESSAGE] Created junction J810
-[DEBUG MESSAGE] Created junction J811
-[DEBUG MESSAGE] Created junction J812
-[DEBUG MESSAGE] Created junction J813
-[DEBUG MESSAGE] Created junction J814
-[DEBUG MESSAGE] Created junction J815
-[DEBUG MESSAGE] Created junction J816
-[DEBUG MESSAGE] Created junction J817
-[DEBUG MESSAGE] Created junction J818
-[DEBUG MESSAGE] Created junction J819
-[DEBUG MESSAGE] Created junction J820
-[DEBUG MESSAGE] Created junction J821
-[DEBUG MESSAGE] Created junction J822
-[DEBUG MESSAGE] Created junction J823
-[DEBUG MESSAGE] Created junction J824
-[DEBUG MESSAGE] Created junction J825
-[DEBUG MESSAGE] Created junction J826
-[DEBUG MESSAGE] Created junction J827
-[DEBUG MESSAGE] Created junction J828
-[DEBUG MESSAGE] Created junction J829
-[DEBUG MESSAGE] Created junction J830
-[DEBUG MESSAGE] Created junction J831
-[DEBUG MESSAGE] Created junction J832
-[DEBUG MESSAGE] Created junction J833
-[DEBUG MESSAGE] Created junction J834
-[DEBUG MESSAGE] Created junction J835
-[DEBUG MESSAGE] Created junction J836
-[DEBUG MESSAGE] Created junction J837
-[DEBUG MESSAGE] Created junction J838
-[DEBUG MESSAGE] Created junction J839
-[DEBUG MESSAGE] Created junction J840
-[DEBUG MESSAGE] Created junction J841
-[DEBUG MESSAGE] Created junction J842
-[DEBUG MESSAGE] Created junction J843
-[DEBUG MESSAGE] Created junction J844
-[DEBUG MESSAGE] Created junction J845
-[DEBUG MESSAGE] Created junction J846
-[DEBUG MESSAGE] Created junction J847
-[DEBUG MESSAGE] Created junction J848
-[DEBUG MESSAGE] Created junction J849
-[DEBUG MESSAGE] Created junction J850
-[DEBUG MESSAGE] Created junction J851
-[DEBUG MESSAGE] Created junction J852
-[DEBUG MESSAGE] Created junction J853
-[DEBUG MESSAGE] Created junction J854
-[DEBUG MESSAGE] Created junction J855
-[DEBUG MESSAGE] Created junction J856
-[DEBUG MESSAGE] Created junction J857
-[DEBUG MESSAGE] Created junction J858
-[DEBUG MESSAGE] Created junction J859
-[DEBUG MESSAGE] Created junction J860
-[DEBUG MESSAGE] Created junction J861
-[DEBUG MESSAGE] Created junction J862
-[DEBUG MESSAGE] Created junction J863
-[DEBUG MESSAGE] Created junction J864
-[DEBUG MESSAGE] Created junction J865
-[DEBUG MESSAGE] Created junction J866
-[DEBUG MESSAGE] Created junction J867
-[DEBUG MESSAGE] Created junction J868
-[DEBUG MESSAGE] Created junction J869
-[DEBUG MESSAGE] Created junction J870
-[DEBUG MESSAGE] Created junction J871
-[DEBUG MESSAGE] Created junction J872
-[DEBUG MESSAGE] Created junction J873
-[DEBUG MESSAGE] Created junction J874
-[DEBUG MESSAGE] Created junction J875
-[DEBUG MESSAGE] Created junction J876
-[DEBUG MESSAGE] Created junction J877
-[DEBUG MESSAGE] Created junction J878
-[DEBUG MESSAGE] Created junction J879
-[DEBUG MESSAGE] Created junction J880
-[DEBUG MESSAGE] Created junction J881
-[DEBUG MESSAGE] Created junction J882
-[DEBUG MESSAGE] Created junction J883
-[DEBUG MESSAGE] Created junction J884
-[DEBUG MESSAGE] Created junction J885
-[DEBUG MESSAGE] Created junction J886
-[DEBUG MESSAGE] Created junction J887
-[DEBUG MESSAGE] Created junction J888
-[DEBUG MESSAGE] Created junction J889
-[DEBUG MESSAGE] Created junction J890
-[DEBUG MESSAGE] Created junction J891
-[DEBUG MESSAGE] Created junction J892
-[DEBUG MESSAGE] Created junction J893
-[DEBUG MESSAGE] Created junction J894
-[DEBUG MESSAGE] Created junction J895
-[DEBUG MESSAGE] Created junction J896
-[DEBUG MESSAGE] Created junction J897
-[DEBUG MESSAGE] Created junction J898
-[DEBUG MESSAGE] Created junction J899
-[DEBUG MESSAGE] Created junction J900
-[DEBUG MESSAGE] Created junction J901
-[DEBUG MESSAGE] Created junction J902
-[DEBUG MESSAGE] Created junction J903
-[DEBUG MESSAGE] Created junction J904
-[DEBUG MESSAGE] Created junction J905
-[DEBUG MESSAGE] Created junction J906
-[DEBUG MESSAGE] Created junction J907
-[DEBUG MESSAGE] Created junction J908
-[DEBUG MESSAGE] Created junction J909
-[DEBUG MESSAGE] Created junction J910
-[DEBUG MESSAGE] Created junction J911
-[DEBUG MESSAGE] Created junction J912
-[DEBUG MESSAGE] Created junction J913
-[DEBUG MESSAGE] Created junction J914
-[DEBUG MESSAGE] Created junction J915
-[DEBUG MESSAGE] Created junction J916
-[DEBUG MESSAGE] Created junction J917
-[DEBUG MESSAGE] Created junction J918
-[DEBUG MESSAGE] Created junction J919
-[DEBUG MESSAGE] Created junction J920
-[DEBUG MESSAGE] Created junction J921
-[DEBUG MESSAGE] Created junction J922
-[DEBUG MESSAGE] Created junction J923
-[DEBUG MESSAGE] Created junction J924
-[DEBUG MESSAGE] Created junction J925
-[DEBUG MESSAGE] Created junction J926
-[DEBUG MESSAGE] Created junction J927
-[DEBUG MESSAGE] Created junction J928
-[DEBUG MESSAGE] Created junction J929
-[DEBUG MESSAGE] Created junction J930
-[DEBUG MESSAGE] Created junction J931
-[DEBUG MESSAGE] Created junction J932
-[DEBUG MESSAGE] Created junction J933
-[DEBUG MESSAGE] Created junction J934
-[DEBUG MESSAGE] Created junction J935
-[DEBUG MESSAGE] Created junction J936
-[DEBUG MESSAGE] Created junction J937
-[DEBUG MESSAGE] Created junction J938
-[DEBUG MESSAGE] Created junction J939
-[DEBUG MESSAGE] Created junction J940
-[DEBUG MESSAGE] Created junction J941
-[DEBUG MESSAGE] Created junction J942
-[DEBUG MESSAGE] Created junction J943
-[DEBUG MESSAGE] Created junction J944
-[DEBUG MESSAGE] Created junction J945
-[DEBUG MESSAGE] Created junction J946
-[DEBUG MESSAGE] Created junction J947
-[DEBUG MESSAGE] Created junction J948
-[DEBUG MESSAGE] Created junction J949
-[DEBUG MESSAGE] Created junction J950
-[DEBUG MESSAGE] Created junction J951
-[DEBUG MESSAGE] Created junction J952
-[DEBUG MESSAGE] Created junction J953
-[DEBUG MESSAGE] Created junction J954
-[DEBUG MESSAGE] Created junction J955
-[DEBUG MESSAGE] Created junction J956
-[DEBUG MESSAGE] Created junction J957
-[DEBUG MESSAGE] Created junction J958
-[DEBUG MESSAGE] Created junction J959
-[DEBUG MESSAGE] Created junction J960
-[DEBUG MESSAGE] Created junction J961
-[DEBUG MESSAGE] Created junction J962
-[DEBUG MESSAGE] Created junction J963
-[DEBUG MESSAGE] Created junction J964
-[DEBUG MESSAGE] Created junction J965
-[DEBUG MESSAGE] Created junction J966
-[DEBUG MESSAGE] Created junction J967
-[DEBUG MESSAGE] Created junction J968
-[DEBUG MESSAGE] Created junction J969
-[DEBUG MESSAGE] Created junction J970
-[DEBUG MESSAGE] Created junction J971
-[DEBUG MESSAGE] Created junction J972
-[DEBUG MESSAGE] Created junction J973
-[DEBUG MESSAGE] Created junction J974
-[DEBUG MESSAGE] Created junction J975
-[DEBUG MESSAGE] Created junction J976
-[DEBUG MESSAGE] Created junction J977
-[DEBUG MESSAGE] Created junction J978
-[DEBUG MESSAGE] Created junction J979
-[DEBUG MESSAGE] Created junction J980
-[DEBUG MESSAGE] Created junction J981
-[DEBUG MESSAGE] Created junction J982
-[DEBUG MESSAGE] Created junction J983
-[DEBUG MESSAGE] Created junction J984
-[DEBUG MESSAGE] Created junction J985
-[DEBUG MESSAGE] Created junction J986
-[DEBUG MESSAGE] Created junction J987
-[DEBUG MESSAGE] Created junction J988
-[DEBUG MESSAGE] Created junction J989
-[DEBUG MESSAGE] Created junction J990
-[DEBUG MESSAGE] Created junction J991
-[DEBUG MESSAGE] Created junction J992
-[DEBUG MESSAGE] Created junction J993
-[DEBUG MESSAGE] Created junction J994
-[DEBUG MESSAGE] Created junction J995
-[DEBUG MESSAGE] Created junction J996
-[DEBUG MESSAGE] Created junction J997
-[DEBUG MESSAGE] Created junction J998
-[DEBUG MESSAGE] Setup degrees-of-freedom of nodes
-[DEBUG MESSAGE] Setup degrees-of-freedom of blocks
-[DEBUG MESSAGE] Setup model-dependent parameters
-[DEBUG MESSAGE] Load initial condition
-[DEBUG MESSAGE] Cardiac cycle period 1
-[DEBUG MESSAGE] Calculate steady initial condition
-[DEBUG MESSAGE] Setup initial state dependent parameters
-[DEBUG MESSAGE] Setup time integration
-[DEBUG MESSAGE] Run time integration
-[DEBUG MESSAGE] Avg. number of nonlinear iterations per time step: 0.0858586
-[DEBUG MESSAGE] Write output
+---------------------------------
+ oneDSolver 
+ 1D Finite Element Hemodynamics  
+---------------------------------
+
+Reading file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u_bend/ROMSimulations/rom/solver_1d.in ... 
+
+Printing Model Echo ... 
+
+Creating and Running Model ...
+Creating Nodes ... 
+Creating Joints ... 
+Creating Materials ... 
+Creating Data Tables ... 
+Creating Segments ... 
+Solving Model ... 
+Inlet Condition Type: FLOW
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Number of Joints: 999
+Number of Segments: 1000
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+RCR boundary condition
+Subdomain No. 1000
+Joint No. 999
+Outlet No. 1
+Number of equations 86366
+Using Conservative Form ...
+maxStep/stepSize: 100
+Total Solution is: 100 x 86366
+**** Time cycle 1
+Calculated a NaN for the residual.
+Terminated.
