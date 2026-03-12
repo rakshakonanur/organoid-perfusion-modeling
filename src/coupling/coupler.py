@@ -488,7 +488,7 @@ def parse_args() -> argparse.Namespace:
 
     ap.add_argument("--svzerodsolver", default="svzerodsolver")
     ap.add_argument("--run-and-split", default="../prep/run_and_split_svzerod.py")
-    ap.add_argument("--darcy-script", default="../solves/darcy_p1_lm.py")
+    ap.add_argument("--darcy-script", default="../solves/darcy_p1_lm_interior.py")
     ap.add_argument("--darcy-mpi-procs", type=int, default=1,
                     help="MPI ranks for Darcy solves (1 = serial).")
     ap.add_argument("--darcy-mpirun-cmd", default="/opt/miniconda3/envs/fenicsx-env/bin/mpiexec.hydra",
@@ -560,7 +560,7 @@ def main() -> None:
 
     # Coupling loop: ramp then iterate to convergence
     total_steps = int(args.n_ramp) + int(args.max_iter)
-    for i in range(13, total_steps + 1):
+    for i in range(1, total_steps + 1):
         scale = min(i / float(max(args.n_ramp, 1)), 1.0) if i <= args.n_ramp else 1.0
         prev = coupled_root / f"run_{i-1}"
         cur = coupled_root / f"run_{i}"
