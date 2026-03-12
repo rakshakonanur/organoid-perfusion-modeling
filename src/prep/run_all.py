@@ -277,7 +277,7 @@ def run_one(
             src_org_dir / "tissue_domain_volume.vtu",
         )
 
-    tissue_stl = None
+    tissue_stl = stl_dir/f"stl/organoid-growth-domains/original/organoid-{i}.stl"
     stl_candidates = [
         src_org_dir / "well_surface.stl",
         src_org_dir / "3d_tmp" / "well_surface.stl",
@@ -439,6 +439,18 @@ def run_one(
     else:
         darcy_mod, SolverClass = _load_solver_module_and_class(darcy_solver)
         setattr(darcy_mod, "current_dir", org_dir)
+        # darcy_p1_lm_interior inherits setup() from darcy_p1_lm, whose output
+        # path is resolved from the base module global `current_dir`.
+        if hasattr(darcy_mod, "lm_base"):
+            try:
+                setattr(darcy_mod.lm_base, "current_dir", org_dir)
+            except Exception:
+                pass
+        if hasattr(darcy_mod, "darcy_cg"):
+            try:
+                setattr(darcy_mod.darcy_cg, "current_dir", org_dir)
+            except Exception:
+                pass
         solver = SolverClass(
             bioreactor_domain, facet_file,
             mesh_inlet_file, mesh_outlet_file,
@@ -465,7 +477,7 @@ def run_one(
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Run mesh.py geometry + darcy_P1_v2.py for organoids without copying scripts.")
-    ap.add_argument("--stl-dir", default="../files", help="Directory containing organoid-1.stl, organoid-2.stl, ...")
+    ap.add_argument("--stl-dir", default="../../files", help="Directory containing organoid-1.stl, organoid-2.stl, ...")
     ap.add_argument("--trial-dir", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/prep/prepped/trial-3/", help="Directory containing organoid_1/branchingData_0.csv etc (e.g. .../input/trial-2)")
     ap.add_argument("--coupled-root", default="coupled/run_0", help="Output root directory (default: coupled/run_0)")
     ap.add_argument("--n", type=int, default=4, help="Number of organoids (default: 4)")
@@ -499,7 +511,7 @@ def parse_args():
                     help="MPI ranks for Darcy solve (1 = serial in-process).")
     ap.add_argument("--darcy-mpirun-cmd", default="mpirun",
                     help="MPI launcher command for Darcy when --darcy-mpi-procs > 1.")
-    ap.add_argument("--darcy-solver", choices=["darcy", "darcy_mixed", "darcy_p1_lm"], default="darcy_p1_lm",
+    ap.add_argument("--darcy-solver", choices=["darcy", "darcy_mixed", "darcy_p1_lm", "darcy_p1_lm_interior"], default="darcy_p1_lm_interior",
                     help="Darcy solver module/script to run.")
     ap.add_argument("--dy-step", type=float, default=0.6, help="Y shift per organoid index (default: 0.6)")
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.18, 0.9, 0.55], help="Base inlet coords (x y z) for organoid 1")
