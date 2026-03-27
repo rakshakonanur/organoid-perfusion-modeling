@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<VTKFile type="Collection" version="0.1" byte_order="LittleEndian">
+  <Collection>
+    <DataSet timestep="0" group="" part="0" file="inverse-taper_0000.vtp"/>
+    <DataSet timestep="0.11111111111111116" group="" part="0" file="inverse-taper_0001.vtp"/>
+    <DataSet timestep="0.2222222222222221" group="" part="0" file="inverse-taper_0002.vtp"/>
+    <DataSet timestep="0.33333333333333326" group="" part="0" file="inverse-taper_0003.vtp"/>
+    <DataSet timestep="0.44444444444444442" group="" part="0" file="inverse-taper_0004.vtp"/>
+    <DataSet timestep="0.55555555555555536" group="" part="0" file="inverse-taper_0005.vtp"/>
+    <DataSet timestep="0.66666666666666652" group="" part="0" file="inverse-taper_0006.vtp"/>
+    <DataSet timestep="0.77777777777777768" group="" part="0" file="inverse-taper_0007.vtp"/>
+    <DataSet timestep="0.88888888888888884" group="" part="0" file="inverse-taper_0008.vtp"/>
+    <DataSet timestep="1" group="" part="0" file="inverse-taper_0009.vtp"/>
+  </Collection>
+</VTKFile>

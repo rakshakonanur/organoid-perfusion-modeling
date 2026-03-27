@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding=""?>
+<mitk_job model_name="fluid-domain" mesh_name="" status="" process_number="1" version="1.0">
+    <job nsd="3" timeSteps="10000" stepSize="1e-3" continuePrevious="false" restartFileName="results" restartInc="10" vtkSaveResults="true" vtkFileName="results" vtkInc="10" startSavingStep="6666" saveAvgResult="true" rhoInf="0.20000000000000001" stopFileName="STOP_SIM" remeshing="false" verbose="true" warn="true" debug="false">
+        <domains>
+            <domain name="mesh-complete" type="fluid" folder_name="mesh-complete" file_name="mesh-complete.mesh.vtu" surface_name="mesh-complete.exterior.vtp" face_folder_name="mesh-surfaces">
+                <face name="inlet"/>
+                <face name="noname_1"/>
+                <face name="noname_10"/>
+                <face name="noname_11"/>
+                <face name="noname_12"/>
+                <face name="noname_13"/>
+                <face name="noname_2"/>
+                <face name="noname_4"/>
+                <face name="noname_5"/>
+                <face name="noname_7"/>
+                <face name="noname_8"/>
+                <face name="noname_9"/>
+                <face name="outlet"/>
+            </domain>
+        </domains>
+        <equations>
+            <equation physName="fluid" coupled="true" minItr="1" maxItr="10" tol="1e-4" dBr="-20" backflow="0.29999999999999999">
+                <props>
+                    <prop name="Density" value="1"/>
+                    <prop name="Viscosity" value="0.0070000000000000001"/>
+                </props>
+                <linear_solver lsType="GMRES" lsMaxItr="10" lsTol="1e-4" lsNSGMMaxItr="5" lsNSGMTol="1e-4" lsNSCGMaxItr="500" lsNSCGTol="1e-4" lsAbsoluteTol="1e-4" lsKrylovDim="50" lsPreconditioner="Default"/>
+                <outputs>
+                    <spatial>
+                        <output name="Velocity"/>
+                        <output name="Acceleration"/>
+                        <output name="Pressure"/>
+                        <output name="WSS"/>
+                        <output name="Vorticity"/>
+                    </spatial>
+                </outputs>
+                <boundary_conditions>
+                    <face name="inlet" group="Dirichlet" type="Unsteady" file="pulsatile.flow" profile="Parabolic" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_1" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_10" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_11" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_12" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_13" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_2" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_4" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_5" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_7" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_8" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="noname_9" group="Dirichlet" type="Steady" value="0" profile="Flat" zperm="true" flux="true" impose_integral="false" effective_direction=""/>
+                    <face name="outlet" group="Neumann" type="Steady" value="0" profile="Flat" zperm="false" flux="false" impose_integral="false" effective_direction=""/>
+                </boundary_conditions>
+            </equation>
+        </equations>
+    </job>
+</mitk_job>

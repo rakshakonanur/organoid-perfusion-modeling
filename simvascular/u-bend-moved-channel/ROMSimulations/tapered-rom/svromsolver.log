@@ -1,0 +1,119 @@
+[DEBUG MESSAGE] Starting svZeroDSolver
+[DEBUG MESSAGE] Read simulation parameters
+[DEBUG MESSAGE] Loading simulation parameters
+[DEBUG MESSAGE] Finished loading simulation parameters
+[DEBUG MESSAGE] Load model
+[DEBUG MESSAGE] Loading model
+[DEBUG MESSAGE] Loading vessels
+[DEBUG MESSAGE] Created boundary condition INFLOW
+[DEBUG MESSAGE] Created boundary condition RESISTANCE_0
+[DEBUG MESSAGE] Created junction J0
+[DEBUG MESSAGE] Created junction J1
+[DEBUG MESSAGE] Created junction J2
+[DEBUG MESSAGE] Created junction J3
+[DEBUG MESSAGE] Created junction J4
+[DEBUG MESSAGE] Created junction J5
+[DEBUG MESSAGE] Created junction J6
+[DEBUG MESSAGE] Created junction J7
+[DEBUG MESSAGE] Created junction J8
+[DEBUG MESSAGE] Created junction J9
+[DEBUG MESSAGE] Created junction J10
+[DEBUG MESSAGE] Created junction J11
+[DEBUG MESSAGE] Created junction J12
+[DEBUG MESSAGE] Created junction J13
+[DEBUG MESSAGE] Created junction J14
+[DEBUG MESSAGE] Created junction J15
+[DEBUG MESSAGE] Created junction J16
+[DEBUG MESSAGE] Created junction J17
+[DEBUG MESSAGE] Created junction J18
+[DEBUG MESSAGE] Created junction J19
+[DEBUG MESSAGE] Created junction J20
+[DEBUG MESSAGE] Created junction J21
+[DEBUG MESSAGE] Created junction J22
+[DEBUG MESSAGE] Created junction J23
+[DEBUG MESSAGE] Created junction J24
+[DEBUG MESSAGE] Created junction J25
+[DEBUG MESSAGE] Created junction J26
+[DEBUG MESSAGE] Created junction J27
+[DEBUG MESSAGE] Created junction J28
+[DEBUG MESSAGE] Created junction J29
+[DEBUG MESSAGE] Created junction J30
+[DEBUG MESSAGE] Created junction J31
+[DEBUG MESSAGE] Created junction J32
+[DEBUG MESSAGE] Created junction J33
+[DEBUG MESSAGE] Created junction J34
+[DEBUG MESSAGE] Created junction J35
+[DEBUG MESSAGE] Created junction J36
+[DEBUG MESSAGE] Created junction J37
+[DEBUG MESSAGE] Created junction J38
+[DEBUG MESSAGE] Created junction J39
+[DEBUG MESSAGE] Created junction J40
+[DEBUG MESSAGE] Created junction J41
+[DEBUG MESSAGE] Created junction J42
+[DEBUG MESSAGE] Created junction J43
+[DEBUG MESSAGE] Created junction J44
+[DEBUG MESSAGE] Created junction J45
+[DEBUG MESSAGE] Created junction J46
+[DEBUG MESSAGE] Created junction J47
+[DEBUG MESSAGE] Created junction J48
+[DEBUG MESSAGE] Created junction J49
+[DEBUG MESSAGE] Created junction J50
+[DEBUG MESSAGE] Created junction J51
+[DEBUG MESSAGE] Created junction J52
+[DEBUG MESSAGE] Created junction J53
+[DEBUG MESSAGE] Created junction J54
+[DEBUG MESSAGE] Created junction J55
+[DEBUG MESSAGE] Created junction J56
+[DEBUG MESSAGE] Created junction J57
+[DEBUG MESSAGE] Created junction J58
+[DEBUG MESSAGE] Created junction J59
+[DEBUG MESSAGE] Created junction J60
+[DEBUG MESSAGE] Created junction J61
+[DEBUG MESSAGE] Created junction J62
+[DEBUG MESSAGE] Created junction J63
+[DEBUG MESSAGE] Created junction J64
+[DEBUG MESSAGE] Created junction J65
+[DEBUG MESSAGE] Created junction J66
+[DEBUG MESSAGE] Created junction J67
+[DEBUG MESSAGE] Created junction J68
+[DEBUG MESSAGE] Created junction J69
+[DEBUG MESSAGE] Created junction J70
+[DEBUG MESSAGE] Created junction J71
+[DEBUG MESSAGE] Created junction J72
+[DEBUG MESSAGE] Created junction J73
+[DEBUG MESSAGE] Created junction J74
+[DEBUG MESSAGE] Created junction J75
+[DEBUG MESSAGE] Created junction J76
+[DEBUG MESSAGE] Created junction J77
+[DEBUG MESSAGE] Created junction J78
+[DEBUG MESSAGE] Created junction J79
+[DEBUG MESSAGE] Created junction J80
+[DEBUG MESSAGE] Created junction J81
+[DEBUG MESSAGE] Created junction J82
+[DEBUG MESSAGE] Created junction J83
+[DEBUG MESSAGE] Created junction J84
+[DEBUG MESSAGE] Created junction J85
+[DEBUG MESSAGE] Created junction J86
+[DEBUG MESSAGE] Created junction J87
+[DEBUG MESSAGE] Created junction J88
+[DEBUG MESSAGE] Created junction J89
+[DEBUG MESSAGE] Created junction J90
+[DEBUG MESSAGE] Created junction J91
+[DEBUG MESSAGE] Created junction J92
+[DEBUG MESSAGE] Created junction J93
+[DEBUG MESSAGE] Created junction J94
+[DEBUG MESSAGE] Created junction J95
+[DEBUG MESSAGE] Created junction J96
+[DEBUG MESSAGE] Created junction J97
+[DEBUG MESSAGE] Created junction J98
+[DEBUG MESSAGE] Setup degrees-of-freedom of nodes
+[DEBUG MESSAGE] Setup degrees-of-freedom of blocks
+[DEBUG MESSAGE] Setup model-dependent parameters
+[DEBUG MESSAGE] Load initial condition
+[DEBUG MESSAGE] Cardiac cycle period 1
+[DEBUG MESSAGE] Calculate steady initial condition
+[DEBUG MESSAGE] Setup initial state dependent parameters
+[DEBUG MESSAGE] Setup time integration
+[DEBUG MESSAGE] Run time integration
+[DEBUG MESSAGE] Avg. number of nonlinear iterations per time step: 0.722222
+[DEBUG MESSAGE] Write output

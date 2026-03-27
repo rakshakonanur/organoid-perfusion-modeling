@@ -1,0 +1,592 @@
+---------------------------------
+ oneDSolver 
+ 1D Finite Element Hemodynamics  
+---------------------------------
+
+Reading file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u-bend-moved-channel/ROMSimulations/rom/solver_1d.in ... 
+
+Printing Model Echo ... 
+
+Creating and Running Model ...
+Creating Nodes ... 
+Creating Joints ... 
+Creating Materials ... 
+Creating Data Tables ... 
+Creating Segments ... 
+Solving Model ... 
+Inlet Condition Type: FLOW
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Number of Joints: 99
+Number of Segments: 100
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+this that set ehr =10000000.000000 p1_=0.000000 
+RESISTANCE boundary condition
+Subdomain No. 100
+Joint No. 99
+Outlet No. 1
+Number of equations 1398
+Using Conservative Form ...
+maxStep/stepSize: 167
+Total Solution is: 167 x 1398
+**** Time cycle 1
+    iter: 0 normf: 228.855 norms: 0.0611396 time: 0.013379
+    iter: 1 normf: 4.21989 norms: 0.000585744 time: 0.013336
+    iter: 2 normf: 0.00509918 norms: 1.69999e-06 time: 0.013303
+    iter: 3 normf: 1.19931e-05 norms: 5.28545e-09 time: 0.013215
+    iter: 4 normf: 4.75341e-08 norms: 2.15734e-11 time: 1.84467e+13
+  Time = 0.01, Mass = -0.000237717, Tot iters = 4
+    iter: 0 normf: 0.0333998 norms: 0.000207639 time: 0.012959
+    iter: 1 normf: 0.113187 norms: 7.36165e-05 time: 0.013192
+    iter: 2 normf: 0.000406434 norms: 1.77928e-07 time: 0.012968
+    iter: 3 normf: 1.15472e-06 norms: 5.12916e-10 time: 1.84467e+13
+  Time = 0.02, Mass = -0.000233161, Tot iters = 3
+    iter: 0 normf: 0.00747954 norms: 6.03268e-06 time: 0.012866
+    iter: 1 normf: 0.120487 norms: 7.84602e-05 time: 0.012811
+    iter: 2 normf: 0.000620638 norms: 3.02147e-06 time: 0.0128
+    iter: 3 normf: 1.28607e-06 norms: 4.93027e-10 time: 1.84467e+13
+  Time = 0.03, Mass = -9.50641e-05, Tot iters = 3
+    iter: 0 normf: 0.00358534 norms: 9.48061e-07 time: 0.012827
+    iter: 1 normf: 0.125201 norms: 8.1634e-05 time: 0.013238
+    iter: 2 normf: 0.000457414 norms: 1.97482e-07 time: 0.013959
+    iter: 3 normf: 1.27598e-06 norms: 5.67131e-10 time: 1.84467e+13
+  Time = 0.04, Mass = 4.96942e-05, Tot iters = 3
+    iter: 0 normf: 0.00629697 norms: 1.24874e-06 time: 0.014396
+    iter: 1 normf: 0.126973 norms: 8.28992e-05 time: 0.014394
+    iter: 2 normf: 0.00045876 norms: 2.00532e-07 time: 0.014374
+    iter: 3 normf: 1.29106e-06 norms: 5.74581e-10 time: 1.84467e+13
+  Time = 0.05, Mass = 0.000179438, Tot iters = 3
+    iter: 0 normf: 0.00707183 norms: 4.17629e-07 time: 0.014545
+    iter: 1 normf: 0.125546 norms: 8.2078e-05 time: 0.014414
+    iter: 2 normf: 0.000453479 norms: 1.98552e-07 time: 0.014079
+    iter: 3 normf: 1.27749e-06 norms: 5.69015e-10 time: 1.84467e+13
+  Time = 0.06, Mass = 0.000303779, Tot iters = 3
+    iter: 0 normf: 0.00672403 norms: 1.26013e-07 time: 0.014431
+    iter: 1 normf: 0.12075 norms: 7.90464e-05 time: 0.013169
+    iter: 2 normf: 0.000435717 norms: 1.91136e-07 time: 0.012865
+    iter: 3 normf: 1.23001e-06 norms: 5.48232e-10 time: 1.84467e+13
+  Time = 0.07, Mass = 0.000427924, Tot iters = 3
+    iter: 0 normf: 0.00633046 norms: 1.1629e-07 time: 0.012796
+    iter: 1 normf: 0.112592 norms: 7.37993e-05 time: 0.012944
+    iter: 2 normf: 0.000405466 norms: 1.78297e-07 time: 0.012878
+    iter: 3 normf: 1.14829e-06 norms: 5.12383e-10 time: 1.84467e+13
+  Time = 0.08, Mass = 0.000551999, Tot iters = 3
+    iter: 0 normf: 0.00590735 norms: 1.1361e-07 time: 0.01285
+    iter: 1 normf: 0.101197 norms: 6.64074e-05 time: 0.012888
+    iter: 2 normf: 0.000363421 norms: 1.60262e-07 time: 0.012829
+    iter: 3 normf: 1.03346e-06 norms: 4.61083e-10 time: 1.84467e+13
+  Time = 0.09, Mass = 0.000675323, Tot iters = 3
+    iter: 0 normf: 0.00533593 norms: 7.47679e-08 time: 0.012822
+    iter: 1 normf: 0.0868147 norms: 5.70281e-05 time: 0.012833
+    iter: 2 normf: 0.00130686 norms: 2.28975e-07 time: 0.012832
+    iter: 3 normf: 4.04545e-06 norms: 9.78013e-10 time: 1.84467e+13
+  Time = 0.1, Mass = 0.000798238, Tot iters = 3
+    iter: 0 normf: 0.00457526 norms: 6.03296e-08 time: 0.012892
+    iter: 1 normf: 0.0698132 norms: 4.58998e-05 time: 0.012821
+    iter: 2 normf: 0.000279478 norms: 1.10867e-07 time: 0.012837
+    iter: 3 normf: 7.90528e-07 norms: 3.31035e-10 time: 1.84467e+13
+  Time = 0.11, Mass = 0.000919762, Tot iters = 3
+    iter: 0 normf: 0.00371525 norms: 2.10389e-08 time: 0.012844
+    iter: 1 normf: 0.0506967 norms: 3.3354e-05 time: 0.012828
+    iter: 2 normf: 0.000183844 norms: 8.04887e-08 time: 0.012837
+    iter: 3 normf: 5.49919e-07 norms: 2.39549e-10 time: 1.84467e+13
+  Time = 0.12, Mass = 0.00104013, Tot iters = 3
+    iter: 0 normf: 0.00270381 norms: 8.13123e-08 time: 0.012849
+    iter: 1 normf: 0.0300217 norms: 1.9761e-05 time: 0.012849
+    iter: 2 normf: 0.000107886 norms: 4.76684e-08 time: 0.012844
+    iter: 3 normf: 3.23076e-07 norms: 1.41971e-10 time: 1.84467e+13
+  Time = 0.13, Mass = 0.00115958, Tot iters = 3
+    iter: 0 normf: 0.00160965 norms: 1.29755e-07 time: 0.012858
+    iter: 1 normf: 0.00841865 norms: 5.54271e-06 time: 0.012861
+    iter: 2 normf: 3.02028e-05 norms: 1.33717e-08 time: 0.012843
+    iter: 3 normf: 9.05018e-08 norms: 3.9787e-11 time: 1.84467e+13
+  Time = 0.14, Mass = 0.00127821, Tot iters = 3
+    iter: 0 normf: 0.000469599 norms: 1.73358e-07 time: 0.012844
+    iter: 1 normf: 0.0134404 norms: 8.84905e-06 time: 0.012866
+    iter: 2 normf: 4.8316e-05 norms: 2.1371e-08 time: 0.012881
+    iter: 3 normf: 1.45069e-07 norms: 6.37235e-11 time: 1.84467e+13
+  Time = 0.15, Mass = 0.00139609, Tot iters = 3
+    iter: 0 normf: 0.000684762 norms: 2.12535e-07 time: 0.012832
+    iter: 1 normf: 0.0348796 norms: 2.29594e-05 time: 0.01284
+    iter: 2 normf: 0.000125949 norms: 5.5521e-08 time: 0.012861
+    iter: 3 normf: 3.80542e-07 norms: 1.66145e-10 time: 1.84467e+13
+  Time = 0.16, Mass = 0.00151336, Tot iters = 3
+    iter: 0 normf: 0.00181709 norms: 2.4537e-07 time: 0.012852
+    iter: 1 normf: 0.0552131 norms: 3.63276e-05 time: 0.012842
+    iter: 2 normf: 0.000201061 norms: 8.80081e-08 time: 0.012856
+    iter: 3 normf: 6.30857e-07 norms: 2.61968e-10 time: 1.84467e+13
+  Time = 0.17, Mass = 0.00163017, Tot iters = 3
+    iter: 0 normf: 0.00289108 norms: 2.70171e-07 time: 0.012855
+    iter: 1 normf: 0.0738646 norms: 4.85674e-05 time: 0.012852
+    iter: 2 normf: 0.000275869 norms: 1.17913e-07 time: 0.012875
+    iter: 3 normf: 2.53473e-06 norms: 3.52336e-10 time: 1.84467e+13
+  Time = 0.18, Mass = 0.00174666, Tot iters = 3
+    iter: 0 normf: 0.00387498 norms: 2.86672e-07 time: 0.012828
+    iter: 1 normf: 0.0902553 norms: 5.92885e-05 time: 0.012854
+    iter: 2 normf: 0.000327501 norms: 1.43482e-07 time: 0.012856
+    iter: 3 normf: 9.26499e-07 norms: 4.1341e-10 time: 1.84467e+13
+  Time = 0.19, Mass = 0.00186248, Tot iters = 3
+    iter: 0 normf: 0.00472128 norms: 3.28271e-07 time: 0.012832
+    iter: 1 normf: 0.103923 norms: 6.82038e-05 time: 0.012865
+    iter: 2 normf: 0.000379941 norms: 1.65781e-07 time: 0.012884
+    iter: 3 normf: 1.07305e-06 norms: 4.78623e-10 time: 1.84467e+13
+  Time = 0.2, Mass = 0.00197876, Tot iters = 3
+    iter: 0 normf: 0.0054697 norms: 2.97906e-07 time: 0.012914
+    iter: 1 normf: 0.114553 norms: 7.50942e-05 time: 0.012856
+    iter: 2 normf: 0.000420544 norms: 1.82839e-07 time: 0.012903
+    iter: 3 normf: 1.18267e-06 norms: 5.27194e-10 time: 1.84467e+13
+  Time = 0.21, Mass = 0.00209542, Tot iters = 3
+    iter: 0 normf: 0.00601779 norms: 2.77298e-07 time: 0.012874
+    iter: 1 normf: 0.121907 norms: 7.98152e-05 time: 0.012905
+    iter: 2 normf: 0.000448777 norms: 1.94566e-07 time: 0.012892
+    iter: 3 normf: 1.25828e-06 norms: 5.6051e-10 time: 1.84467e+13
+  Time = 0.22, Mass = 0.00221239, Tot iters = 3
+    iter: 0 normf: 0.00639404 norms: 2.60244e-07 time: 0.012899
+    iter: 1 normf: 0.125889 norms: 8.2314e-05 time: 0.012855
+    iter: 2 normf: 0.000463985 norms: 2.00777e-07 time: 0.012874
+    iter: 3 normf: 1.299e-06 norms: 5.78211e-10 time: 1.84467e+13
+  Time = 0.23, Mass = 0.00232979, Tot iters = 3
+    iter: 0 normf: 0.0065971 norms: 2.37988e-07 time: 0.012899
+    iter: 1 normf: 0.126553 norms: 8.26374e-05 time: 0.012904
+    iter: 2 normf: 0.000466285 norms: 2.01558e-07 time: 0.012888
+    iter: 3 normf: 1.30598e-06 norms: 5.80385e-10 time: 1.84467e+13
+  Time = 0.24, Mass = 0.00244771, Tot iters = 3
+    iter: 0 normf: 0.00662647 norms: 2.09832e-07 time: 0.012868
+    iter: 1 normf: 0.124075 norms: 8.09116e-05 time: 0.012883
+    iter: 2 normf: 0.000456708 norms: 1.97225e-07 time: 0.012884
+    iter: 3 normf: 1.33479e-06 norms: 5.68388e-10 time: 1.84467e+13
+  Time = 0.25, Mass = 0.00256624, Tot iters = 3
+    iter: 0 normf: 0.00649076 norms: 1.77882e-07 time: 0.012905
+    iter: 1 normf: 0.118747 norms: 7.73367e-05 time: 0.012924
+    iter: 2 normf: 0.000664711 norms: 3.01892e-06 time: 0.012877
+    iter: 3 normf: 1.0719e-06 norms: 4.75524e-10 time: 1.84467e+13
+  Time = 0.26, Mass = 0.00268551, Tot iters = 3
+    iter: 0 normf: 0.00620938 norms: 1.46591e-07 time: 0.012909
+    iter: 1 normf: 0.110959 norms: 7.21765e-05 time: 0.012846
+    iter: 2 normf: 0.000404219 norms: 1.75107e-07 time: 0.012795
+    iter: 3 normf: 1.13917e-06 norms: 5.04477e-10 time: 1.84467e+13
+  Time = 0.27, Mass = 0.00280549, Tot iters = 3
+    iter: 0 normf: 0.00579647 norms: 1.09834e-07 time: 0.012793
+    iter: 1 normf: 0.101194 norms: 6.575e-05 time: 0.012792
+    iter: 2 normf: 0.000367088 norms: 1.59227e-07 time: 0.012835
+    iter: 3 normf: 1.03902e-06 norms: 4.59327e-10 time: 1.84467e+13
+  Time = 0.28, Mass = 0.0029261, Tot iters = 3
+    iter: 0 normf: 0.00527923 norms: 7.66878e-08 time: 0.01281
+    iter: 1 normf: 0.0899973 norms: 5.84149e-05 time: 0.012816
+    iter: 2 normf: 0.000325173 norms: 1.41193e-07 time: 0.012793
+    iter: 3 normf: 9.25061e-07 norms: 4.07652e-10 time: 1.84467e+13
+  Time = 0.29, Mass = 0.00304729, Tot iters = 3
+    iter: 0 normf: 0.00469055 norms: 4.72788e-08 time: 0.012833
+    iter: 1 normf: 0.077924 norms: 5.05328e-05 time: 0.01281
+    iter: 2 normf: 0.000291438 norms: 1.22486e-07 time: 0.012798
+    iter: 3 normf: 8.12957e-07 norms: 3.56786e-10 time: 1.84467e+13
+  Time = 0.3, Mass = 0.00316898, Tot iters = 3
+    iter: 0 normf: 0.00405799 norms: 2.26092e-08 time: 0.01284
+    iter: 1 normf: 0.065539 norms: 4.24684e-05 time: 0.0128
+    iter: 2 normf: 0.000239934 norms: 1.45181e-07 time: 0.013057
+    iter: 3 normf: 6.79642e-07 norms: 2.97967e-10 time: 1.84467e+13
+  Time = 0.31, Mass = 0.0032911, Tot iters = 3
+    iter: 0 normf: 0.00341072 norms: 1.18798e-08 time: 0.012853
+    iter: 1 normf: 0.0533679 norms: 3.45594e-05 time: 0.012807
+    iter: 2 normf: 0.000191189 norms: 8.29451e-08 time: 0.012805
+    iter: 3 normf: 5.02365e-07 norms: 2.17904e-10 time: 1.84467e+13
+  Time = 0.32, Mass = 0.00341356, Tot iters = 3
+    iter: 0 normf: 0.00277527 norms: 2.37064e-08 time: 0.012845
+    iter: 1 normf: 0.04189 norms: 2.71127e-05 time: 0.012778
+    iter: 2 normf: 0.000272745 norms: 1.05277e-06 time: 0.012789
+    iter: 3 normf: 2.14867e-07 norms: 6.57663e-11 time: 1.84467e+13
+  Time = 0.33, Mass = 0.0035371, Tot iters = 3
+    iter: 0 normf: 0.00219941 norms: 8.1772e-08 time: 0.01278
+    iter: 1 normf: 0.0315007 norms: 2.03802e-05 time: 0.012774
+    iter: 2 normf: 9.86385e-05 norms: 4.19833e-08 time: 0.01277
+    iter: 3 normf: 9.42414e-08 norms: 3.79412e-11 time: 1.84467e+13
+  Time = 0.34, Mass = 0.00366083, Tot iters = 3
+    iter: 0 normf: 0.00163658 norms: 9.08361e-08 time: 0.01279
+    iter: 1 normf: 0.0225052 norms: 1.4556e-05 time: 0.012762
+    iter: 2 normf: 7.10036e-05 norms: 2.99542e-08 time: 0.012754
+    iter: 3 normf: 6.89747e-08 norms: 2.75318e-11 time: 1.84467e+13
+  Time = 0.35, Mass = 0.00378431, Tot iters = 3
+    iter: 0 normf: 0.00115766 norms: 7.66655e-08 time: 0.012764
+    iter: 1 normf: 0.0150827 norms: 9.75319e-06 time: 0.01278
+    iter: 2 normf: 4.81227e-05 norms: 2.00551e-08 time: 0.012772
+    iter: 3 normf: 4.76423e-08 norms: 1.88593e-11 time: 1.84467e+13
+  Time = 0.36, Mass = 0.00390752, Tot iters = 3
+    iter: 0 normf: 0.000772283 norms: 6.11051e-08 time: 0.01278
+    iter: 1 normf: 0.00930721 norms: 6.01764e-06 time: 0.0128
+    iter: 2 normf: 3.01221e-05 norms: 1.23672e-08 time: 0.012758
+    iter: 3 normf: 3.03507e-08 norms: 1.2615e-11 time: 1.84467e+13
+  Time = 0.37, Mass = 0.00403048, Tot iters = 3
+    iter: 0 normf: 0.000474121 norms: 4.74715e-08 time: 0.012779
+    iter: 1 normf: 0.00512776 norms: 3.31511e-06 time: 0.012779
+    iter: 2 normf: 2.14142e-05 norms: 8.21022e-09 time: 0.012743
+    iter: 3 normf: 1.75076e-08 norms: 1.00031e-11 time: 1.84467e+13
+  Time = 0.38, Mass = 0.0041532, Tot iters = 3
+    iter: 0 normf: 0.000258152 norms: 3.46863e-08 time: 0.012766
+    iter: 1 normf: 0.00239378 norms: 1.54752e-06 time: 0.012746
+    iter: 2 normf: 7.84315e-06 norms: 3.12843e-09 time: 1.84467e+13
+  Time = 0.39, Mass = 0.00427571, Tot iters = 2
+    iter: 0 normf: 0.000115247 norms: 2.28881e-08 time: 0.012795
+    iter: 1 normf: 0.00086166 norms: 5.57031e-07 time: 0.012755
+    iter: 2 normf: 2.84079e-06 norms: 1.126e-09 time: 1.84467e+13
+  Time = 0.4, Mass = 0.00439802, Tot iters = 2
+    iter: 0 normf: 3.79477e-05 norms: 1.2661e-08 time: 0.012764
+    iter: 1 normf: 0.000202888 norms: 1.31159e-07 time: 0.012756
+    iter: 2 normf: 6.70464e-07 norms: 2.65171e-10 time: 1.84467e+13
+  Time = 0.41, Mass = 0.00452018, Tot iters = 2
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.42, Mass = 0.00464234, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.43, Mass = 0.00476458, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.44, Mass = 0.00488733, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.45, Mass = 0.00501171, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.46, Mass = 0.00513982, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.47, Mass = 0.00527502, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.48, Mass = 0.00542211, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.49, Mass = 0.00558739, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.5, Mass = 0.00577863, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.51, Mass = 0.00600495, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.52, Mass = 0.00627658, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.53, Mass = 0.00660452, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.54, Mass = 0.00700014, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.55, Mass = 0.00747473, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.56, Mass = 0.00803897, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.57, Mass = 0.0087024, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.58, Mass = 0.00947295, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.59, Mass = 0.0103565, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.6, Mass = 0.0113563, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.61, Mass = 0.0124728, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.62, Mass = 0.0137037, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.63, Mass = 0.0150432, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.64, Mass = 0.0164826, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.65, Mass = 0.0180102, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.66, Mass = 0.0196117, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.67, Mass = 0.0212705, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.68, Mass = 0.022968, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.69, Mass = 0.0246848, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.7, Mass = 0.0264004, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.71, Mass = 0.0280948, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.72, Mass = 0.0297483, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.73, Mass = 0.0313427, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.74, Mass = 0.0328615, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.75, Mass = 0.0342907, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.76, Mass = 0.0356188, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.77, Mass = 0.0368374, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.78, Mass = 0.0379412, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.79, Mass = 0.0389281, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.8, Mass = 0.0397987, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.81, Mass = 0.0405568, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.82, Mass = 0.0412084, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.83, Mass = 0.0417617, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.84, Mass = 0.0422264, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.85, Mass = 0.0426132, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.86, Mass = 0.0429336, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.87, Mass = 0.0431989, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.88, Mass = 0.0434201, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.89, Mass = 0.0436073, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.9, Mass = 0.0437695, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.91, Mass = 0.0439145, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.92, Mass = 0.0440483, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.93, Mass = 0.0441755, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.94, Mass = 0.0442994, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.95, Mass = 0.044422, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.96, Mass = 0.0445442, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.97, Mass = 0.0446663, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.98, Mass = 0.0447885, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 0.99, Mass = 0.0449108, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1, Mass = 0.0450339, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.01, Mass = 0.0451593, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.02, Mass = 0.0452896, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.03, Mass = 0.0454288, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.04, Mass = 0.0455823, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.05, Mass = 0.0457572, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.06, Mass = 0.0459619, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.07, Mass = 0.046206, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.08, Mass = 0.0465003, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.09, Mass = 0.0468559, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.1, Mass = 0.0472844, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.11, Mass = 0.0477968, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.12, Mass = 0.0484034, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.13, Mass = 0.0491131, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.14, Mass = 0.0499331, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.15, Mass = 0.050868, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.16, Mass = 0.0519199, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.17, Mass = 0.053088, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.18, Mass = 0.0543685, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.19, Mass = 0.0557541, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.2, Mass = 0.0572349, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.21, Mass = 0.0587978, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.22, Mass = 0.0604275, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.23, Mass = 0.0621063, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.24, Mass = 0.0638152, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.25, Mass = 0.0655342, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.26, Mass = 0.067243, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.27, Mass = 0.0689216, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.28, Mass = 0.0705509, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.29, Mass = 0.0721134, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.3, Mass = 0.0735938, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.31, Mass = 0.074979, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.32, Mass = 0.0762591, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.33, Mass = 0.077427, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.34, Mass = 0.0784788, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.35, Mass = 0.0794137, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.36, Mass = 0.0802338, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.37, Mass = 0.080944, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.38, Mass = 0.0815511, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.39, Mass = 0.0820643, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.4, Mass = 0.0824936, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.41, Mass = 0.0828501, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.42, Mass = 0.0831454, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.43, Mass = 0.0833905, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.44, Mass = 0.0835961, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.45, Mass = 0.0837719, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.46, Mass = 0.0839262, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.47, Mass = 0.084066, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.48, Mass = 0.0841968, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.49, Mass = 0.0843225, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.5, Mass = 0.0844458, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.51, Mass = 0.0845682, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.52, Mass = 0.0846903, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.53, Mass = 0.0848125, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.54, Mass = 0.0849347, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.55, Mass = 0.0850574, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.56, Mass = 0.0851815, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.57, Mass = 0.0853091, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.58, Mass = 0.0854433, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.59, Mass = 0.0855887, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.6, Mass = 0.0857516, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.61, Mass = 0.0859395, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.62, Mass = 0.0861614, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.63, Mass = 0.0864273, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.64, Mass = 0.0867484, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.65, Mass = 0.0871358, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.66, Mass = 0.0876009, Tot iters = 0
+    iter: 0 normf: 6.52068e-06 norms: 5.13511e-09 time: 1.84467e+13
+  Time = 1.67, Mass = 0.0881546, Tot iters = 0
+
+Avgerage number of Newton-Raphson iterations per time step = 0.724551
+
+Results Exported to VTK.
+Completed!
