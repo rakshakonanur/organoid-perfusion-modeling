@@ -176,8 +176,8 @@ class PerfusionSolver:
         # Marker conventions from mesh_tags_well*.xdmf
         self.arterial_concave_marker = 31
         self.venous_concave_marker = 32
-        self.inlet_base_marker = 100
-        self.outlet_base_marker = 200
+        self.inlet_base_marker = 1000
+        self.outlet_base_marker = 2000
 
         # 1D tree terminal territory meshes/checkpoints.
         # Read only on rank 0 (COMM_SELF), then broadcast sampled arrays with
