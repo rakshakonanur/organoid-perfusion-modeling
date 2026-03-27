@@ -297,7 +297,7 @@ def build_channel_model(
     inflow_bc_name: str,
     outpress_bc_name: str,
     inflow_segment: str = "arterial_seg1",
-    outpress_segment: str = "veinous_seg5",
+    outpress_segment: str = "veinous_seg6",
     Q_in: float = 5.5e-05,
     P_out: float = 79993.2,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int], int, List[RenameRecord]]:
@@ -464,7 +464,7 @@ def build_default_channel_junctions(
 
     junctions: List[Dict[str, Any]] = []
 
-    # Arterial: organoid 1..4
+    # Arterial: organoid 1..4, then continue to seg6 and the u-bend
     art_pairs = [
         ("arterial_seg1", "arterial_seg2", 1),
         ("arterial_seg2", "arterial_seg3", 2),
@@ -483,11 +483,17 @@ def build_default_channel_junctions(
             "outlet_vessels": outs,
         })
 
-    # U-bend and venous chain
+    # Continue arterial trunk to the u-bend
+    junctions.append({
+        "junction_name": "J_ART_5",
+        "junction_type": "NORMAL_JUNCTION",
+        "inlet_vessels": [vid("arterial_seg5")],
+        "outlet_vessels": [vid("arterial_seg6")],
+    })
     junctions.append({
         "junction_name": "J_ART_TO_UBEND",
         "junction_type": "NORMAL_JUNCTION",
-        "inlet_vessels": [vid("arterial_seg5")],
+        "inlet_vessels": [vid("arterial_seg6")],
         "outlet_vessels": [vid("u_bend")],
     })
     junctions.append({
@@ -496,13 +502,19 @@ def build_default_channel_junctions(
         "inlet_vessels": [vid("u_bend")],
         "outlet_vessels": [vid("veinous_seg1")],
     })
+    junctions.append({
+        "junction_name": "J_VEN_0",
+        "junction_type": "NORMAL_JUNCTION",
+        "inlet_vessels": [vid("veinous_seg1")],
+        "outlet_vessels": [vid("veinous_seg2")],
+    })
 
     # Venous: organoid 4..1
     ven_pairs = [
-        ("veinous_seg1", "veinous_seg2", 4),
-        ("veinous_seg2", "veinous_seg3", 3),
-        ("veinous_seg3", "veinous_seg4", 2),
-        ("veinous_seg4", "veinous_seg5", 1),
+        ("veinous_seg2", "veinous_seg3", 4),
+        ("veinous_seg3", "veinous_seg4", 3),
+        ("veinous_seg4", "veinous_seg5", 2),
+        ("veinous_seg5", "veinous_seg6", 1),
     ]
     for idx, (up, dn, org) in enumerate(ven_pairs, start=1):
         outs = [vid(dn), outlet_roots[org]]
@@ -769,7 +781,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input-dir", type=str, default="", help="Directory containing organoid_#_inlet.in and organoid_#_outlet.in")
     ap.add_argument("--synthetic-zip", type=str, default="", help="Zip containing organoid files (alternative to --input-dir)")
-    ap.add_argument("--source-folder", type=str, default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/030426/Run1_10branches", help="Single synthetic vasculature folder to repeat in all 4 wells")
+    ap.add_argument("--source-folder", type=str, default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/031926/Run12_20branches", help="Single synthetic vasculature folder to repeat in all 4 wells")
     ap.add_argument("--source-folders", nargs=4, default=None, help="Four synthetic vasculature folders, one per well")
     ap.add_argument("--trial-root", type=str, default="./prepped", help="Parent directory where a trial-X folder will be created")
     ap.add_argument("--trial-name", type=str, default="", help="Optional explicit trial folder name (e.g. trial-10)")
@@ -777,13 +789,13 @@ def main() -> None:
     ap.add_argument("--dy-step", type=float, default=0.6, help="Per-well shift in Y applied during trial folder creation")
     ap.add_argument("--shift-sign", type=float, default=-1.0, help="Sign multiplier for Y shift (default: -1.0)")
     ap.add_argument("--no-shift-coords", action="store_true", help="Disable Y-shifting of branchingData_*.csv and geom.csv during trial creation")
-    ap.add_argument("--channel-xlsx", type=str, default="/Users/rakshakonanur/Documents/Research/two-channel/files/channel-resistance-sv.xlsx", help="Path to channel-resistance.xlsx (optional; fallback table used if missing)")
+    ap.add_argument("--channel-xlsx", type=str, default="../../files/excel/channel-resistance-sv.xlsx", help="Path to channel-resistance.xlsx (optional; fallback table used if missing)")
     ap.add_argument("--out", type=str, default="combined.in", help="Output combined .in file (JSON)")
     ap.add_argument("--map", type=str, default="rename_map.json", help="Output rename_map.json")
 
     ap.add_argument("--main-inflow-name", type=str, default="INFLOW")
     ap.add_argument("--main-outlet-name", type=str, default="OUT3")
-    ap.add_argument("--main-inflow-Q", type=float, default=2.5e-2)
+    ap.add_argument("--main-inflow-Q", type=float, default=6.0e-2)
     ap.add_argument("--main-outlet-P", type=float, default=0.0)
 
     ap.add_argument("--connections", type=str, default="", help="Optional JSON file overriding channel-organoid junctions")

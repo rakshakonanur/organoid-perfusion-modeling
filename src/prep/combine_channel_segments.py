@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Combine an existing discretized 0D channel solver (e.g., 1000 vessels in series)
-into a smaller number of segments (e.g., 11), using the segment lengths in an Excel
+into a smaller number of segments (e.g., 13), using the segment lengths in an Excel
 sheet as the reference for where to place boundaries along the channel.
 
 NEW: Also writes an updated Excel file where the Resistance and Inductance columns
@@ -11,7 +11,7 @@ Usage:
   python combine_channel_segments.py \
       --xlsx channel-resistance.xlsx \
       --solver solver_0d.json \
-      --out solver_0d_template_combined_to_11.json \
+      --out solver_0d_template_combined.json \
       --xlsx_out channel-resistance_updated.xlsx
 """
 
@@ -67,6 +67,12 @@ def read_segments_xlsx(xlsx_path: Path) -> tuple[pd.DataFrame, list[str], np.nda
 
     seg_names = df[seg_col].astype(str).tolist()
     seg_lengths = pd.to_numeric(df[len_col], errors="raise").astype(float).to_numpy()
+
+    if len(seg_names) == 0:
+        raise ValueError(f"No segments found in {xlsx_path.name}")
+    if len(set(seg_names)) != len(seg_names):
+        dupes = sorted({name for name in seg_names if seg_names.count(name) > 1})
+        raise ValueError(f"Segment names must be unique. Duplicate names: {dupes}")
 
     if np.any(seg_lengths <= 0):
         bad = np.where(seg_lengths <= 0)[0].tolist()
@@ -151,7 +157,7 @@ def combine_template_into_segments(
 
         pos += Li
 
-    # Build new solver JSON with 11 vessels in series
+    # Build new solver JSON with one vessel per requested segment, in Excel row order.
     bc = template["boundary_conditions"]
     sim = template["simulation_parameters"]
 
@@ -199,13 +205,13 @@ def combine_template_into_segments(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--xlsx", type=Path, default="../files/channel-resistance-sv.xlsx",
+    ap.add_argument("--xlsx", type=Path, default="../../files/excel/channel-resistance-sv.xlsx",
                     help="Path to channel-resistance.xlsx")
-    ap.add_argument("--solver", type=Path, default="../files/reference-sv-files/solver_0d.json",
+    ap.add_argument("--solver", type=Path, default="../../files/sv-3d-projection/solver_0d.json",
                     help="Path to template solver_0d.json (many vessels)")
-    ap.add_argument("--out", type=Path, default="../files/reference-sv-files/interpolated/solver_0d.json",
-                    help="Output json path (combined to 11 segments)")
-    ap.add_argument("--xlsx_out", type=Path, default="../files/channel-resistance-sv.xlsx",
+    ap.add_argument("--out", type=Path, default="../../files/sv-3d-projection/interpolated/solver_0d.json",
+                    help="Output json path (combined to the segment rows listed in the Excel file)")
+    ap.add_argument("--xlsx_out", type=Path, default="../../files/excel/channel-resistance-sv.xlsx",
                     help="Output xlsx path with updated Resistance/Inductance. "
                          "Default: <xlsx_stem>_updated.xlsx next to input xlsx.")
     args = ap.parse_args()
@@ -240,6 +246,7 @@ def main():
     xlsx_out.parent.mkdir(parents=True, exist_ok=True)
     df_raw.to_excel(xlsx_out, index=False)
 
+    print(f"[OK] Combined {len(seg_names)} requested segments: {seg_names}")
     print(f"[OK] Wrote {args.out} with {len(combined['vessels'])} vessels and {len(combined['junctions'])} junctions.")
     print(f"[OK] Wrote updated Excel with combined {res_col}/{ind_col}: {xlsx_out}")
 

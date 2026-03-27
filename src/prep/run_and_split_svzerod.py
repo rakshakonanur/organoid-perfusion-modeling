@@ -494,8 +494,8 @@ def run_solver(exe: str, input_file: Path, output_file: Path, cwd: Path) -> None
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Run svzerodsolver and split the output CSV by group (channel/organoids).")
     ap.add_argument("--exe", default="svzerodsolver", help="Executable name or path (default: svzerodsolver)")
-    ap.add_argument("--input", type=str, default="./prepped/trial-3/combined.in", help="Input .in/.json file for svzerodsolver")
-    ap.add_argument("--outdir", type=str, default="./prepped/trial-3", help="Output directory (cwd for solver, and where split/ is created)")
+    ap.add_argument("--input", type=str, default="./prepped/trial-8/combined.in", help="Input .in/.json file for svzerodsolver")
+    ap.add_argument("--outdir", type=str, default="./prepped/trial-8", help="Output directory (cwd for solver, and where split/ is created)")
     ap.add_argument("--output", type=str, default="output.csv", help="Solver output filename (default: output.csv)")
     ap.add_argument("--no-run", action="store_true", help="Do not run solver; only split the existing output CSV")
     ap.add_argument("--debug", action="store_true", help="Print grouping/debug info while splitting")
