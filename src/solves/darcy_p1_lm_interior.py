@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+import glob
 
 import numpy as np
 import ufl
@@ -25,6 +26,137 @@ class PerfusionSolver(lm_base.PerfusionSolver):
     - Outlet terminal pressures: same strong Dirichlet-on-tagged-facets behavior.
     - Inlet terminal flux constraints: uses ds for exterior markers, dS for interior markers.
     """
+
+    def __init__(
+        self,
+        *args,
+        perm_region_path: str = "",
+        perm_low: float = 1.0e-8,
+        perm_high: float = 1.0e-6,
+        perm_transition_width: float = 0.01,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.perm_region_path = str(perm_region_path).strip()
+        self.perm_low = float(perm_low)
+        self.perm_high = float(perm_high)
+        self.perm_transition_width = float(perm_transition_width)
+
+    @staticmethod
+    def _resolve_perm_region_stls(path_str: str):
+        path = Path(path_str).expanduser()
+        if not str(path_str).strip():
+            return []
+        if path.is_dir():
+            return sorted(path.glob("*.stl"))
+        if path.is_file():
+            return [path]
+        matches = [Path(p) for p in sorted(glob.glob(str(path)))]
+        return [p for p in matches if p.suffix.lower() == ".stl"]
+
+    @staticmethod
+    def _build_stl_distance_tester(stl_file: Path, tol: float = 1e-9):
+        try:
+            import vtk
+        except ImportError as exc:
+            raise ImportError(
+                "vtk is required to build STL-based permeability regions. "
+                "Please install vtk in the Darcy runtime environment."
+            ) from exc
+
+        reader = vtk.vtkSTLReader()
+        reader.SetFileName(str(stl_file))
+        reader.Update()
+        surface = reader.GetOutput()
+        if surface is None or surface.GetNumberOfPoints() == 0:
+            raise ValueError(f"Failed to read STL surface from {stl_file}")
+
+        enclosed = vtk.vtkSelectEnclosedPoints()
+        enclosed.SetTolerance(float(tol))
+        enclosed.Initialize(surface)
+        distance = vtk.vtkImplicitPolyDataDistance()
+        distance.SetInput(surface)
+
+        def _inside(point: np.ndarray) -> bool:
+            p = np.asarray(point, dtype=float).reshape(3,)
+            return bool(enclosed.IsInsideSurface(float(p[0]), float(p[1]), float(p[2])))
+
+        def _signed_distance(point: np.ndarray) -> float:
+            p = np.asarray(point, dtype=float).reshape(3,)
+            return float(distance.EvaluateFunction((float(p[0]), float(p[1]), float(p[2]))))
+
+        def _cleanup() -> None:
+            try:
+                enclosed.Complete()
+            except Exception:
+                pass
+
+        return _inside, _signed_distance, _cleanup
+
+    @staticmethod
+    def _smooth_transition_alpha(signed_distance: float, width: float) -> float:
+        if width <= 0.0:
+            return 1.0 if signed_distance <= 0.0 else 0.0
+        if signed_distance <= -width:
+            return 1.0
+        if signed_distance >= width:
+            return 0.0
+        t = (signed_distance + width) / (2.0 * width)
+        smooth = 3.0 * t * t - 2.0 * t * t * t
+        return float(1.0 - smooth)
+
+    def make_K_from_stl_regions_DG0(self, mesh, stl_files, K_low, K_high, transition_width=0.0):
+        V0 = fem.functionspace(mesh, ("DG", 0))
+        Kfun = fem.Function(V0)
+
+        if not stl_files:
+            Kfun.x.array[:] = float(K_low)
+            Kfun.x.scatter_forward()
+            return Kfun
+
+        tdim = mesh.topology.dim
+        gdim = mesh.geometry.dim
+        mesh.topology.create_connectivity(tdim, 0)
+        c2v = mesh.topology.connectivity(tdim, 0)
+
+        nloc = mesh.topology.index_map(tdim).size_local
+        cell_ids = np.arange(nloc, dtype=np.int32)
+        x = mesh.geometry.x
+        K_local = np.full(nloc, float(K_low), dtype=np.float64)
+
+        testers = []
+        try:
+            for stl_file in stl_files:
+                testers.append(self._build_stl_distance_tester(Path(stl_file)))
+
+            for c in cell_ids:
+                vs = c2v.links(int(c))
+                pts = x[vs, :gdim]
+                midpoint = np.mean(pts, axis=0)
+                signed_dist = np.inf
+                for inside_fn, dist_fn, _cleanup in testers:
+                    d_mid = dist_fn(midpoint)
+                    if inside_fn(midpoint):
+                        signed_dist = min(signed_dist, d_mid)
+                        continue
+                    d_vertices = [dist_fn(p) for p in pts]
+                    vertex_inside = [inside_fn(p) for p in pts]
+                    if any(vertex_inside):
+                        signed_dist = min(signed_dist, min(d_vertices))
+                    else:
+                        signed_dist = min(
+                            signed_dist,
+                            min(abs(d_mid), *(abs(dv) for dv in d_vertices)),
+                        )
+                alpha = self._smooth_transition_alpha(float(signed_dist), float(transition_width))
+                K_local[c] = float(K_low) + alpha * (float(K_high) - float(K_low))
+        finally:
+            for _inside, _dist, cleanup in testers:
+                cleanup()
+
+        Kfun.x.array[:nloc] = K_local
+        Kfun.x.scatter_forward()
+        return Kfun
 
     def _split_marker_facets(self, marker: int):
         mesh = self.mesh
@@ -266,6 +398,151 @@ class PerfusionSolver(lm_base.PerfusionSolver):
             interface_bc["branch_ids_outlet"] = np.asarray(ids_out).tolist()
         return interface_bc
 
+    def setup(self):
+        mesh = self.mesh
+        facet_tags = self.facet_tags
+        W = fem.functionspace(mesh, ("Lagrange", 1))
+        p = ufl.TrialFunction(W)
+        v = ufl.TestFunction(W)
+
+        stl_files = self._resolve_perm_region_stls(self.perm_region_path)
+        if stl_files:
+            if mesh.comm.rank == 0:
+                print(
+                    "[perm] Using STL-based permeability regions from:",
+                    ", ".join(str(p) for p in stl_files),
+                    flush=True,
+                )
+            Kfun = self.make_K_from_stl_regions_DG0(
+                mesh,
+                stl_files=stl_files,
+                K_low=self.perm_low,
+                K_high=self.perm_high,
+                transition_width=self.perm_transition_width,
+            )
+        else:
+            K_base = 1e-7
+            K_wall = 1e-7
+            K_high = 1.0e-8
+            d_inner = 0.01
+            d_outer = 0.025
+            r = 0.1
+            centers = np.array(
+                [[0, 0.900, 0.4359], [0, 0.300, 0.4359], [0, -0.300, 0.4359], [0, -0.900, 0.4359]],
+                dtype=np.float64,
+            )
+            INLET_MARK = getattr(self, "arterial_concave_marker", 32)
+            OUTLET_MARK = getattr(self, "venous_concave_marker", 31)
+            K_wall_blobs = self.make_K_near_wall_DG0(
+                mesh, facet_tags, wall_markers=[INLET_MARK, OUTLET_MARK],
+                K_base=K_base, K_wall=K_wall, d_inner=d_inner, d_outer=d_outer
+            )
+            K_blobs = self.make_K_DG0(mesh, K_base, K_high, centers, r, inner_frac=0.5)
+            Kfun = fem.Function(K_wall_blobs.function_space)
+            Kfun.x.array[:] = K_wall_blobs.x.array[:] + K_blobs.x.array[:]
+            Kfun.x.scatter_forward()
+
+        I = ufl.Identity(mesh.geometry.dim)
+        e = ufl.as_vector((1.0, 0.0, 0.0))
+
+        alpha = 5.0
+        K_perp = Kfun
+        K_par = alpha * Kfun
+
+        K_tensor = K_perp * I + (K_par - K_perp) * ufl.outer(e, e)
+        self.K_tensor = K_tensor
+
+        a = ufl.inner(K_tensor * ufl.grad(p), ufl.grad(v)) * ufl.dx
+        if self.concave_bc_mode == "robin":
+            a_robin, _ = self._build_concave_robin_terms(p, v)
+            a += a_robin
+
+        q_src = self._build_q_src(W)
+        L = q_src * v * ufl.dx
+        if self.concave_bc_mode == "robin":
+            _, L_robin = self._build_concave_robin_terms(p, v)
+            L += L_robin
+
+        bcs = self._build_outlet_terminal_bcs(W)
+        if self.concave_bc_mode == "dirichlet":
+            bcs = self._build_wall_dirichlet_bcs(W) + bcs
+
+        A, b, _ = self._assemble_system(a, L, bcs)
+        bc_dofs = self._collect_bc_dofs(bcs)
+
+        inlet_marks, _, _, _, idx_in, _ = self._get_terminal_marker_data()
+        q_target = np.zeros(len(inlet_marks), dtype=float)
+        for j, _m in enumerate(inlet_marks):
+            if j < len(idx_in) and len(self.q_inlet):
+                q_target[j] = float(self.q_inlet[idx_in[j]])
+
+        c_vecs = self._build_constraint_vectors(W, K_tensor, inlet_marks, bc_dofs)
+
+        ksp = PETSc.KSP().create(mesh.comm)
+        ksp.setOperators(A)
+        ksp.setType("preonly")
+        ksp.getPC().setType("lu")
+        ksp.getPC().setFactorSolverType("mumps")
+
+        z0 = self._solve_linear(ksp, b)
+        z_list = [self._solve_linear(ksp, c) for c in c_vecs]
+
+        nt = len(inlet_marks)
+        S = np.zeros((nt, nt), dtype=float)
+        rhs = np.zeros(nt, dtype=float)
+
+        for i in range(nt):
+            rhs[i] = q_target[i] - c_vecs[i].dot(z0)
+            for j in range(nt):
+                S[i, j] = c_vecs[i].dot(z_list[j])
+
+        if nt > 0:
+            lam, *_ = np.linalg.lstsq(S, rhs, rcond=None)
+        else:
+            lam = np.zeros(0, dtype=float)
+
+        x = z0.copy()
+        for j, lj in enumerate(lam):
+            x.axpy(float(lj), z_list[j])
+
+        p_h = fem.Function(W)
+        x.copy(result=p_h.x.petsc_vec)
+        p_h.x.scatter_forward()
+
+        V = fem.functionspace(mesh, ("RT", 1))
+        u_h = lm_base.Projector(V)(-(K_tensor * ufl.grad(p_h)))
+
+        n = ufl.FacetNormal(mesh)
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+        Q_art_leak = fem.assemble_scalar(fem.form(ufl.dot(u_h, n) * ds(int(self.arterial_concave_marker))))
+        Q_ven_leak = fem.assemble_scalar(fem.form(ufl.dot(u_h, n) * ds(int(self.venous_concave_marker))))
+        Q_art_leak = mesh.comm.allreduce(Q_art_leak, op=MPI.SUM)
+        Q_ven_leak = mesh.comm.allreduce(Q_ven_leak, op=MPI.SUM)
+
+        out_dir = current_dir / "out_darcy"
+        out_dir.mkdir(exist_ok=True)
+        P1vec = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))
+        u_P1 = fem.Function(P1vec)
+        u_P1.interpolate(u_h)
+        with dfx.io.XDMFFile(mesh.comm, out_dir / "p.xdmf", "w") as f:
+            f.write_mesh(mesh)
+            f.write_function(p_h)
+        with dfx.io.XDMFFile(mesh.comm, out_dir / "u.xdmf", "w") as f:
+            f.write_mesh(mesh)
+            f.write_function(u_P1)
+        vtkfile = dfx.io.VTKFile(MPI.COMM_WORLD, out_dir / "u.vtu", "w")
+        vtkfile.write_function(u_P1)
+        vtkfile_p = dfx.io.VTKFile(MPI.COMM_WORLD, out_dir / "p.vtu", "w")
+        vtkfile_p.write_function(p_h)
+
+        interface_bc = self._compute_interface_bc(p_h, u_h, q_src, Q_art_leak, Q_ven_leak)
+        if mesh.comm.rank == 0:
+            with open(out_dir / "interface_bc.json", "w") as fp:
+                import json
+                json.dump(interface_bc, fp, indent=2)
+        print("Darcy P1-LM solve complete.")
+        return interface_bc
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Run P1 Darcy LM with interior-facet terminal support.")
@@ -290,6 +567,19 @@ if __name__ == "__main__":
     ap.add_argument("--inlet-flux-corr-max-iter", type=int, default=5)
     ap.add_argument("--inlet-flux-corr-relax", type=float, default=0.5)
     ap.add_argument("--inlet-flux-corr-tol", type=float, default=0.05)
+    ap.add_argument(
+        "--perm-region-path",
+        default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere",
+        help="STL file, directory, or glob pattern describing high-permeability organoid regions.",
+    )
+    ap.add_argument("--perm-low", type=float, default=1.0e-8, help="Background permeability outside STL regions.")
+    ap.add_argument("--perm-high", type=float, default=1.0e-6, help="Permeability inside STL regions.")
+    ap.add_argument(
+        "--perm-transition-width",
+        type=float,
+        default=0.01,
+        help="Half-width of the smooth permeability transition shell around the STL boundary.",
+    )
     ap.add_argument("--out-dir", default="", help="Optional output directory for out_darcy")
     args = ap.parse_args()
 
@@ -318,6 +608,10 @@ if __name__ == "__main__":
         inlet_flux_corr_max_iter=args.inlet_flux_corr_max_iter,
         inlet_flux_corr_relax=args.inlet_flux_corr_relax,
         inlet_flux_corr_tol=args.inlet_flux_corr_tol,
+        perm_region_path=args.perm_region_path,
+        perm_low=args.perm_low,
+        perm_high=args.perm_high,
+        perm_transition_width=args.perm_transition_width,
         branching_in_file=args.branching_in_file if args.branching_in_file else None,
         branching_out_file=args.branching_out_file if args.branching_out_file else None,
     )
