@@ -48,6 +48,13 @@ def _pick_existing(*paths: Path) -> Path:
     raise FileNotFoundError("None of the candidate paths exist:\n" + "\n".join(str(p) for p in paths))
 
 
+def _pick_existing_or_none(*paths: Path) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
 def _run_cmd(cmd: list[str]) -> None:
     print("[run]", " ".join(str(c) for c in cmd), flush=True)
     subprocess.run(cmd, check=True)
@@ -219,6 +226,24 @@ def _read_seed_coords_from_branching_csv(csv_path: Path, fallback: np.ndarray) -
     except Exception:
         return np.asarray(fallback, dtype=float).copy()
 
+
+def _resolve_perm_region_for_organoid(base: str, organoid_idx: int) -> str:
+    raw = str(base).strip()
+    if not raw:
+        return ""
+
+    if "X" in raw:
+        candidate = Path(raw.replace("X", str(organoid_idx))).expanduser()
+        if candidate.suffix:
+            return str(candidate.resolve())
+        with_suffix = candidate.with_suffix(".stl")
+        return str((with_suffix if with_suffix.exists() else candidate).resolve())
+
+    path = Path(raw).expanduser()
+    if path.is_dir():
+        return str((path / f"organoid-{organoid_idx}.stl").resolve())
+    return str(path.resolve())
+
 def run_one(
     i: int,
     stl_dir: Path,
@@ -244,6 +269,10 @@ def run_one(
     darcy_mpi_procs: int = 1,
     darcy_mpirun_cmd: str = "mpirun",
     darcy_solver: str = "darcy",
+    perm_region_root: str = "",
+    perm_low: float = 1.0e-8,
+    perm_high: float = 1.0e-6,
+    perm_transition_width: float = 0.01,
 ) -> None:
     t0 = perf_counter()
     src_org_dir = trial_dir / f"organoid_{i}"
@@ -272,22 +301,36 @@ def run_one(
     if shared_tissue_vtu is not None:
         tissue_vtu = shared_tissue_vtu
     else:
-        tissue_vtu = _pick_existing(
+        tissue_vtu = _pick_existing_or_none(
             src_org_dir / "tissue_domain_volume_refined.vtu",
             src_org_dir / "tissue_domain_volume.vtu",
         )
 
-    tissue_stl = stl_dir/f"stl/organoid-growth-domains/original/organoid-{i}.stl"
     stl_candidates = [
         src_org_dir / "well_surface.stl",
         src_org_dir / "3d_tmp" / "well_surface.stl",
+        stl_dir / "stl" / "organoid-growth-domains" / "original" / f"organoid-{i}.stl",
         stl_dir / f"organoid-{i}.stl",
         stl_dir / f"organoid_{i}.stl",
     ]
-    for cand in stl_candidates:
-        if cand.exists():
-            tissue_stl = cand
-            break
+    tissue_stl = _pick_existing_or_none(*stl_candidates)
+
+    if tissue_vtu is None and tissue_stl is None:
+        missing_vtu = [
+            src_org_dir / "tissue_domain_volume_refined.vtu",
+            src_org_dir / "tissue_domain_volume.vtu",
+        ]
+        raise FileNotFoundError(
+            f"[organoid_{i}] Missing tissue geometry. Looked for VTU files:\n"
+            + "\n".join(f"  {p}" for p in missing_vtu)
+            + "\nLooked for STL files:\n"
+            + "\n".join(f"  {p}" for p in stl_candidates)
+        )
+
+    if tissue_vtu is not None:
+        print(f"[organoid_{i}] Using tissue VTU: {tissue_vtu}", flush=True)
+    else:
+        print(f"[organoid_{i}] No VTU found, meshing directly from STL: {tissue_stl}", flush=True)
 
     # Use per-organoid branching seeds so Darcy concave-wall BC sampling
     # stays aligned with each organoid's translated 1D data.
@@ -304,7 +347,7 @@ def run_one(
             in_vtp_dirs, out_vtp_dirs, branching_in_files, branching_out_files = _build_trial_well_inputs(trial_dir, n_wells)
             mesh.current_dir = tmp_mesh_dir
             mesh.Files(
-                tissue_vtu=str(tissue_vtu),
+                tissue_vtu=str(tissue_vtu) if tissue_vtu is not None else None,
                 tissue_stl=str(tissue_stl) if tissue_stl is not None else None,
                 output_1d_inlet=str(out_inlet),
                 output_1d_outlet=str(out_outlet),
@@ -314,6 +357,8 @@ def run_one(
                 output_1d_outlet_list=out_vtp_dirs,
                 branching_data_inlet_list=branching_in_files,
                 branching_data_outlet_list=branching_out_files,
+                theta_concave_inlet_deg=60,
+                theta_concave_outlet_deg=38.5,
                 geo_file_inlet=str(tmp_mesh_dir / "branched_network_inlet.geo"),
                 msh_file_inlet=str(tmp_mesh_dir / "branched_network_inlet.msh"),
                 xdmf_file_inlet=str(tmp_mesh_dir / "branched_network_inlet.xdmf"),
@@ -349,7 +394,7 @@ def run_one(
         print(f"[organoid_{i}] Starting mesh.Files(...)...", flush=True)
         mesh.current_dir = geom_dir
         mesh.Files(
-            tissue_vtu=str(tissue_vtu),
+            tissue_vtu=str(tissue_vtu) if tissue_vtu is not None else None,
             tissue_stl=str(tissue_stl) if tissue_stl is not None else None,
             output_1d_inlet=str(out_inlet),
             output_1d_outlet=str(out_outlet),
@@ -394,6 +439,7 @@ def run_one(
     solver_script = DARCY_DIR / f"{darcy_solver}.py"
     if not solver_script.exists():
         raise FileNotFoundError(f"Requested Darcy solver script not found: {solver_script}")
+    perm_region_path = _resolve_perm_region_for_organoid(perm_region_root, i) if perm_region_root else ""
     if darcy_mpi_procs > 1:
         mpi_launcher = _resolve_mpi_launcher(darcy_mpirun_cmd)
         cmd = [
@@ -422,6 +468,13 @@ def run_one(
             "--inlet-flux-corr-tol", str(inlet_flux_corr_tol),
             "--out-dir", str(org_dir),
         ]
+        if darcy_solver == "darcy_p1_lm_interior" and perm_region_path:
+            cmd.extend([
+                "--perm-region-path", perm_region_path,
+                "--perm-low", str(perm_low),
+                "--perm-high", str(perm_high),
+                "--perm-transition-width", str(perm_transition_width),
+            ])
         try:
             _run_cmd(cmd)
         except subprocess.CalledProcessError as e:
@@ -468,6 +521,16 @@ def run_one(
             inlet_flux_corr_tol=inlet_flux_corr_tol,
             branching_in_file=branching_in,
             branching_out_file=branching_out,
+            **(
+                {
+                    "perm_region_path": perm_region_path,
+                    "perm_low": perm_low,
+                    "perm_high": perm_high,
+                    "perm_transition_width": perm_transition_width,
+                }
+                if darcy_solver == "darcy_p1_lm_interior" and perm_region_path
+                else {}
+            ),
         )
         solver.setup()
     print(f"[organoid_{i}] Darcy done in {perf_counter() - t_darcy:.1f}s", flush=True)
@@ -478,11 +541,11 @@ def run_one(
 def parse_args():
     ap = argparse.ArgumentParser(description="Run mesh.py geometry + darcy_P1_v2.py for organoids without copying scripts.")
     ap.add_argument("--stl-dir", default="../../files", help="Directory containing organoid-1.stl, organoid-2.stl, ...")
-    ap.add_argument("--trial-dir", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/prep/prepped/trial-3/", help="Directory containing organoid_1/branchingData_0.csv etc (e.g. .../input/trial-2)")
+    ap.add_argument("--trial-dir", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/prep/prepped/trial-8/", help="Directory containing organoid_1/branchingData_0.csv etc (e.g. .../input/trial-2)")
     ap.add_argument("--coupled-root", default="coupled/run_0", help="Output root directory (default: coupled/run_0)")
     ap.add_argument("--n", type=int, default=4, help="Number of organoids (default: 4)")
     ap.add_argument("--same-geometry-for-all-wells", action="store_true",
-                    help="Use one shared tissue_domain_volume*.vtu for all organoids.")
+                    help="Use one shared tissue geometry for all organoids, falling back to STL if no VTU exists.")
     ap.add_argument("--same-meshtags-as-first", dest="same_meshtags_as_first", action="store_true", default=True,
                     help="Reuse well1 facet tags for all wells (default).")
     ap.add_argument("--retag-meshtags-per-well", dest="same_meshtags_as_first", action="store_false",
@@ -513,9 +576,17 @@ def parse_args():
                     help="MPI launcher command for Darcy when --darcy-mpi-procs > 1.")
     ap.add_argument("--darcy-solver", choices=["darcy", "darcy_mixed", "darcy_p1_lm", "darcy_p1_lm_interior"], default="darcy_p1_lm_interior",
                     help="Darcy solver module/script to run.")
+    ap.add_argument("--perm-region-root", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere",
+                    help="Directory, STL path, or pattern for organoid permeability regions. If a directory is given, organoid-k uses organoid-k.stl. You can also use a path containing 'X' as the organoid index placeholder.")
+    ap.add_argument("--perm-low", type=float, default=1.0e-9,
+                    help="Background Darcy permeability outside the organoid STL region.")
+    ap.add_argument("--perm-high", type=float, default=1.0e-7,
+                    help="Darcy permeability inside the organoid STL region.")
+    ap.add_argument("--perm-transition-width", type=float, default=0.01,
+                    help="Half-width of the smooth transition shell around the organoid STL boundary.")
     ap.add_argument("--dy-step", type=float, default=0.6, help="Y shift per organoid index (default: 0.6)")
-    ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.18, 0.9, 0.55], help="Base inlet coords (x y z) for organoid 1")
-    ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.18, 0.9, 0.55], help="Base outlet coords (x y z) for organoid 1")
+    ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-.28, 0.9, .5375], help="Base inlet coords (x y z) for organoid 1")
+    ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375], help="Base outlet coords (x y z) for organoid 1")
     return ap.parse_args()
 
 
@@ -525,12 +596,12 @@ def main():
     trial_dir = Path(args.trial_dir).expanduser().resolve()
     coupled_root = Path(args.coupled_root).expanduser().resolve()
     coupled_root.mkdir(parents=True, exist_ok=True)
-    tmp_mesh_dir = coupled_root / "_tmp_mesh"
 
     coords_inlet_base = np.array(args.coords_inlet, dtype=float)
     coords_outlet_base = np.array(args.coords_outlet, dtype=float)
     shared_tissue_vtu: Path | None = None
     reuse_mesh_from_first = bool(args.reuse_mesh_from_first or args.same_geometry_for_all_wells)
+    tmp_mesh_dir = coupled_root / "_tmp_mesh" if reuse_mesh_from_first else None
     # If we reuse mesh from organoid_1, mesh.py should emit well1..wellN files.
     use_mesh_multiwell_translation = bool(reuse_mesh_from_first)
     inferred_well_spacing_y = _infer_well_spacing_y_from_trial(
@@ -543,7 +614,7 @@ def main():
             if not shared_tissue_vtu.exists():
                 raise FileNotFoundError(f"Missing shared VTU: {shared_tissue_vtu}")
         else:
-            shared_tissue_vtu = _pick_existing(
+            shared_tissue_vtu = _pick_existing_or_none(
                 trial_dir / "organoid_1" / "tissue_domain_volume_refined.vtu",
                 trial_dir / "organoid_1" / "tissue_domain_volume.vtu",
             )
@@ -574,6 +645,10 @@ def main():
             darcy_mpi_procs=args.darcy_mpi_procs,
             darcy_mpirun_cmd=args.darcy_mpirun_cmd,
             darcy_solver=args.darcy_solver,
+            perm_region_root=args.perm_region_root,
+            perm_low=args.perm_low,
+            perm_high=args.perm_high,
+            perm_transition_width=args.perm_transition_width,
         )
 
 
