@@ -35,14 +35,29 @@ class Generate:
         self.parameters['buffer']       = kwargs.get('buffer',5)
         self.parameters['inlet_normal'] = kwargs.get('inlet_normal',np.array([0.5,0,0]))#.reshape(-1,1))
         self.parameters['outlet_normal'] = kwargs.get('outlet_normal',np.array([-0.5,0,0]))
-        self.parameters['inlet'] = kwargs.get('inlet',np.array([-.18, 0.9, .55])) #old - [2.6,3.05,3.4], [.3,.305,.34]
-        self.parameters['outlet'] = kwargs.get('outlet',np.array([.18, 0.9, .55]))
+        self.parameters['inlet'] = kwargs.get('inlet',np.array([-.28, 0.9, .5375])) #old - [2.6,3.05,3.4], [.3,.305,.34]
+        self.parameters['outlet'] = kwargs.get('outlet',np.array([.30, 0.9, .5375]))
         self.parameters['num_branches'] = kwargs.get('num_branches',10)
         self.parameters['path_to_0d_solver'] = kwargs.get('path_to_0d_solver',r'/usr/local/sv/svZeroDSolver/2024-10-01/bin')
         self.parameters['path_to_1d_solver'] = kwargs.get('path_to_1d_solver',r'/usr/local/sv/oneDSolver/2025-06-26/bin/OneDSolver')
         self.parameters['outdir'] = kwargs.get('outdir',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation")
         self.parameters['folder'] = kwargs.get('folder','tmp')
-        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/original/organoid-1.stl")
+        self.parameters['implicit_geometry'] = kwargs.get('implicit_geometry', 'stl')
+        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere/organoid-1.stl")
+        self.parameters['sphere_center'] = np.asarray(kwargs.get('sphere_center', [0.0, 0.9, 0.55]), dtype=float)
+        self.parameters['sphere_radius'] = float(kwargs.get('sphere_radius', 0.06))
+        self.parameters['sphere_theta_resolution'] = int(kwargs.get('sphere_theta_resolution', 60))
+        self.parameters['sphere_phi_resolution'] = int(kwargs.get('sphere_phi_resolution', 60))
+        self.parameters['append_cylinders'] = bool(kwargs.get('append_cylinders', True))
+        self.parameters['left_cylinder_center'] = np.asarray(kwargs.get('left_cylinder_center', [-0.25, 0.9, 0.5375]), dtype=float)
+        self.parameters['left_cylinder_direction'] = np.asarray(kwargs.get('left_cylinder_direction', [1.0, 0.0, 0.0]), dtype=float)
+        self.parameters['left_cylinder_radius'] = float(kwargs.get('left_cylinder_radius', 0.03))
+        self.parameters['left_cylinder_height'] = float(kwargs.get('left_cylinder_height', 0.11))
+        self.parameters['right_cylinder_center'] = np.asarray(kwargs.get('right_cylinder_center', [0.28, 0.9, 0.5375]), dtype=float)
+        self.parameters['right_cylinder_direction'] = np.asarray(kwargs.get('right_cylinder_direction', [-1.0, 0.0, 0.0]), dtype=float)
+        self.parameters['right_cylinder_radius'] = float(kwargs.get('right_cylinder_radius', 0.03))
+        self.parameters['right_cylinder_height'] = float(kwargs.get('right_cylinder_height', 0.11))
+        self.parameters['cylinder_resolution'] = int(kwargs.get('cylinder_resolution', 60))
         # 3D mesh controls (used by svVascularize Simulation.build_meshes)
         self.parameters['mesh_hmax'] = kwargs.get('mesh_hmax', 0.001)
         self.parameters['mesh_hausd'] = kwargs.get('mesh_hausd', 1e-4)
@@ -57,8 +72,64 @@ class Generate:
         self.homogeneous = kwargs.get('homogeneous',True)
         self.convex      = kwargs.get('convex',False)
 
+    def _build_cylinder(self, side: str):
+        base_point = np.asarray(self.parameters[f'{side}_cylinder_center'], dtype=float).reshape(3,)
+        direction = np.asarray(self.parameters[f'{side}_cylinder_direction'], dtype=float).reshape(3,)
+        radius = float(self.parameters[f'{side}_cylinder_radius'])
+        height = float(self.parameters[f'{side}_cylinder_height'])
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0.0:
+            raise ValueError(f"{side}_cylinder_direction must be nonzero")
+        if radius <= 0.0:
+            raise ValueError(f"{side}_cylinder_radius must be positive, got {radius}")
+        if height <= 0.0:
+            raise ValueError(f"{side}_cylinder_height must be positive, got {height}")
+        unit_direction = direction / norm
+        # Treat the user-provided point as the cylinder base, not the midpoint.
+        center = base_point + 0.5 * height * unit_direction
+        return pv.Cylinder(
+            center=tuple(center),
+            direction=tuple(unit_direction),
+            radius=radius,
+            height=height,
+            resolution=max(8, int(self.parameters['cylinder_resolution'])),
+        ).triangulate().clean()
+
+    def _boolean_union_all(self, base_mesh, appendages):
+        merged = base_mesh.triangulate().clean()
+        for part in appendages:
+            merged = merged.boolean_union(part.triangulate().clean())
+            merged = merged.extract_surface().triangulate().clean()
+        return merged
+
     def implicit(self, plotVolume=False): # compute implicit domain
-        mesh = pv.read(self.parameters['geom'])
+        geom_kind = str(self.parameters.get('implicit_geometry', 'stl')).lower()
+        if geom_kind == 'sphere':
+            center = np.asarray(self.parameters['sphere_center'], dtype=float).reshape(3,)
+            radius = float(self.parameters['sphere_radius'])
+            if radius <= 0.0:
+                raise ValueError(f"sphere_radius must be positive, got {radius}")
+            mesh = pv.Sphere(
+                radius=radius,
+                center=tuple(center),
+                theta_resolution=max(8, int(self.parameters['sphere_theta_resolution'])),
+                phi_resolution=max(8, int(self.parameters['sphere_phi_resolution'])),
+            ).triangulate()
+            print(f"Using spherical implicit domain: center={center.tolist()}, radius={radius}")
+            if self.parameters.get('append_cylinders', False):
+                left_cyl = self._build_cylinder('left')
+                right_cyl = self._build_cylinder('right')
+                mesh = self._boolean_union_all(mesh, [left_cyl, right_cyl])
+                print("Appended left and right cylinders to the spherical domain")
+        else:
+            mesh = pv.read(self.parameters['geom'])
+
+        if plotVolume:
+            plotter = pv.Plotter()
+            plotter.add_mesh(mesh, color='lightblue', opacity=0.5)
+            plotter.add_axes()
+            plotter.show_grid()
+            plotter.show()
         cermSurf = Domain()
         cermSurf.set_data(mesh)
         cermSurf.create()
@@ -102,69 +173,73 @@ class Generate:
         num_branches = self.parameters['num_branches']
         outdir = self.parameters['outdir']
         folder = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep
-        cerm_forest = Forest(n_networks=number_of_networks, n_trees_per_network=trees_per_network,physical_clearance=4e-2) 
+        cerm_forest = Forest(n_networks=number_of_networks, n_trees_per_network=trees_per_network,physical_clearance=1e-4,compete=True) 
         cerm_forest.set_domain(cermSurf)
-        params_inlet = TreeParameters(terminal_pressure=0.025*1333.22,
-                        root_pressure=0.05*1333.22,
-                        terminal_flow=2e-7/num_branches)
+        params_inlet = TreeParameters(terminal_pressure=0.01*1333.22,
+                        root_pressure=0.02*1333.22,
+                        terminal_flow=1e-5/60/num_branches,
+                        fluid_density = 1.0,
+                        kinematic_viscosity = 0.007)
         params_outlet = TreeParameters(terminal_pressure=0.0*1333.22,
-                        root_pressure=0.025*1333.22,
-                        terminal_flow=2e-7/num_branches)
+                        root_pressure=0.01*1333.22,
+                        terminal_flow=1e-5/60/num_branches,
+                        fluid_density = 1.0,
+                        kinematic_viscosity = 0.007)
         # for i in range(number_of_networks):
         #     for j in range(trees_per_network[i]):
         #         cerm_forest.networks[i][j].parameters = params
         cerm_forest.networks[0][0].parameters = params_inlet
         cerm_forest.networks[0][1].parameters = params_outlet
         cerm_forest.set_roots(start_points,directions)
-        networks = cerm_forest.add(num_branches, threshold = 1e-1) # threshold controls the length of the appended vessels
-        cerm_forest.show(plot_domain=True)
+        networks = cerm_forest.add(num_branches, threshold = 2.5e-3) # threshold controls the length of the appended vessels
+        # cerm_forest.show(plot_domain=True)
         for i in range(number_of_networks):
             for j in range(trees_per_network[i]): # currently only writes the first network, can be modified to write all networks
                 self.data = networks[0][j].data
                 self.save_data(filename="branchingData_{}.csv".format(j))
-                merged_model = networks[0][j].export_solid(watertight=True) # use watertight = True for 3d models
+                merged_model = networks[0][j].export_solid(watertight=False) # use watertight = True for 3d models
                 os.makedirs(outdir+os.sep+"3d_tmp", exist_ok=True)
                 merged_model.save(outdir+os.sep+"3d_tmp"+os.sep+"geom3D_{}.vtp".format(j))
 
         # cerm_forest.connect() # suppressed for now
         # cerm_forest.connections.tree_connections[0].show().show()
-        sim = Simulation(synthetic_object=cerm_forest,directory=outdir, name="tree_{}".format(j))
-        root_radii = []
-        for tr in networks[0]:
-            try:
-                r = float(tr.data[0, 21])
-            except Exception:
-                r = np.nan
-            if np.isfinite(r) and r > 0:
-                root_radii.append(r)
+        # sim = Simulation(synthetic_object=cerm_forest,directory=outdir, name="tree_{}".format(j))
+        # root_radii = []
+        # for tr in networks[0]:
+        #     try:
+        #         r = float(tr.data[0, 21])
+        #     except Exception:
+        #         r = np.nan
+        #     if np.isfinite(r) and r > 0:
+        #         root_radii.append(r)
 
-        user_hmax = float(self.parameters['mesh_hmax'])
-        if root_radii:
-            # Keep max element size tied to vessel scale to avoid coarse lumens.
-            adaptive_hmax = min(user_hmax, 0.5 * min(root_radii))
-        else:
-            adaptive_hmax = user_hmax
+        # user_hmax = float(self.parameters['mesh_hmax'])
+        # if root_radii:
+        #     # Keep max element size tied to vessel scale to avoid coarse lumens.
+        #     adaptive_hmax = min(user_hmax, 0.5 * min(root_radii))
+        # else:
+        #     adaptive_hmax = user_hmax
 
-        print(
-            "Meshing params: "
-            f"hausd={self.parameters['mesh_hausd']}, "
-            f"hmax={adaptive_hmax:.6g}, "
-            f"hmin_factor={self.parameters['mesh_hmin_factor']}, "
-            f"hgrad={self.parameters['mesh_hgrad']}, "
-            f"minratio={self.parameters['mesh_minratio']}, "
-            f"mindihedral={self.parameters['mesh_mindihedral']}"
-        )
-        sim.build_meshes(
-            fluid=True,
-            tissue=True,
-            hausd=self.parameters['mesh_hausd'],
-            remesh_vol=self.parameters['mesh_remesh_vol'],
-            minratio=self.parameters['mesh_minratio'],
-            mindihedral=self.parameters['mesh_mindihedral'],
-            mesh_hmax=adaptive_hmax,
-            mesh_hmin_factor=self.parameters['mesh_hmin_factor'],
-            mesh_hgrad=self.parameters['mesh_hgrad'],
-        )
+        # print(
+        #     "Meshing params: "
+        #     f"hausd={self.parameters['mesh_hausd']}, "
+        #     f"hmax={adaptive_hmax:.6g}, "
+        #     f"hmin_factor={self.parameters['mesh_hmin_factor']}, "
+        #     f"hgrad={self.parameters['mesh_hgrad']}, "
+        #     f"minratio={self.parameters['mesh_minratio']}, "
+        #     f"mindihedral={self.parameters['mesh_mindihedral']}"
+        # )
+        # sim.build_meshes(
+        #     fluid=True,
+        #     tissue=True,
+        #     hausd=self.parameters['mesh_hausd'],
+        #     remesh_vol=self.parameters['mesh_remesh_vol'],
+        #     minratio=self.parameters['mesh_minratio'],
+        #     mindihedral=self.parameters['mesh_mindihedral'],
+        #     mesh_hmax=adaptive_hmax,
+        #     mesh_hmin_factor=self.parameters['mesh_hmin_factor'],
+        #     mesh_hgrad=self.parameters['mesh_hgrad'],
+        # )
 
 
         # This is not working...
