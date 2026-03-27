@@ -45,6 +45,24 @@ def resolve_mpi_launcher(user_cmd: str) -> str:
     return user_cmd
 
 
+def resolve_perm_region_for_organoid(base: str, organoid_idx: int) -> str:
+    raw = str(base).strip()
+    if not raw:
+        return ""
+
+    if "X" in raw:
+        candidate = Path(raw.replace("X", str(organoid_idx))).expanduser()
+        if candidate.suffix:
+            return str(candidate.resolve())
+        with_suffix = candidate.with_suffix(".stl")
+        return str((with_suffix if with_suffix.exists() else candidate).resolve())
+
+    path = Path(raw).expanduser()
+    if path.is_dir():
+        return str((path / f"organoid-{organoid_idx}.stl").resolve())
+    return str(path.resolve())
+
+
 def copy_tree(src: Path, dst: Path, overwrite: bool = True) -> None:
     if overwrite and dst.exists():
         shutil.rmtree(dst)
@@ -403,6 +421,7 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
         geom = org / "geometry"
         c_in = read_seed_coords_from_branching(org / "branchingData_0.csv", np.array(args.coords_inlet, dtype=float))
         c_out = read_seed_coords_from_branching(org / "branchingData_1.csv", np.array(args.coords_outlet, dtype=float))
+        perm_region_path = resolve_perm_region_for_organoid(args.perm_region_root, k) if args.perm_region_root else ""
 
         darcy_args = [
             "--bioreactor-domain", str(geom / "bioreactor.xdmf"),
@@ -424,6 +443,13 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
             "--lp-venous", str(args.lp_venous),
             "--out-dir", str(org),
         ]
+        if darcy_script.stem == "darcy_p1_lm_interior" and perm_region_path:
+            darcy_args.extend([
+                "--perm-region-path", perm_region_path,
+                "--perm-low", str(args.perm_low),
+                "--perm-high", str(args.perm_high),
+                "--perm-transition-width", str(args.perm_transition_width),
+            ])
         if int(args.darcy_mpi_procs) > 1:
             mpi_launcher = resolve_mpi_launcher(str(args.darcy_mpirun_cmd))
             cmd = [
@@ -465,8 +491,8 @@ def convergence_for_organoid(iface_path: Path, tol_q: float, tol_p: float) -> tu
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Organoid coupling driver with geometry reuse + P1-LM Darcy.")
-    ap.add_argument("--template-combined", default="../prep/prepped/trial-2/combined.in")
-    ap.add_argument("--trial-dir", default="../prep/prepped/trial-3",
+    ap.add_argument("--template-combined", default="../prep/prepped/trial-8/combined.in")
+    ap.add_argument("--trial-dir", default="../prep/prepped/trial-8/",
                     help="Directory containing organoid_k/branchingData_{0,1}.csv")
     ap.add_argument("--seed-run0", default="../prep/coupled/run_0",
                     help="Existing run_0 folder with 3D meshing/tagging to reuse.")
@@ -480,9 +506,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--relaxation", type=float, default=0.3)
 
     ap.add_argument("--channel-inlet-bc", default="INFLOW")
-    ap.add_argument("--channel-inlet-Q0", type=float, default=2.5e-2)
+    ap.add_argument("--channel-inlet-Q0", type=float, default=6e-2)
     ap.add_argument("--channel-outlet-bc", default="OUT3")
-    ap.add_argument("--channel-outlet-P0", type=float, default=100.0)
+    ap.add_argument("--channel-outlet-P0", type=float, default=0.0)
     ap.add_argument("--use-outlet-pressure-ramp", action="store_true",
                     help="Ramp channel outlet pressure from 0 at i=0 to P0 by the end of the ramp.")
 
@@ -495,8 +521,13 @@ def parse_args() -> argparse.Namespace:
                     help="MPI launcher command for Darcy when --darcy-mpi-procs > 1.")
 
     ap.add_argument("--dy-step", type=float, default=0.6)
-    ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.18, 0.9, 0.55])
-    ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.18, 0.9, 0.55])
+    ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-.28, 0.9, .5375])
+    ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375])
+    ap.add_argument("--perm-region-root", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere",
+                    help="Directory, STL path, or pattern for organoid permeability regions. If a directory is given, organoid-k uses organoid-k.stl. You can also use a path containing 'X' as the organoid index placeholder.")
+    ap.add_argument("--perm-low", type=float, default=1.0e-9)
+    ap.add_argument("--perm-high", type=float, default=2.0e-7)
+    ap.add_argument("--perm-transition-width", type=float, default=0.01)
 
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet")
     ap.add_argument("--lp-arterial", type=float, default=0.0)
