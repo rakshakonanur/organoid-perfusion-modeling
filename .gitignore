@@ -36,3 +36,7 @@ src/prep/prepped/
 simvascular/u-bend-updated/
 simvascular/u_bend/
 src/coupling-output-full-geometry/
+ucsf/
+*.avi
+src/synthetic-vasculature-generation/0D_Output/
+src/coupling-output-old/
