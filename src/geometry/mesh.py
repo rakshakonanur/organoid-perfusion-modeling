@@ -199,14 +199,19 @@ def _drop_seed_terminal(
     seed: np.ndarray,
     tol: float = 1e-3,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Remove any terminal exactly/very-near the seed coordinate."""
+    """Remove at most one terminal: the nearest one if it lies within `tol`."""
     c = np.asarray(coords, dtype=float).reshape(-1, 3)
     n = np.asarray(normals, dtype=float).reshape(-1, 3)
     a = np.asarray(areas, dtype=float).reshape(-1)
     if len(c) == 0:
         return c, n, a
     s = np.asarray(seed, dtype=float).reshape(3,)
-    keep = np.linalg.norm(c - s[None, :], axis=1) > float(tol)
+    d = np.linalg.norm(c - s[None, :], axis=1)
+    i = int(np.argmin(d))
+    if float(d[i]) > float(tol):
+        return c, n, a
+    keep = np.ones(len(c), dtype=bool)
+    keep[i] = False
     return c[keep], n[keep], a[keep]
 
 
@@ -802,6 +807,11 @@ def read_3d_mesh_from_stl_with_embedded_terminals(
     mesh.topology.create_entities(fdim)
     mesh.topology.create_connectivity(fdim, 0)
     mesh.topology.create_connectivity(tdim, fdim)
+    _print_terminal_marker_coverage(
+        facet_tags,
+        list(zip(np.asarray(terminal_markers, dtype=int).tolist(), np.asarray(terminal_centers, dtype=float))),
+        context="stl-embedded",
+    )
     return mesh, facet_tags
 
 
@@ -868,12 +878,32 @@ def tag_surface_from_seed(mesh: dfx.mesh.Mesh, x0: np.ndarray, theta_deg: float,
     d2 = np.sum((centers - x0) ** 2, axis=1)
     seed_i = int(np.argmin(d2))
     seed_f = int(all_bdry_facets[seed_i])
+    z_align_tol = 1.0
 
     n0 = normals[seed_i].copy()
     nn = np.linalg.norm(n0)
     if nn == 0:
         raise RuntimeError("Seed facet has zero normal.")
     n0 /= nn
+
+    if abs(float(n0[2])) >= z_align_tol:
+        order = np.argsort(d2)
+        replacement = None
+        for idx in order:
+            cand_n = normals[int(idx)].copy()
+            cand_nn = np.linalg.norm(cand_n)
+            if cand_nn == 0:
+                continue
+            cand_n /= cand_nn
+            if abs(float(cand_n[2])) < z_align_tol:
+                replacement = int(idx)
+                break
+        if replacement is None:
+            raise RuntimeError("Could not find a non-z-aligned seed facet for concave tagging.")
+        seed_i = replacement
+        seed_f = int(all_bdry_facets[seed_i])
+        n0 = normals[seed_i].copy()
+        n0 /= np.linalg.norm(n0)
 
     cos_thr = float(np.cos(np.deg2rad(theta_deg)))
 
@@ -887,6 +917,12 @@ def tag_surface_from_seed(mesh: dfx.mesh.Mesh, x0: np.ndarray, theta_deg: float,
         visited.add(f)
         i = facet_to_idx[f]
         nf = normals[i]
+        nf_norm = np.linalg.norm(nf)
+        if nf_norm == 0:
+            continue
+        nf = nf / nf_norm
+        if abs(float(nf[2])) >= z_align_tol:
+            continue
         if abs(np.dot(nf, n0)) >= cos_thr:
             selected.add(f)
             for nb in adj[f]:
@@ -907,6 +943,8 @@ def tag_terminal_plane_patch(
     marker: int,
     theta_deg: float = 15.0,
     plane_tol: Optional[float] = None,
+    excluded_facets: Optional[Iterable[int]] = None,
+    normal_hint: Optional[np.ndarray] = None,
 ) -> dfx.mesh.MeshTags:
     """
     Tag a connected terminal face near x0, constrained to a single plane:
@@ -918,25 +956,60 @@ def tag_terminal_plane_patch(
     fdim = tdim - 1
 
     all_bdry_facets, centers, normals, adj, facet_to_idx = _boundary_facets_and_geometry(mesh)
+    excluded = {int(f) for f in excluded_facets} if excluded_facets is not None else set()
 
     x0 = np.asarray(x0, float)
     d2 = np.sum((centers - x0) ** 2, axis=1)
-    seed_i = int(np.argmin(d2))
-    seed_f = int(all_bdry_facets[seed_i])
+    normal_hint_arr = None
+    if normal_hint is not None:
+        nh = np.asarray(normal_hint, dtype=float).reshape(-1)
+        if nh.size == 3:
+            nrm = np.linalg.norm(nh)
+            if nrm > 0:
+                normal_hint_arr = nh / nrm
 
-    n0 = normals[seed_i].copy()
-    nn = np.linalg.norm(n0)
-    if nn == 0:
-        raise RuntimeError("Terminal seed facet has zero normal.")
-    n0 /= nn
-    x_seed = centers[seed_i].copy()
-
-    # default plane tolerance: 2% of local bbox diagonal
     if plane_tol is None:
         bbox = mesh.geometry.x.max(axis=0) - mesh.geometry.x.min(axis=0)
         plane_tol = 0.002 * float(np.linalg.norm(bbox))
 
     cos_thr = float(np.cos(np.deg2rad(theta_deg)))
+
+    if normal_hint_arr is not None:
+        align = np.abs(normals @ normal_hint_arr)
+        cand = np.where(align >= cos_thr)[0]
+        if cand.size > 0:
+            plane_band = np.abs((centers[cand] - x0[None, :]) @ normal_hint_arr) <= float(max(plane_tol, 1e-12))
+            if np.any(plane_band):
+                cand = cand[plane_band]
+        if cand.size > 0:
+            order = cand[np.argsort(d2[cand])]
+        else:
+            order = np.argsort(d2)
+    else:
+        order = np.argsort(d2)
+
+    seed_i = None
+    seed_f = None
+    for idx in order:
+        cand_f = int(all_bdry_facets[int(idx)])
+        if cand_f in excluded:
+            continue
+        seed_i = int(idx)
+        seed_f = cand_f
+        break
+    if seed_i is None or seed_f is None:
+        raise RuntimeError(f"No available terminal seed facet for x0={x0}.")
+
+    if normal_hint_arr is not None:
+        n0 = normal_hint_arr
+        x_seed = x0.copy()
+    else:
+        n0 = normals[seed_i].copy()
+        nn = np.linalg.norm(n0)
+        if nn == 0:
+            raise RuntimeError("Terminal seed facet has zero normal.")
+        n0 /= nn
+        x_seed = centers[seed_i].copy()
 
     selected = set()
     visited = set()
@@ -946,6 +1019,8 @@ def tag_terminal_plane_patch(
         if f in visited:
             continue
         visited.add(f)
+        if f in excluded:
+            continue
         i = facet_to_idx[f]
         nf = normals[i]
         if abs(np.dot(nf, n0)) < cos_thr:
@@ -959,7 +1034,9 @@ def tag_terminal_plane_patch(
                 stack.append(nb)
 
     if not selected:
-        raise RuntimeError(f"Terminal patch empty for x0={x0}. Try increasing plane_tol/theta_deg.")
+        raise RuntimeError(
+            f"Terminal patch empty for x0={x0}. Try increasing plane_tol/theta_deg or reduce overlap with neighboring terminals."
+        )
 
     idx = np.array(sorted(selected), dtype=np.int32)
     vals = np.full_like(idx, marker, dtype=np.int32)
@@ -1120,34 +1197,47 @@ def _trim_disk_to_volume(
     lies outside the tissue volume by sampling interior points in the disk plane.
     This works even when the disk center is outside the tissue volume.
     """
-    c = np.asarray(center, dtype=float).reshape(3,)
+    c0 = np.asarray(center, dtype=float).reshape(3,)
     n = _normalize(normal)
     r = float(radius)
     u, v = _disk_basis_from_normal(n)
-
-    pts3: List[np.ndarray] = []
-    pts2: List[np.ndarray] = []
-    nang = int(max(16, n_angles))
-    nr = 12
+    nang = int(max(32, n_angles))
+    nr = 18
     r_levels = np.linspace(0.0, r, nr + 1)
-    for rho in r_levels:
-        for j in range(nang):
-            th = 2.0 * np.pi * (j / float(nang))
-            d = np.cos(th) * u + np.sin(th) * v
-            p = c + rho * d
-            if inside_fn(p):
-                pts3.append(p)
-                pts2.append(np.array([rho * np.cos(th), rho * np.sin(th)], dtype=float))
 
-    if len(pts3) < 3:
+    def _sample_disk(center_shifted: np.ndarray):
+        pts3: List[np.ndarray] = []
+        pts2: List[np.ndarray] = []
+        for rho in r_levels:
+            for j in range(nang):
+                th = 2.0 * np.pi * (j / float(nang))
+                d = np.cos(th) * u + np.sin(th) * v
+                p = center_shifted + rho * d
+                if inside_fn(p):
+                    pts3.append(p)
+                    pts2.append(np.array([rho * np.cos(th), rho * np.sin(th)], dtype=float))
+        return pts3, pts2
+
+    # Near the outer wall, some terminal centers sit just outside the tissue.
+    # Retry a few small offsets along +/- normal and keep the richest in-volume cut.
+    offsets = [0.0, 0.15 * r, -0.15 * r, 0.30 * r, -0.30 * r, 0.50 * r, -0.50 * r]
+    best_center = c0
+    best_pts2: List[np.ndarray] = []
+    for s in offsets:
+        c = c0 + float(s) * n
+        _pts3, _pts2 = _sample_disk(c)
+        if len(_pts2) > len(best_pts2):
+            best_center = c
+            best_pts2 = _pts2
+
+    if len(best_pts2) < 3:
         return np.zeros((0, 3), dtype=float)
 
-    xy = np.asarray(pts2, dtype=float)
+    xy = np.asarray(best_pts2, dtype=float)
     try:
         hull = ConvexHull(xy)
         hull_xy = xy[hull.vertices]
     except Exception:
-        # Fallback ordering by polar angle around sampled cloud center.
         ctr = xy.mean(axis=0)
         ang = np.arctan2(xy[:, 1] - ctr[1], xy[:, 0] - ctr[0])
         order = np.argsort(ang)
@@ -1155,7 +1245,7 @@ def _trim_disk_to_volume(
 
     poly = np.zeros((len(hull_xy), 3), dtype=float)
     for i, (x, y) in enumerate(hull_xy):
-        poly[i] = c + x * u + y * v
+        poly[i] = best_center + x * u + y * v
     return poly
 
 
@@ -1228,11 +1318,12 @@ def stl_to_mesh_gmsh_with_embedded_disks(
                 n_angles=disk_npts,
             )
             if len(poly_pts) < 3:
-                logger.warning(
-                    "Skipping terminal disk %d (marker=%d): no sufficient in-volume intersection at center=%s",
-                    int(k),
-                    int(marker),
-                    np.asarray(c, dtype=float),
+                print(
+                    "[3d-tags] skipping embedded disk "
+                    f"k={int(k)} marker={int(marker)} center="
+                    f"{np.array2string(np.asarray(c, dtype=float), precision=6, separator=', ')} "
+                    "reason=no sufficient in-volume intersection",
+                    flush=True,
                 )
                 continue
             h_local = float(max(0.1 * float(char_len_min), min(float(char_len_max), 0.33 * r)))
@@ -1380,19 +1471,49 @@ def remove_seed_points(terminal_pts, seed_pt, tol=1e-8):
     filtered = np.delete(terminal_pts, idx, axis=0)
     return filtered, idx, removed
 
+
+def _print_terminal_marker_coverage(
+    facet_tags: dfx.mesh.MeshTags,
+    marker_points: Sequence[Tuple[int, np.ndarray]],
+    *,
+    context: str,
+) -> None:
+    values = np.asarray(facet_tags.values, dtype=np.int32)
+    present = 0
+    missing: List[Tuple[int, np.ndarray]] = []
+
+    for marker, point in marker_points:
+        count = int(np.count_nonzero(values == int(marker)))
+        if count > 0:
+            present += 1
+        else:
+            missing.append((int(marker), np.asarray(point, dtype=float).reshape(3,)))
+
+    print(f"[3d-tags] {context}: present={present}/{len(marker_points)} terminal markers", flush=True)
+    for marker, point in missing:
+        print(
+            f"[3d-tags] {context} missing marker={marker} at point="
+            f"{np.array2string(point, precision=6, separator=', ')}",
+            flush=True,
+        )
+
 def build_facet_tags_for_mesh(
     mesh: dfx.mesh.Mesh,
     inlet_terminal_pts: np.ndarray,
     outlet_terminal_pts: np.ndarray,
+    inlet_terminal_normals: Optional[np.ndarray],
+    outlet_terminal_normals: Optional[np.ndarray],
     coords_inlet: np.ndarray,
     coords_outlet: np.ndarray,
     *,
     wall_marker: int = 1,
     arterial_concave_marker: int = 31,
     venous_concave_marker: int = 32,
-    inlet_base_marker: int = 100,
-    outlet_base_marker: int = 200,
+    inlet_base_marker: int = 1000,
+    outlet_base_marker: int = 2000,
     theta_concave_deg: float = 60.0,
+    theta_concave_inlet_deg: Optional[float] = None,
+    theta_concave_outlet_deg: Optional[float] = None,
     theta_terminal_deg: float = 30.0,
     plane_tol: Optional[float] = None,
     outer_tol: Optional[float] = None,
@@ -1413,10 +1534,18 @@ def build_facet_tags_for_mesh(
     facet_to_marker.update(tag_outer_wall_facets(mesh, marker=wall_marker, outer_tol=outer_tol))
 
     # 2) concave patches (overwrite wall)
-    shifted_inlet = coords_inlet[:] + np.array([0, 0.1, 0.0])  # shift slightly to ensure seed is inside
-    shifted_outlet = coords_outlet[:] + np.array([0, 0.1, 0.0])
-    conc_art = tag_surface_from_seed(mesh, shifted_inlet, theta_deg=theta_concave_deg, marker=arterial_concave_marker)
-    conc_ven = tag_surface_from_seed(mesh, shifted_outlet, theta_deg=theta_concave_deg, marker=venous_concave_marker)
+    shifted_inlet = coords_inlet[:] + np.array([0, 0.0, 0.1])  # shift slightly to ensure seed is inside
+    shifted_outlet = coords_outlet[:] + np.array([0, 0.0, 0.1])
+    if theta_concave_inlet_deg is None:
+        theta_concave_inlet_deg = theta_concave_deg
+    if theta_concave_outlet_deg is None:
+        theta_concave_outlet_deg = theta_concave_deg
+    conc_art = tag_surface_from_seed(
+        mesh, shifted_inlet, theta_deg=theta_concave_inlet_deg, marker=arterial_concave_marker
+    )
+    conc_ven = tag_surface_from_seed(
+        mesh, shifted_outlet, theta_deg=theta_concave_outlet_deg, marker=venous_concave_marker
+    )
     for f, v in zip(conc_art.indices, conc_art.values):
         facet_to_marker[int(f)] = int(v)
     for f, v in zip(conc_ven.indices, conc_ven.values):
@@ -1424,23 +1553,54 @@ def build_facet_tags_for_mesh(
 
     # 3) terminal faces (overwrite everything)
     # Keep all inlet/outlet terminal points; do not drop seed-corresponding terminals.
+    used_terminal_facets: set[int] = set()
     # inlet terminals
     for k, pt in enumerate(np.asarray(inlet_terminal_pts, float)):
         tag = inlet_base_marker + k
-        tpatch = tag_terminal_plane_patch(mesh, pt, marker=tag, theta_deg=theta_terminal_deg, plane_tol=plane_tol)
+        normal_hint = None
+        if inlet_terminal_normals is not None and k < len(inlet_terminal_normals):
+            normal_hint = np.asarray(inlet_terminal_normals[k], dtype=float)
+        tpatch = tag_terminal_plane_patch(
+            mesh,
+            pt,
+            marker=tag,
+            theta_deg=theta_terminal_deg,
+            plane_tol=plane_tol,
+            excluded_facets=used_terminal_facets,
+            normal_hint=normal_hint,
+        )
         for f, v in zip(tpatch.indices, tpatch.values):
             facet_to_marker[int(f)] = int(v)
+            used_terminal_facets.add(int(f))
 
     # outlet terminals
     for k, pt in enumerate(np.asarray(outlet_terminal_pts, float)):
         tag = outlet_base_marker + k
-        tpatch = tag_terminal_plane_patch(mesh, pt, marker=tag, theta_deg=theta_terminal_deg, plane_tol=plane_tol)
+        normal_hint = None
+        if outlet_terminal_normals is not None and k < len(outlet_terminal_normals):
+            normal_hint = np.asarray(outlet_terminal_normals[k], dtype=float)
+        tpatch = tag_terminal_plane_patch(
+            mesh,
+            pt,
+            marker=tag,
+            theta_deg=theta_terminal_deg,
+            plane_tol=plane_tol,
+            excluded_facets=used_terminal_facets,
+            normal_hint=normal_hint,
+        )
         for f, v in zip(tpatch.indices, tpatch.values):
             facet_to_marker[int(f)] = int(v)
+            used_terminal_facets.add(int(f))
 
     facet_indices = np.array(sorted(facet_to_marker.keys()), dtype=np.int32)
     facet_values = np.array([facet_to_marker[i] for i in facet_indices], dtype=np.int32)
     facet_tags = dmesh.meshtags(mesh, fdim, facet_indices, facet_values)
+    marker_points: List[Tuple[int, np.ndarray]] = []
+    for k, pt in enumerate(np.asarray(inlet_terminal_pts, float)):
+        marker_points.append((int(inlet_base_marker + k), np.asarray(pt, dtype=float)))
+    for k, pt in enumerate(np.asarray(outlet_terminal_pts, float)):
+        marker_points.append((int(outlet_base_marker + k), np.asarray(pt, dtype=float)))
+    _print_terminal_marker_coverage(facet_tags, marker_points, context="vtu-boundary")
     return facet_tags
 
 
@@ -1453,6 +1613,8 @@ def overlay_concave_markers(
     arterial_concave_marker: int,
     venous_concave_marker: int,
     theta_concave_deg: float,
+    theta_concave_inlet_deg: Optional[float] = None,
+    theta_concave_outlet_deg: Optional[float] = None,
     terminal_base_marker: int,
 ) -> dfx.mesh.MeshTags:
     """
@@ -1467,8 +1629,16 @@ def overlay_concave_markers(
 
     shifted_inlet = np.asarray(coords_inlet, dtype=float) + np.array([0.0, 0.1, 0.0], dtype=float)
     shifted_outlet = np.asarray(coords_outlet, dtype=float) + np.array([0.0, 0.1, 0.0], dtype=float)
-    conc_art = tag_surface_from_seed(mesh, shifted_inlet, theta_deg=theta_concave_deg, marker=arterial_concave_marker)
-    conc_ven = tag_surface_from_seed(mesh, shifted_outlet, theta_deg=theta_concave_deg, marker=venous_concave_marker)
+    if theta_concave_inlet_deg is None:
+        theta_concave_inlet_deg = theta_concave_deg
+    if theta_concave_outlet_deg is None:
+        theta_concave_outlet_deg = theta_concave_deg
+    conc_art = tag_surface_from_seed(
+        mesh, shifted_inlet, theta_deg=theta_concave_inlet_deg, marker=arterial_concave_marker
+    )
+    conc_ven = tag_surface_from_seed(
+        mesh, shifted_outlet, theta_deg=theta_concave_outlet_deg, marker=venous_concave_marker
+    )
 
     for f, v in zip(conc_art.indices, conc_art.values):
         old = facet_to_marker.get(int(f), 0)
@@ -1533,7 +1703,7 @@ class Files:
         tissue_vtu_list: Optional[Sequence[str]] = None,
         ftet_max_threads: Optional[int] = None,
         gmsh_char_len_min: float = 0.0005,
-        gmsh_char_len_max: float = 0.01,
+        gmsh_char_len_max: float = 0.008,
         gmsh_disk_npts: int = 24,
         embedded_disk_radius_scale: float = 1.0,
         terminal_refine_radius_factor: float = 2.5,
@@ -1546,9 +1716,11 @@ class Files:
         wall_marker: int = 1,
         arterial_concave_marker: int = 31,
         venous_concave_marker: int = 32,
-        inlet_base_marker: int = 100,
-        outlet_base_marker: int = 200,
-        theta_concave_deg: float = 70.0,
+        inlet_base_marker: int = 1000,
+        outlet_base_marker: int = 2000,
+        theta_concave_deg: float = 60.0,
+        theta_concave_inlet_deg: Optional[float] = None,
+        theta_concave_outlet_deg: Optional[float] = None,
         theta_terminal_deg: float = 2.5,
         plane_tol: Optional[float] = None,
         outer_tol: Optional[float] = None,
@@ -1670,30 +1842,27 @@ class Files:
             out_meta_coords, out_meta_normals, out_meta_areas = terminal_interface_metadata_from_branching(
                 branching_out_list[i - 1]
             )
-            in_meta_coords, in_meta_normals, in_meta_areas = _drop_seed_terminal(
-                in_meta_coords, in_meta_normals, in_meta_areas, c_in
-            )
-            out_meta_coords, out_meta_normals, out_meta_areas = _drop_seed_terminal(
-                out_meta_coords, out_meta_normals, out_meta_areas, c_out
-            )
-            in_meta_coords, in_meta_normals, in_meta_areas = _drop_seed_terminal(
-                in_meta_coords, in_meta_normals, in_meta_areas, self.coords_inlet
-            )
-            out_meta_coords, out_meta_normals, out_meta_areas = _drop_seed_terminal(
-                out_meta_coords, out_meta_normals, out_meta_areas, self.coords_outlet
-            )
-            in_meta_coords, in_meta_normals, in_meta_areas = _drop_nearest_seed_terminal(
-                in_meta_coords, in_meta_normals, in_meta_areas, c_in
-            )
-            out_meta_coords, out_meta_normals, out_meta_areas = _drop_nearest_seed_terminal(
-                out_meta_coords, out_meta_normals, out_meta_areas, c_out
-            )
-            in_meta_coords, in_meta_normals, in_meta_areas = _drop_nearest_seed_terminal(
-                in_meta_coords, in_meta_normals, in_meta_areas, self.coords_inlet
-            )
-            out_meta_coords, out_meta_normals, out_meta_areas = _drop_nearest_seed_terminal(
-                out_meta_coords, out_meta_normals, out_meta_areas, self.coords_outlet
-            )
+            # Keep all terminal metadata points. Do not drop points near the
+            # inlet/outlet seeds; the terminal tagging stage now expects the
+            # full metadata list to be preserved.
+            # in_meta_coords, in_meta_normals, in_meta_areas = _drop_seed_terminal(
+            #     in_meta_coords, in_meta_normals, in_meta_areas, self.coords_inlet
+            # )
+            # out_meta_coords, out_meta_normals, out_meta_areas = _drop_seed_terminal(
+            #     out_meta_coords, out_meta_normals, out_meta_areas, self.coords_outlet
+            # )
+            # in_meta_coords, in_meta_normals, in_meta_areas = _drop_nearest_seed_terminal(
+            #     in_meta_coords, in_meta_normals, in_meta_areas, c_in
+            # )
+            # out_meta_coords, out_meta_normals, out_meta_areas = _drop_nearest_seed_terminal(
+            #     out_meta_coords, out_meta_normals, out_meta_areas, c_out
+            # )
+            # in_meta_coords, in_meta_normals, in_meta_areas = _drop_nearest_seed_terminal(
+            #     in_meta_coords, in_meta_normals, in_meta_areas, self.coords_inlet
+            # )
+            # out_meta_coords, out_meta_normals, out_meta_areas = _drop_nearest_seed_terminal(
+            #     out_meta_coords, out_meta_normals, out_meta_areas, self.coords_outlet
+            # )
 
             inlet_terminal_pts = import_branched_mesh(
                 branching_data_file=branching_in_list[i - 1],
@@ -1726,18 +1895,6 @@ class Files:
             else:
                 n_fallback_in = np.tile(_normalize(c_in - c_out), (len(inlet_terminal_pts), 1))
                 a_fallback_in = np.full((len(inlet_terminal_pts),), 1e-6, dtype=float)
-                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_seed_terminal(
-                    inlet_terminal_pts, n_fallback_in, a_fallback_in, c_in
-                )
-                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_seed_terminal(
-                    inlet_terminal_pts, n_fallback_in, a_fallback_in, self.coords_inlet
-                )
-                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_nearest_seed_terminal(
-                    inlet_terminal_pts, n_fallback_in, a_fallback_in, c_in
-                )
-                inlet_terminal_pts, n_fallback_in, a_fallback_in = _drop_nearest_seed_terminal(
-                    inlet_terminal_pts, n_fallback_in, a_fallback_in, self.coords_inlet
-                )
                 inlet_terminal_pts_by_well.append(inlet_terminal_pts)
                 inlet_terminal_normals_by_well.append(n_fallback_in)
                 inlet_terminal_areas_by_well.append(a_fallback_in)
@@ -1755,18 +1912,6 @@ class Files:
                 n_fallback = np.tile(_normalize(c_out - c_in), (len(outlet_terminal_pts), 1))
                 a_fallback = np.full((len(outlet_terminal_pts),), 1e-6, dtype=float)
                 # Fallback if metadata unavailable: approximate normals from seed axis.
-                outlet_terminal_pts, n_fallback, a_fallback = _drop_seed_terminal(
-                    outlet_terminal_pts, n_fallback, a_fallback, c_out
-                )
-                outlet_terminal_pts, n_fallback, a_fallback = _drop_seed_terminal(
-                    outlet_terminal_pts, n_fallback, a_fallback, self.coords_outlet
-                )
-                outlet_terminal_pts, n_fallback, a_fallback = _drop_nearest_seed_terminal(
-                    outlet_terminal_pts, n_fallback, a_fallback, c_out
-                )
-                outlet_terminal_pts, n_fallback, a_fallback = _drop_nearest_seed_terminal(
-                    outlet_terminal_pts, n_fallback, a_fallback, self.coords_outlet
-                )
                 outlet_terminal_pts_by_well.append(outlet_terminal_pts)
                 outlet_terminal_normals_by_well.append(n_fallback)
                 outlet_terminal_areas_by_well.append(a_fallback)
@@ -1790,6 +1935,8 @@ class Files:
                     mesh_i,
                     inlet_terminal_pts=inlet_terminal_pts_by_well[i - 1],
                     outlet_terminal_pts=outlet_terminal_pts_by_well[i - 1],
+                    inlet_terminal_normals=inlet_terminal_normals_by_well[i - 1],
+                    outlet_terminal_normals=outlet_terminal_normals_by_well[i - 1],
                     coords_inlet=coords_inlet_by_well[i - 1],
                     coords_outlet=coords_outlet_by_well[i - 1],
                     wall_marker=wall_marker,
@@ -1798,6 +1945,8 @@ class Files:
                     inlet_base_marker=inlet_base_marker,
                     outlet_base_marker=outlet_base_marker,
                     theta_concave_deg=theta_concave_deg,
+                    theta_concave_inlet_deg=theta_concave_inlet_deg,
+                    theta_concave_outlet_deg=theta_concave_outlet_deg,
                     theta_terminal_deg=theta_terminal_deg,
                     plane_tol=plane_tol,
                     outer_tol=outer_tol,
@@ -1842,6 +1991,8 @@ class Files:
                     arterial_concave_marker=arterial_concave_marker,
                     venous_concave_marker=venous_concave_marker,
                     theta_concave_deg=theta_concave_deg,
+                    theta_concave_inlet_deg=theta_concave_inlet_deg,
+                    theta_concave_outlet_deg=theta_concave_outlet_deg,
                     terminal_base_marker=inlet_base_marker,
                 )
                 write_mesh_and_tags(mesh, facet_tags, "bioreactor.xdmf", "mesh_tags.xdmf")
@@ -1879,6 +2030,8 @@ class Files:
                     arterial_concave_marker=arterial_concave_marker,
                     venous_concave_marker=venous_concave_marker,
                     theta_concave_deg=theta_concave_deg,
+                    theta_concave_inlet_deg=theta_concave_inlet_deg,
+                    theta_concave_outlet_deg=theta_concave_outlet_deg,
                     terminal_base_marker=inlet_base_marker,
                 )
                 X0 = mesh.geometry.x.copy()
@@ -1896,6 +2049,8 @@ class Files:
                 mesh,
                 inlet_terminal_pts=inlet_terminal_pts_by_well[0],
                 outlet_terminal_pts=outlet_terminal_pts_by_well[0],
+                inlet_terminal_normals=inlet_terminal_normals_by_well[0],
+                outlet_terminal_normals=outlet_terminal_normals_by_well[0],
                 coords_inlet=coords_inlet_by_well[0],
                 coords_outlet=coords_outlet_by_well[0],
                 wall_marker=wall_marker,
@@ -1904,6 +2059,8 @@ class Files:
                 inlet_base_marker=inlet_base_marker,
                 outlet_base_marker=outlet_base_marker,
                 theta_concave_deg=theta_concave_deg,
+                theta_concave_inlet_deg=theta_concave_inlet_deg,
+                theta_concave_outlet_deg=theta_concave_outlet_deg,
                 theta_terminal_deg=theta_terminal_deg,
                 plane_tol=plane_tol,
                 outer_tol=outer_tol,
@@ -1936,6 +2093,8 @@ class Files:
                 mesh,
                 inlet_terminal_pts=inlet_terminal_pts_by_well[0],
                 outlet_terminal_pts=outlet_terminal_pts_by_well[0],
+                inlet_terminal_normals=inlet_terminal_normals_by_well[0],
+                outlet_terminal_normals=outlet_terminal_normals_by_well[0],
                 coords_inlet=coords_inlet_by_well[0],
                 coords_outlet=coords_outlet_by_well[0],
                 wall_marker=wall_marker,
@@ -1944,6 +2103,8 @@ class Files:
                 inlet_base_marker=inlet_base_marker,
                 outlet_base_marker=outlet_base_marker,
                 theta_concave_deg=theta_concave_deg,
+                theta_concave_inlet_deg=theta_concave_inlet_deg,
+                theta_concave_outlet_deg=theta_concave_outlet_deg,
                 theta_terminal_deg=theta_terminal_deg,
                 plane_tol=plane_tol,
                 outer_tol=outer_tol,
@@ -1958,6 +2119,8 @@ class Files:
                         mesh,
                         inlet_terminal_pts=inlet_terminal_pts_by_well[i - 1],
                         outlet_terminal_pts=outlet_terminal_pts_by_well[i - 1],
+                        inlet_terminal_normals=inlet_terminal_normals_by_well[i - 1],
+                        outlet_terminal_normals=outlet_terminal_normals_by_well[i - 1],
                         coords_inlet=coords_inlet_by_well[i - 1],
                         coords_outlet=coords_outlet_by_well[i - 1],
                         wall_marker=wall_marker,
@@ -1966,6 +2129,8 @@ class Files:
                         inlet_base_marker=inlet_base_marker,
                         outlet_base_marker=outlet_base_marker,
                         theta_concave_deg=theta_concave_deg,
+                        theta_concave_inlet_deg=theta_concave_inlet_deg,
+                        theta_concave_outlet_deg=theta_concave_outlet_deg,
                         theta_terminal_deg=theta_terminal_deg,
                         plane_tol=plane_tol,
                         outer_tol=outer_tol,
