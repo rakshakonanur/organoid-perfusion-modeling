@@ -179,6 +179,60 @@ class PerfusionSolver(lm_base.PerfusionSolver):
                 interior.append(int(f))
         return np.asarray(ext, dtype=np.int32), np.asarray(interior, dtype=np.int32)
 
+    def _audit_boundary_fluxes(self, p_h, K_tensor):
+        mesh = self.mesh
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+        n = ufl.FacetNormal(mesh)
+        one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
+
+        markers = self._collect_boundary_markers()
+        marker_flux = {}
+        marker_area = {}
+        for m in markers:
+            ext_facets, _int_facets = self._split_marker_facets(int(m))
+            if ext_facets.size == 0:
+                continue
+            flux_local = fem.assemble_scalar(fem.form(-ufl.dot(K_tensor * ufl.grad(p_h), n) * ds(int(m))))
+            area_local = fem.assemble_scalar(fem.form(one * ds(int(m))))
+            flux = mesh.comm.allreduce(flux_local, op=MPI.SUM)
+            area = mesh.comm.allreduce(area_local, op=MPI.SUM)
+            marker_flux[str(int(m))] = float(flux)
+            marker_area[str(int(m))] = float(area)
+
+        inlet_marks, outlet_marks, *_ = self._get_terminal_marker_data()
+        counted_markers = set(int(m) for m in inlet_marks)
+        counted_markers.update(int(m) for m in outlet_marks)
+        counted_markers.add(int(self.arterial_concave_marker))
+        counted_markers.add(int(self.venous_concave_marker))
+
+        total_flux = float(sum(marker_flux.values()))
+        counted_flux = float(
+            sum(marker_flux.get(str(int(m)), 0.0) for m in sorted(counted_markers))
+        )
+        uncounted_flux = float(total_flux - counted_flux)
+
+        if mesh.comm.rank == 0:
+            print("[audit] Exterior boundary flux by marker:")
+            for m in sorted(int(k) for k in marker_flux.keys()):
+                key = str(int(m))
+                print(
+                    f"  marker {int(m)}: area={marker_area[key]:.12e}, flux={marker_flux[key]:.12e}"
+                )
+            print(
+                "[audit] total exterior flux="
+                f"{total_flux:.12e}, counted flux={counted_flux:.12e}, "
+                f"uncounted flux={uncounted_flux:.12e}"
+            )
+
+        return {
+            "boundary_flux_by_marker": marker_flux,
+            "boundary_area_by_marker": marker_area,
+            "total_exterior_flux": total_flux,
+            "counted_interface_markers": [int(m) for m in sorted(counted_markers)],
+            "counted_interface_flux": counted_flux,
+            "uncounted_exterior_flux": uncounted_flux,
+        }
+
     def _build_constraint_vectors(self, W, K_tensor, inlet_marks, bc_dofs):
         ds = ufl.Measure("ds", domain=self.mesh, subdomain_data=self.facet_tags)
         dS = ufl.Measure("dS", domain=self.mesh, subdomain_data=self.facet_tags)
@@ -384,6 +438,9 @@ class PerfusionSolver(lm_base.PerfusionSolver):
             "cell_volume": float(cell_vol),
             "q_artery_leak": float(Q_art_leak),
             "q_venous_leak": float(Q_ven_leak),
+            "p_concave_inlet_bc": float(self.p_in_BC),
+            "p_concave_outlet_bc": float(self.p_out_BC),
+            "skip_1d": bool(self.skip_1d),
             "coords_inlet": coords_in_final.tolist(),
             "coords_outlet": coords_out_final.tolist(),
             "p_inlet_target": np.asarray(p_inlet_target, dtype=float).tolist(),
@@ -514,10 +571,15 @@ class PerfusionSolver(lm_base.PerfusionSolver):
 
         n = ufl.FacetNormal(mesh)
         ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
-        Q_art_leak = fem.assemble_scalar(fem.form(ufl.dot(u_h, n) * ds(int(self.arterial_concave_marker))))
-        Q_ven_leak = fem.assemble_scalar(fem.form(ufl.dot(u_h, n) * ds(int(self.venous_concave_marker))))
+        Q_art_leak = fem.assemble_scalar(
+            fem.form(-ufl.dot(K_tensor * ufl.grad(p_h), n) * ds(int(self.arterial_concave_marker)))
+        )
+        Q_ven_leak = fem.assemble_scalar(
+            fem.form(-ufl.dot(K_tensor * ufl.grad(p_h), n) * ds(int(self.venous_concave_marker)))
+        )
         Q_art_leak = mesh.comm.allreduce(Q_art_leak, op=MPI.SUM)
         Q_ven_leak = mesh.comm.allreduce(Q_ven_leak, op=MPI.SUM)
+        boundary_audit = self._audit_boundary_fluxes(p_h, K_tensor)
 
         out_dir = current_dir / "out_darcy"
         out_dir.mkdir(exist_ok=True)
@@ -536,6 +598,7 @@ class PerfusionSolver(lm_base.PerfusionSolver):
         vtkfile_p.write_function(p_h)
 
         interface_bc = self._compute_interface_bc(p_h, u_h, q_src, Q_art_leak, Q_ven_leak)
+        interface_bc.update(boundary_audit)
         if mesh.comm.rank == 0:
             with open(out_dir / "interface_bc.json", "w") as fp:
                 import json
@@ -558,6 +621,9 @@ if __name__ == "__main__":
     ap.add_argument("--area-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/area_checkpoint_outlet.bp")
     ap.add_argument("--branching-in-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_0.csv")
     ap.add_argument("--branching-out-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_1.csv")
+    ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
+    ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
+    ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.175, 0.9, 0.55])
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.175, 0.9, 0.55])
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet")
@@ -604,6 +670,9 @@ if __name__ == "__main__":
         concave_bc_mode=args.concave_bc_mode,
         lp_arterial=args.lp_arterial,
         lp_venous=args.lp_venous,
+        skip_1d=args.skip_1d,
+        fallback_inlet_pressure=args.fallback_inlet_pressure,
+        fallback_outlet_pressure=args.fallback_outlet_pressure,
         inlet_flux_correction=args.inlet_flux_correction,
         inlet_flux_corr_max_iter=args.inlet_flux_corr_max_iter,
         inlet_flux_corr_relax=args.inlet_flux_corr_relax,
