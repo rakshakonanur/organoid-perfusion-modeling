@@ -157,6 +157,9 @@ class PerfusionSolver:
                  concave_bc_mode: str = "dirichlet",
                  lp_arterial: float = 0.0,
                  lp_venous: float = 0.0,
+                 skip_1d: bool = False,
+                 fallback_inlet_pressure: float = 0.0,
+                 fallback_outlet_pressure: float = 0.0,
                  inlet_flux_correction: bool = False,
                  inlet_flux_corr_max_iter: int = 5,
                  inlet_flux_corr_relax: float = 0.5,
@@ -178,49 +181,67 @@ class PerfusionSolver:
         self.venous_concave_marker = 32
         self.inlet_base_marker = 1000
         self.outlet_base_marker = 2000
+        self.skip_1d = bool(skip_1d)
+        self.fallback_inlet_pressure = float(fallback_inlet_pressure)
+        self.fallback_outlet_pressure = float(fallback_outlet_pressure)
 
         # 1D tree terminal territory meshes/checkpoints.
         # Read only on rank 0 (COMM_SELF), then broadcast sampled arrays with
         # typed MPI collectives (avoids object-pickle bcast hangs on some setups).
         comm = self.mesh.comm
         if comm.rank == 0:
-            print("[1d] Rank 0 reading inlet/outlet 1D meshes", flush=True)
-            self.inlet_mesh, self.inlet_tags = import_mesh(mesh_inlet_file, comm=MPI.COMM_SELF)
-            self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file, comm=MPI.COMM_SELF)
+            if self.skip_1d:
+                print("[1d] Rank 0 skipping inlet/outlet 1D trees; using fallback concave pressures", flush=True)
+                x_inlet = np.zeros((0, 3), dtype=np.float64)
+                x_outlet = np.zeros((0, 3), dtype=np.float64)
+                p_inlet = np.zeros((0,), dtype=np.float64)
+                q_inlet = np.zeros((0,), dtype=np.float64)
+                a_inlet = np.zeros((0,), dtype=np.float64)
+                p_outlet = np.zeros((0,), dtype=np.float64)
+                q_outlet = np.zeros((0,), dtype=np.float64)
+                a_outlet = np.zeros((0,), dtype=np.float64)
+                p_in_BC = float(self.fallback_inlet_pressure)
+                p_out_BC = float(self.fallback_outlet_pressure)
+                n_in = 0
+                n_out = 0
+            else:
+                print("[1d] Rank 0 reading inlet/outlet 1D meshes", flush=True)
+                self.inlet_mesh, self.inlet_tags = import_mesh(mesh_inlet_file, comm=MPI.COMM_SELF)
+                self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file, comm=MPI.COMM_SELF)
 
-            print("[1d] Rank 0 reading pressure checkpoints", flush=True)
-            self.p_A_k = import_pressure_data(self.inlet_mesh, pres_inlet_file, comm=MPI.COMM_SELF)[-1]
-            self.p_V_k = import_pressure_data(self.outlet_mesh, pres_outlet_file, comm=MPI.COMM_SELF)[-1]
+                print("[1d] Rank 0 reading pressure checkpoints", flush=True)
+                self.p_A_k = import_pressure_data(self.inlet_mesh, pres_inlet_file, comm=MPI.COMM_SELF)[-1]
+                self.p_V_k = import_pressure_data(self.outlet_mesh, pres_outlet_file, comm=MPI.COMM_SELF)[-1]
 
-            print("[1d] Rank 0 reading flow checkpoints", flush=True)
-            self.q_A_k = import_flow_data(self.inlet_mesh, flow_inlet_file, comm=MPI.COMM_SELF)[-1]
-            self.q_V_k = import_flow_data(self.outlet_mesh, flow_outlet_file, comm=MPI.COMM_SELF)[-1]
+                print("[1d] Rank 0 reading flow checkpoints", flush=True)
+                self.q_A_k = import_flow_data(self.inlet_mesh, flow_inlet_file, comm=MPI.COMM_SELF)[-1]
+                self.q_V_k = import_flow_data(self.outlet_mesh, flow_outlet_file, comm=MPI.COMM_SELF)[-1]
 
-            self.a_A_k = None
-            self.a_V_k = None
-            if area_inlet_file is not None and Path(area_inlet_file).exists():
-                print("[1d] Rank 0 reading inlet area checkpoint", flush=True)
-                self.a_A_k = import_area_data(self.inlet_mesh, area_inlet_file, comm=MPI.COMM_SELF)[-1]
-            if area_outlet_file is not None and Path(area_outlet_file).exists():
-                print("[1d] Rank 0 reading outlet area checkpoint", flush=True)
-                self.a_V_k = import_area_data(self.outlet_mesh, area_outlet_file, comm=MPI.COMM_SELF)[-1]
+                self.a_A_k = None
+                self.a_V_k = None
+                if area_inlet_file is not None and Path(area_inlet_file).exists():
+                    print("[1d] Rank 0 reading inlet area checkpoint", flush=True)
+                    self.a_A_k = import_area_data(self.inlet_mesh, area_inlet_file, comm=MPI.COMM_SELF)[-1]
+                if area_outlet_file is not None and Path(area_outlet_file).exists():
+                    print("[1d] Rank 0 reading outlet area checkpoint", flush=True)
+                    self.a_V_k = import_area_data(self.outlet_mesh, area_outlet_file, comm=MPI.COMM_SELF)[-1]
 
-            print("[1d] Rank 0 sampling terminal data", flush=True)
-            self._extract_terminal_data()
-            p_in_BC = float(self._sample_pressure_at_point(self.p_A_k, np.asarray(inlet_coord, dtype=float)))
-            p_out_BC = float(self._sample_pressure_at_point(self.p_V_k, np.asarray(outlet_coord, dtype=float)))
+                print("[1d] Rank 0 sampling terminal data", flush=True)
+                self._extract_terminal_data()
+                p_in_BC = float(self._sample_pressure_at_point(self.p_A_k, np.asarray(inlet_coord, dtype=float)))
+                p_out_BC = float(self._sample_pressure_at_point(self.p_V_k, np.asarray(outlet_coord, dtype=float)))
 
-            x_inlet = np.ascontiguousarray(np.asarray(self.x_inlet, dtype=np.float64))
-            x_outlet = np.ascontiguousarray(np.asarray(self.x_outlet, dtype=np.float64))
-            p_inlet = np.ascontiguousarray(np.asarray(self.p_inlet, dtype=np.float64))
-            q_inlet = np.ascontiguousarray(np.asarray(self.q_inlet, dtype=np.float64))
-            a_inlet = np.ascontiguousarray(np.asarray(self.a_inlet, dtype=np.float64))
-            p_outlet = np.ascontiguousarray(np.asarray(self.p_outlet, dtype=np.float64))
-            q_outlet = np.ascontiguousarray(np.asarray(self.q_outlet, dtype=np.float64))
-            a_outlet = np.ascontiguousarray(np.asarray(self.a_outlet, dtype=np.float64))
-            n_in = int(x_inlet.shape[0])
-            n_out = int(x_outlet.shape[0])
-            print("[1d] Rank 0 broadcasting sampled 1D data", flush=True)
+                x_inlet = np.ascontiguousarray(np.asarray(self.x_inlet, dtype=np.float64))
+                x_outlet = np.ascontiguousarray(np.asarray(self.x_outlet, dtype=np.float64))
+                p_inlet = np.ascontiguousarray(np.asarray(self.p_inlet, dtype=np.float64))
+                q_inlet = np.ascontiguousarray(np.asarray(self.q_inlet, dtype=np.float64))
+                a_inlet = np.ascontiguousarray(np.asarray(self.a_inlet, dtype=np.float64))
+                p_outlet = np.ascontiguousarray(np.asarray(self.p_outlet, dtype=np.float64))
+                q_outlet = np.ascontiguousarray(np.asarray(self.q_outlet, dtype=np.float64))
+                a_outlet = np.ascontiguousarray(np.asarray(self.a_outlet, dtype=np.float64))
+                n_in = int(x_inlet.shape[0])
+                n_out = int(x_outlet.shape[0])
+                print("[1d] Rank 0 broadcasting sampled 1D data", flush=True)
         else:
             x_inlet = x_outlet = None
             p_inlet = q_inlet = a_inlet = None
@@ -267,16 +288,24 @@ class PerfusionSolver:
         # --- branching data for inlet/outlet trees (optional but recommended) ---
         self.branch_coords_in  = None
         self.branch_ids_in     = None
+        self.branch_normals_in = None
         self.branch_coords_out = None
         self.branch_ids_out    = None
+        self.branch_normals_out = None
 
         if branching_in_file is not None:
-            (self.branch_coords_in,
-             self.branch_ids_in) = self._load_terminal_branch_coords(branching_in_file)
+            (
+                self.branch_coords_in,
+                self.branch_ids_in,
+                self.branch_normals_in,
+            ) = self._load_terminal_branch_metadata(branching_in_file)
 
         if branching_out_file is not None:
-            (self.branch_coords_out,
-             self.branch_ids_out) = self._load_terminal_branch_coords(branching_out_file)
+            (
+                self.branch_coords_out,
+                self.branch_ids_out,
+                self.branch_normals_out,
+            ) = self._load_terminal_branch_metadata(branching_out_file)
 
         # store user-input coordinates for channel inlet/outlet (3D)
         self.inlet_coord  = np.asarray(inlet_coord,  dtype=float)
@@ -376,11 +405,12 @@ class PerfusionSolver:
         return a_r, L_r
 
 
-    def _load_terminal_branch_coords(self, csv_path):
+    def _load_terminal_branch_metadata(self, csv_path):
         """
         Read a branchingData_*.csv and return:
           - coords: (N_term, 3) array of distal coordinates
           - ids:    (N_term,) array of branch IDs (or 0..N_term-1 if not present)
+          - normals:(N_term, 3) array of terminal axial directions (W basis when available)
 
         Assumptions (tweak if your headers differ):
           * child columns contain 'child' in their name
@@ -391,7 +421,14 @@ class PerfusionSolver:
           * branch ID column is one of:
               branchID, branch_id, id, ID
         """
-        df = pd.read_csv(csv_path)
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:
+            return (
+                np.zeros((0, 3)),
+                np.zeros((0,), dtype=int),
+                np.zeros((0, 3)),
+            )
 
         # 1) find child columns and define terminal rows (no children)
         child_cols = [c for c in df.columns if "child" in c.lower()]
@@ -424,9 +461,23 @@ class PerfusionSolver:
 
         coords = df.loc[mask_terminal, [xcol, ycol, zcol]].to_numpy(dtype=float)
 
+        if all(c in df.columns for c in ("W1", "W2", "W3")):
+            normals = df.loc[mask_terminal, ["W1", "W2", "W3"]].to_numpy(dtype=float)
+        elif all(c in df.columns for c in ("proximalCoordsX", "proximalCoordsY", "proximalCoordsZ")):
+            pcols = ["proximalCoordsX", "proximalCoordsY", "proximalCoordsZ"]
+            prox = df.loc[mask_terminal, pcols].to_numpy(dtype=float)
+            normals = coords - prox
+        else:
+            normals = np.zeros_like(coords)
+
+        if len(normals):
+            nn = np.linalg.norm(normals, axis=1, keepdims=True)
+            nn[nn <= 0.0] = 1.0
+            normals = normals / nn
+
         # 3) branch IDs (optional but nice to keep)
         branch_id_col = None
-        for cand in ["branchID", "branch_id", "id", "ID"]:
+        for cand in ["Index", "index", "branchID", "branch_id", "id", "ID"]:
             if cand in df.columns:
                 branch_id_col = cand
                 break
@@ -436,6 +487,10 @@ class PerfusionSolver:
         else:
             ids = np.arange(coords.shape[0], dtype=int)
 
+        return coords, ids, normals
+
+    def _load_terminal_branch_coords(self, csv_path):
+        coords, ids, _normals = self._load_terminal_branch_metadata(csv_path)
         return coords, ids
 
     # ========================================================
@@ -510,6 +565,8 @@ class PerfusionSolver:
         Returns an integer index array idx such that
             coords_terminals[idx[i], :] ~ branch_coords[i, :]
         """
+        if coords_terminals is None or len(coords_terminals) == 0:
+            return None
         if branch_coords is None or len(branch_coords) == 0:
             return None
 
@@ -985,7 +1042,8 @@ class PerfusionSolver:
 
         def sample_q(pts):
             if len(pts) == 0:
-                return np.zeros(0)
+                empty = np.zeros(0, dtype=float)
+                return empty, empty
             _, nn = tree.query(pts)
             nn = nn.astype(int)
             f_vals = f_h.x.array[nn]
@@ -1049,9 +1107,12 @@ class PerfusionSolver:
 
         def facet_flux_from_pressure(f):
             """
-            Compute flux from solved pressure and conductivity tensor directly:
+            Compute flux from the primal Darcy field directly:
               u = -K grad(p),  Q = ∫ u·n ds
-            This avoids projection-induced flux bias.
+
+            For pressure-based solvers this is the consistent quantity to use for
+            interface coupling. Mixed solvers delete self.K_tensor before calling
+            this routine so they fall back to the primary H(div) velocity field.
             """
             if len(f) == 0:
                 return np.zeros(0)
@@ -1071,6 +1132,9 @@ class PerfusionSolver:
         u_inlet_raw  = facet_average_vector(inlet_marks)
         u_outlet_raw = facet_average_vector(outlet_marks)
 
+        # Keep interface_bc fluxes on one consistent representation.
+        # For primal/CG solvers this should come from the solved pressure field
+        # directly rather than from the postprocessed RT projection.
         q_inlet_raw  = facet_flux_from_pressure(inlet_marks)
         q_outlet_raw = facet_flux_from_pressure(outlet_marks)
 
@@ -1182,6 +1246,9 @@ class PerfusionSolver:
             # total fluxes across inlet / outlet facet markers
             "q_artery_leak":   float(Q_art_leak),
             "q_venous_leak":   float(Q_ven_leak),
+            "p_concave_inlet_bc": float(self.p_in_BC),
+            "p_concave_outlet_bc": float(self.p_out_BC),
+            "skip_1d": bool(self.skip_1d),
 
             # coords for mapping back to 1D (now in branchingData order if provided)
             "coords_inlet":    coords_in.tolist(),
@@ -1624,10 +1691,10 @@ class PerfusionSolver:
 
         # Flux = ∫_Γ (u · n) dS
         Q_art_leak = fem.assemble_scalar(
-            fem.form(ufl.dot(u_h, n) * ds(INLET_MARK))
+            fem.form(-ufl.dot(K_tensor * ufl.grad(p_h), n) * ds(INLET_MARK))
         )
         Q_ven_leak = fem.assemble_scalar(
-            fem.form(ufl.dot(u_h, n) * ds(OUTLET_MARK))
+            fem.form(-ufl.dot(K_tensor * ufl.grad(p_h), n) * ds(OUTLET_MARK))
         )
 
         # Make sure we have global (MPI-reduced) values
@@ -1719,6 +1786,9 @@ if __name__ == "__main__":
     ap.add_argument("--area-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/area_checkpoint_outlet.bp")
     ap.add_argument("--branching-in-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_0.csv")
     ap.add_argument("--branching-out-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_1.csv")
+    ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
+    ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
+    ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.175, 0.9, 0.55])
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.175, 0.9, 0.55])
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet",
@@ -1757,6 +1827,9 @@ if __name__ == "__main__":
         concave_bc_mode=args.concave_bc_mode,
         lp_arterial=args.lp_arterial,
         lp_venous=args.lp_venous,
+        skip_1d=args.skip_1d,
+        fallback_inlet_pressure=args.fallback_inlet_pressure,
+        fallback_outlet_pressure=args.fallback_outlet_pressure,
         inlet_flux_correction=args.inlet_flux_correction,
         inlet_flux_corr_max_iter=args.inlet_flux_corr_max_iter,
         inlet_flux_corr_relax=args.inlet_flux_corr_relax,
