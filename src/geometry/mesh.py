@@ -64,6 +64,13 @@ logger.setLevel(logging.INFO)
 current_dir = Path("/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry")
 
 
+def _read_branching_dataframe(csv_path: str) -> pd.DataFrame:
+    try:
+        return pd.read_csv(csv_path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
 def _copy_artifact(src: Path, dst: Path) -> None:
     if dst.exists():
         send2trash(dst)
@@ -167,7 +174,7 @@ def terminal_interface_metadata_from_branching(csv_path: str) -> Tuple[np.ndarra
     Columns expected from your branchingData CSV:
       distalCoordsX/Y/Z, W1/W2/W3, Radius (or Area).
     """
-    df = pd.read_csv(csv_path)
+    df = _read_branching_dataframe(csv_path)
     if len(df) == 0:
         return np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0,))
 
@@ -496,7 +503,10 @@ def import_branched_mesh(
     fileprefix: str,
     coords: np.ndarray,
 ) -> np.ndarray:
-    df = pd.read_csv(branching_data_file)
+    df = _read_branching_dataframe(branching_data_file)
+    if len(df) == 0:
+        logger.info("[1d] branching file %s has no rows; skipping 1D branch generation", branching_data_file)
+        return np.zeros((0, 3), dtype=float)
     branch.write_geo_from_branching_data(df, geo_file=geo_file)
     geo_to_mesh_gmsh(geo_file=geo_file, msh_file=msh_file)
     convert_mesh(msh_file=msh_file, xdmf_file=xdmf_file)
@@ -1702,9 +1712,9 @@ class Files:
         # 3D input options
         tissue_vtu_list: Optional[Sequence[str]] = None,
         ftet_max_threads: Optional[int] = None,
-        gmsh_char_len_min: float = 0.0005,
+        gmsh_char_len_min: float = 0.001,
         gmsh_char_len_max: float = 0.008,
-        gmsh_disk_npts: int = 24,
+        gmsh_disk_npts: int = 12,
         embedded_disk_radius_scale: float = 1.0,
         terminal_refine_radius_factor: float = 2.5,
         terminal_refine_h_factor: float = 0.35,
@@ -1712,6 +1722,7 @@ class Files:
         same_tissue_for_all_wells: bool = True,
         same_meshtags_for_all_wells: bool = False,
         well_spacing_y: float = 0.6,
+        disable_1d_terminals: bool = False,
         # tagging params
         wall_marker: int = 1,
         arterial_concave_marker: int = 31,
@@ -1827,21 +1838,29 @@ class Files:
                 geo_in, msh_in, xdmf_in = geo_file_inlet, msh_file_inlet, xdmf_file_inlet
                 geo_out, msh_out, xdmf_out = geo_file_outlet, msh_file_outlet, xdmf_file_outlet
 
-            if not Path(branching_in_list[i - 1]).exists():
-                raise FileNotFoundError(f"Missing branching_data_inlet for well{i}: {branching_in_list[i - 1]}")
-            if not Path(branching_out_list[i - 1]).exists():
-                raise FileNotFoundError(f"Missing branching_data_outlet for well{i}: {branching_out_list[i - 1]}")
-            if not Path(output_in_list[i - 1]).exists():
-                raise FileNotFoundError(f"Missing output_1d_inlet folder for well{i}: {output_in_list[i - 1]}")
-            if not Path(output_out_list[i - 1]).exists():
-                raise FileNotFoundError(f"Missing output_1d_outlet folder for well{i}: {output_out_list[i - 1]}")
+            if not disable_1d_terminals:
+                if not Path(branching_in_list[i - 1]).exists():
+                    raise FileNotFoundError(f"Missing branching_data_inlet for well{i}: {branching_in_list[i - 1]}")
+                if not Path(branching_out_list[i - 1]).exists():
+                    raise FileNotFoundError(f"Missing branching_data_outlet for well{i}: {branching_out_list[i - 1]}")
+                if not Path(output_in_list[i - 1]).exists():
+                    raise FileNotFoundError(f"Missing output_1d_inlet folder for well{i}: {output_in_list[i - 1]}")
+                if not Path(output_out_list[i - 1]).exists():
+                    raise FileNotFoundError(f"Missing output_1d_outlet folder for well{i}: {output_out_list[i - 1]}")
 
-            in_meta_coords, in_meta_normals, in_meta_areas = terminal_interface_metadata_from_branching(
-                branching_in_list[i - 1]
-            )
-            out_meta_coords, out_meta_normals, out_meta_areas = terminal_interface_metadata_from_branching(
-                branching_out_list[i - 1]
-            )
+                in_meta_coords, in_meta_normals, in_meta_areas = terminal_interface_metadata_from_branching(
+                    branching_in_list[i - 1]
+                )
+                out_meta_coords, out_meta_normals, out_meta_areas = terminal_interface_metadata_from_branching(
+                    branching_out_list[i - 1]
+                )
+            else:
+                in_meta_coords = np.zeros((0, 3), dtype=float)
+                in_meta_normals = np.zeros((0, 3), dtype=float)
+                in_meta_areas = np.zeros((0,), dtype=float)
+                out_meta_coords = np.zeros((0, 3), dtype=float)
+                out_meta_normals = np.zeros((0, 3), dtype=float)
+                out_meta_areas = np.zeros((0,), dtype=float)
             # Keep all terminal metadata points. Do not drop points near the
             # inlet/outlet seeds; the terminal tagging stage now expects the
             # full metadata list to be preserved.
@@ -1864,24 +1883,28 @@ class Files:
             #     out_meta_coords, out_meta_normals, out_meta_areas, self.coords_outlet
             # )
 
-            inlet_terminal_pts = import_branched_mesh(
-                branching_data_file=branching_in_list[i - 1],
-                output_1d=output_in_list[i - 1],
-                geo_file=geo_in,
-                msh_file=msh_in,
-                xdmf_file=xdmf_in,
-                fileprefix=suffix_in,
-                coords=c_in,
-            )
-            outlet_terminal_pts = import_branched_mesh(
-                branching_data_file=branching_out_list[i - 1],
-                output_1d=output_out_list[i - 1],
-                geo_file=geo_out,
-                msh_file=msh_out,
-                xdmf_file=xdmf_out,
-                fileprefix=suffix_out,
-                coords=c_out,
-            )
+            if disable_1d_terminals:
+                inlet_terminal_pts = np.zeros((0, 3), dtype=float)
+                outlet_terminal_pts = np.zeros((0, 3), dtype=float)
+            else:
+                inlet_terminal_pts = import_branched_mesh(
+                    branching_data_file=branching_in_list[i - 1],
+                    output_1d=output_in_list[i - 1],
+                    geo_file=geo_in,
+                    msh_file=msh_in,
+                    xdmf_file=xdmf_in,
+                    fileprefix=suffix_in,
+                    coords=c_in,
+                )
+                outlet_terminal_pts = import_branched_mesh(
+                    branching_data_file=branching_out_list[i - 1],
+                    output_1d=output_out_list[i - 1],
+                    geo_file=geo_out,
+                    msh_file=msh_out,
+                    xdmf_file=xdmf_out,
+                    fileprefix=suffix_out,
+                    coords=c_out,
+                )
             if len(in_meta_coords) > 0:
                 inlet_terminal_pts_by_well.append(in_meta_coords)
                 if len(in_meta_normals) == len(in_meta_coords):
