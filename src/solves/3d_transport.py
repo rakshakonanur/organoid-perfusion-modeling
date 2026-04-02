@@ -122,6 +122,7 @@ class TransportSolver:
         vel_file,
         interface_bc_file="",
         concave_exchange_mode="velocity",
+        skip_1d=False,
         T=10.0,
         dt=1.0,
         D_value=1e-3,
@@ -136,18 +137,13 @@ class TransportSolver:
         # Darcy velocity field projected to nodal P1 values and written as VTU.
         self.velocity = self._load_velocity(vel_file)
 
-        # 1D inlet/outlet terminal meshes + checkpointed terminal flows.
-        self.inlet_mesh, self.inlet_tags = import_mesh(mesh_inlet_file)
-        self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file)
-
-        inlet_hist = import_flow_data(self.inlet_mesh, flow_inlet_file)
-        outlet_hist = import_flow_data(self.outlet_mesh, flow_outlet_file)
-        if not inlet_hist:
-            raise RuntimeError(f"No inlet flow checkpoint data found in {flow_inlet_file}")
-        if not outlet_hist:
-            raise RuntimeError(f"No outlet flow checkpoint data found in {flow_outlet_file}")
-        self.q_inlet_fun = inlet_hist[-1]
-        self.q_outlet_fun = outlet_hist[-1]
+        self.skip_1d = bool(skip_1d)
+        self.inlet_mesh = None
+        self.inlet_tags = None
+        self.outlet_mesh = None
+        self.outlet_tags = None
+        self.q_inlet_fun = None
+        self.q_outlet_fun = None
 
         self.arterial_concave_marker = 31
         self.venous_concave_marker = 32
@@ -160,9 +156,30 @@ class TransportSolver:
                 f"got {concave_exchange_mode!r}"
             )
         self.concave_exchange = []
+        self.inlet_exchange = []
+        self.outlet_exchange = []
+        self.x_inlet = np.zeros((0, 3), dtype=float)
+        self.x_outlet = np.zeros((0, 3), dtype=float)
+        self.q_inlet_vals = np.zeros((0,), dtype=float)
+        self.q_outlet_vals = np.zeros((0,), dtype=float)
 
-        self._extract_terminal_data()
-        self._build_terminal_exchange_data()
+        if not self.skip_1d:
+            # 1D inlet/outlet terminal meshes + checkpointed terminal flows.
+            self.inlet_mesh, self.inlet_tags = import_mesh(mesh_inlet_file)
+            self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file)
+
+            inlet_hist = import_flow_data(self.inlet_mesh, flow_inlet_file)
+            outlet_hist = import_flow_data(self.outlet_mesh, flow_outlet_file)
+            if not inlet_hist:
+                raise RuntimeError(f"No inlet flow checkpoint data found in {flow_inlet_file}")
+            if not outlet_hist:
+                raise RuntimeError(f"No outlet flow checkpoint data found in {flow_outlet_file}")
+            self.q_inlet_fun = inlet_hist[-1]
+            self.q_outlet_fun = outlet_hist[-1]
+
+            self._extract_terminal_data()
+            self._build_terminal_exchange_data()
+
         if self.concave_exchange_mode == "uniform":
             self._build_concave_exchange_data(interface_bc_file)
         else:
@@ -821,6 +838,7 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
             vel_file=args.vel_file,
             interface_bc_file=args.interface_bc_file,
             concave_exchange_mode=args.concave_exchange_mode,
+            skip_1d=args.skip_1d,
             T=args.T,
             dt=args.dt,
             D_value=args.D_value,
@@ -838,6 +856,7 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
         vel_file=_resolve_organoid_path(args.vel_file, organoid_id),
         interface_bc_file=_resolve_organoid_path(args.interface_bc_file, organoid_id),
         concave_exchange_mode=args.concave_exchange_mode,
+        skip_1d=args.skip_1d,
         T=args.T,
         dt=args.dt,
         D_value=args.D_value,
@@ -896,11 +915,16 @@ if __name__ == "__main__":
         default="velocity",
         help="Use local Darcy u·n on the concave walls ('velocity') or uniform flux densities from interface_bc.json ('uniform').",
     )
+    ap.add_argument(
+        "--skip-1d",
+        action="store_true",
+        help="Disable synthetic terminal exchange and run transport using only concave-wall exchange.",
+    )
     ap.add_argument("--T", type=float, default=10000.0)
     ap.add_argument("--dt", type=float, default=10.0)
     ap.add_argument("--D-value", type=float, default=1e-8)
     ap.add_argument("--c-in-value", type=float, default=1.0)
-    ap.add_argument("--out-file", default="transport_c.xdmf")
+    ap.add_argument("--out-file", default="transport_c_no_vasc.xdmf")
     ap.add_argument(
         "--organoid-ids",
         type=int,
