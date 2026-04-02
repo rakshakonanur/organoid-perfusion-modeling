@@ -84,7 +84,12 @@ def _resolve_mpi_launcher(user_cmd: str) -> str:
     return user_cmd
 
 
-def _copy_shared_geometry_outputs(src_geom: Path, dst_geom: Path, well_idx: int) -> None:
+def _copy_shared_geometry_outputs(
+    src_geom: Path,
+    dst_geom: Path,
+    well_idx: int,
+    copy_1d_artifacts: bool = True,
+) -> None:
     """
     Copy only the geometry/checkpoint files needed by darcy.py.
     Maps translated well files to canonical names in dst:
@@ -92,18 +97,21 @@ def _copy_shared_geometry_outputs(src_geom: Path, dst_geom: Path, well_idx: int)
       mesh_tags_well{well_idx}.xdmf  -> mesh_tags.xdmf
     """
     dst_geom.mkdir(parents=True, exist_ok=True)
-    required = [
-        "tagged_branches_inlet.bp",
-        "tagged_branches_outlet.bp",
-        "pressure_checkpoint_inlet.bp",
-        "pressure_checkpoint_outlet.bp",
-        "flow_checkpoint_inlet.bp",
-        "flow_checkpoint_outlet.bp",
-    ]
-    optional = [
-        "area_checkpoint_inlet.bp",
-        "area_checkpoint_outlet.bp",
-    ]
+    required = []
+    optional = []
+    if copy_1d_artifacts:
+        required = [
+            "tagged_branches_inlet.bp",
+            "tagged_branches_outlet.bp",
+            "pressure_checkpoint_inlet.bp",
+            "pressure_checkpoint_outlet.bp",
+            "flow_checkpoint_inlet.bp",
+            "flow_checkpoint_outlet.bp",
+        ]
+        optional = [
+            "area_checkpoint_inlet.bp",
+            "area_checkpoint_outlet.bp",
+        ]
     for name in required + optional:
         src_well = src_geom / name.replace(".bp", f"_well{well_idx}.bp")
         src_plain = src_geom / name
@@ -167,7 +175,11 @@ def _copy_xdmf_with_h5_sidecars(src_xdmf: Path, dst_xdmf: Path) -> None:
         shutil.copy2(src_h5, dst_h5)
 
 
-def _build_trial_well_inputs(trial_dir: Path, n_wells: int) -> tuple[list[str], list[str], list[str], list[str]]:
+def _build_trial_well_inputs(
+    trial_dir: Path,
+    n_wells: int,
+    allow_missing_synthetic_inputs: bool = False,
+) -> tuple[list[str], list[str], list[str], list[str]]:
     in_vtp_dirs: list[str] = []
     out_vtp_dirs: list[str] = []
     branching_in_files: list[str] = []
@@ -178,9 +190,10 @@ def _build_trial_well_inputs(trial_dir: Path, n_wells: int) -> tuple[list[str], 
         out_vtp = org / "0D_Input_Files" / "outlet"
         b_in = org / "branchingData_0.csv"
         b_out = org / "branchingData_1.csv"
-        for p in (in_vtp, out_vtp, b_in, b_out):
-            if not p.exists():
-                raise FileNotFoundError(f"Missing required per-well input: {p}")
+        if not allow_missing_synthetic_inputs:
+            for p in (in_vtp, out_vtp, b_in, b_out):
+                if not p.exists():
+                    raise FileNotFoundError(f"Missing required per-well input: {p}")
         in_vtp_dirs.append(str(in_vtp))
         out_vtp_dirs.append(str(out_vtp))
         branching_in_files.append(str(b_in))
@@ -227,6 +240,51 @@ def _read_seed_coords_from_branching_csv(csv_path: Path, fallback: np.ndarray) -
         return np.asarray(fallback, dtype=float).copy()
 
 
+def _shift_seed_fallback(base: np.ndarray, organoid_idx: int, delta_y: float) -> np.ndarray:
+    coords = np.asarray(base, dtype=float).copy()
+    coords[1] += float(delta_y) * float(organoid_idx - 1)
+    return coords
+
+
+def _latest_named_row(csv_path: Path, vessel_name: str) -> dict | None:
+    if not csv_path.exists():
+        return None
+
+    latest_row: dict | None = None
+    latest_time = float("-inf")
+    with csv_path.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if str(row.get("name", "")).strip() != vessel_name:
+                continue
+            try:
+                t = float(row.get("time", 0.0))
+            except Exception:
+                t = 0.0
+            if latest_row is None or t >= latest_time:
+                latest_row = row
+                latest_time = t
+    return latest_row
+
+
+def _read_pressure_column(row: dict | None, column: str) -> float | None:
+    if row is None:
+        return None
+    raw = row.get(column, None)
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _read_leak_pressures_from_output(output_csv: Path, organoid_idx: int) -> tuple[float | None, float | None]:
+    art_row = _latest_named_row(output_csv, f"leak_art_{organoid_idx}")
+    ven_row = _latest_named_row(output_csv, f"leak_ven_{organoid_idx}")
+    return _read_pressure_column(art_row, "pressure_out"), _read_pressure_column(ven_row, "pressure_out")
+
+
 def _resolve_perm_region_for_organoid(base: str, organoid_idx: int) -> str:
     raw = str(base).strip()
     if not raw:
@@ -258,6 +316,9 @@ def run_one(
     concave_bc_mode: str = "dirichlet",
     lp_arterial: float = 0.0,
     lp_venous: float = 0.0,
+    no_synthetic_vasculature: bool = False,
+    fallback_inlet_pressure: float = 0.0,
+    fallback_outlet_pressure: float = 0.0,
     inlet_flux_correction: bool = False,
     inlet_flux_corr_max_iter: int = 5,
     inlet_flux_corr_relax: float = 0.5,
@@ -287,15 +348,23 @@ def run_one(
 
     print(f"[organoid_{i}] Copying 0D input folders...", flush=True)
     # 0D solver output folders + branching data come from the prepared trial directory
-    _copy_tree(src_org_dir / "0D_Input_Files" / "inlet", out_inlet)
-    _copy_tree(src_org_dir / "0D_Input_Files" / "outlet", out_outlet)
+    src_inlet_dir = src_org_dir / "0D_Input_Files" / "inlet"
+    src_outlet_dir = src_org_dir / "0D_Input_Files" / "outlet"
+    if src_inlet_dir.exists():
+        _copy_tree(src_inlet_dir, out_inlet)
+    elif not no_synthetic_vasculature:
+        raise FileNotFoundError(f"Missing required inlet directory: {src_inlet_dir}")
+    if src_outlet_dir.exists():
+        _copy_tree(src_outlet_dir, out_outlet)
+    elif not no_synthetic_vasculature:
+        raise FileNotFoundError(f"Missing required outlet directory: {src_outlet_dir}")
 
     print(f"[organoid_{i}] Searching for branching data in {src_org_dir}", flush=True)
     branching_in = src_org_dir / "branchingData_0.csv"
     branching_out = src_org_dir / "branchingData_1.csv"
-    if not branching_in.exists():
+    if not branching_in.exists() and not no_synthetic_vasculature:
         raise FileNotFoundError(f"Missing: {branching_in}")
-    if not branching_out.exists():
+    if not branching_out.exists() and not no_synthetic_vasculature:
         raise FileNotFoundError(f"Missing: {branching_out}")
 
     if shared_tissue_vtu is not None:
@@ -334,8 +403,14 @@ def run_one(
 
     # Use per-organoid branching seeds so Darcy concave-wall BC sampling
     # stays aligned with each organoid's translated 1D data.
-    coords_inlet = _read_seed_coords_from_branching_csv(branching_in, coords_inlet_base)
-    coords_outlet = _read_seed_coords_from_branching_csv(branching_out, coords_outlet_base)
+    coords_inlet = _read_seed_coords_from_branching_csv(
+        branching_in,
+        _shift_seed_fallback(coords_inlet_base, i, well_spacing_y),
+    )
+    coords_outlet = _read_seed_coords_from_branching_csv(
+        branching_out,
+        _shift_seed_fallback(coords_outlet_base, i, well_spacing_y),
+    )
 
     # ---- Run geometry (mesh) ----
     # Preferred flow: run mesh.py once into tmp_mesh_dir, then copy well{i} artifacts.
@@ -344,7 +419,11 @@ def run_one(
         if i == 1:
             t_mesh = perf_counter()
             print(f"[organoid_{i}] Starting mesh.Files(...) into {tmp_mesh_dir}...", flush=True)
-            in_vtp_dirs, out_vtp_dirs, branching_in_files, branching_out_files = _build_trial_well_inputs(trial_dir, n_wells)
+            in_vtp_dirs, out_vtp_dirs, branching_in_files, branching_out_files = _build_trial_well_inputs(
+                trial_dir,
+                n_wells,
+                allow_missing_synthetic_inputs=no_synthetic_vasculature,
+            )
             mesh.current_dir = tmp_mesh_dir
             mesh.Files(
                 tissue_vtu=str(tissue_vtu) if tissue_vtu is not None else None,
@@ -371,6 +450,7 @@ def run_one(
                 same_tissue_for_all_wells=True,
                 same_meshtags_for_all_wells=same_meshtags_as_first,
                 well_spacing_y=well_spacing_y,
+                disable_1d_terminals=no_synthetic_vasculature,
             )
             print(f"[organoid_{i}] mesh.Files(...) done in {perf_counter() - t_mesh:.1f}s", flush=True)
 
@@ -378,14 +458,24 @@ def run_one(
         if not src_geom.exists():
             raise FileNotFoundError(f"Cannot reuse mesh: missing {src_geom}")
         print(f"[organoid_{i}] Copying well{i} mesh artifacts from {src_geom}", flush=True)
-        _copy_shared_geometry_outputs(src_geom, geom_dir, well_idx=i)
+        _copy_shared_geometry_outputs(
+            src_geom,
+            geom_dir,
+            well_idx=i,
+            copy_1d_artifacts=(not no_synthetic_vasculature),
+        )
     elif reuse_mesh_from_first and i > 1:
         src_geom = coupled_root / "organoid_1" / "geometry"
         if not src_geom.exists():
             raise FileNotFoundError(f"Cannot reuse mesh: missing {src_geom}")
         if use_mesh_multiwell_translation:
             print(f"[organoid_{i}] Reusing translated mesh outputs from organoid_1/well{i}", flush=True)
-            _copy_shared_geometry_outputs(src_geom, geom_dir, well_idx=i)
+            _copy_shared_geometry_outputs(
+                src_geom,
+                geom_dir,
+                well_idx=i,
+                copy_1d_artifacts=(not no_synthetic_vasculature),
+            )
         else:
             print(f"[organoid_{i}] Reusing mesh outputs from organoid_1", flush=True)
             _copy_tree(src_geom, geom_dir)
@@ -412,10 +502,16 @@ def run_one(
             same_tissue_for_all_wells=use_mesh_multiwell_translation,
             same_meshtags_for_all_wells=same_meshtags_as_first,
             well_spacing_y=well_spacing_y,
+            disable_1d_terminals=no_synthetic_vasculature,
         )
         # If mesh.py emitted well-suffixed outputs, normalize well1 to canonical filenames.
         if (geom_dir / "bioreactor_well1.xdmf").exists() and (geom_dir / "mesh_tags_well1.xdmf").exists():
-            _copy_shared_geometry_outputs(geom_dir, geom_dir, well_idx=1)
+            _copy_shared_geometry_outputs(
+                geom_dir,
+                geom_dir,
+                well_idx=1,
+                copy_1d_artifacts=(not no_synthetic_vasculature),
+            )
         print(f"[organoid_{i}] mesh.Files(...) done in {perf_counter() - t_mesh:.1f}s", flush=True)
 
     # If mesh.Files triggers everything in __init__, we’re done.
@@ -440,6 +536,15 @@ def run_one(
     if not solver_script.exists():
         raise FileNotFoundError(f"Requested Darcy solver script not found: {solver_script}")
     perm_region_path = _resolve_perm_region_for_organoid(perm_region_root, i) if perm_region_root else ""
+    resolved_fallback_inlet_pressure = float(fallback_inlet_pressure)
+    resolved_fallback_outlet_pressure = float(fallback_outlet_pressure)
+    if no_synthetic_vasculature:
+        trial_output_csv = trial_dir / "output.csv"
+        p_art, p_ven = _read_leak_pressures_from_output(trial_output_csv, i)
+        if p_art is not None:
+            resolved_fallback_inlet_pressure = float(p_art)
+        if p_ven is not None:
+            resolved_fallback_outlet_pressure = float(p_ven)
     if darcy_mpi_procs > 1:
         mpi_launcher = _resolve_mpi_launcher(darcy_mpirun_cmd)
         cmd = [
@@ -462,13 +567,16 @@ def run_one(
             "--concave-bc-mode", str(concave_bc_mode),
             "--lp-arterial", str(lp_arterial),
             "--lp-venous", str(lp_venous),
+            *(["--skip-1d"] if no_synthetic_vasculature else []),
+            "--fallback-inlet-pressure", str(resolved_fallback_inlet_pressure),
+            "--fallback-outlet-pressure", str(resolved_fallback_outlet_pressure),
             *(["--inlet-flux-correction"] if inlet_flux_correction else []),
             "--inlet-flux-corr-max-iter", str(inlet_flux_corr_max_iter),
             "--inlet-flux-corr-relax", str(inlet_flux_corr_relax),
             "--inlet-flux-corr-tol", str(inlet_flux_corr_tol),
             "--out-dir", str(org_dir),
         ]
-        if darcy_solver == "darcy_p1_lm_interior" and perm_region_path:
+        if darcy_solver in {"darcy_p1_lm_interior", "darcy_mixed"} and perm_region_path:
             cmd.extend([
                 "--perm-region-path", perm_region_path,
                 "--perm-low", str(perm_low),
@@ -515,6 +623,9 @@ def run_one(
             concave_bc_mode=concave_bc_mode,
             lp_arterial=lp_arterial,
             lp_venous=lp_venous,
+            skip_1d=no_synthetic_vasculature,
+            fallback_inlet_pressure=resolved_fallback_inlet_pressure,
+            fallback_outlet_pressure=resolved_fallback_outlet_pressure,
             inlet_flux_correction=inlet_flux_correction,
             inlet_flux_corr_max_iter=inlet_flux_corr_max_iter,
             inlet_flux_corr_relax=inlet_flux_corr_relax,
@@ -528,7 +639,7 @@ def run_one(
                     "perm_high": perm_high,
                     "perm_transition_width": perm_transition_width,
                 }
-                if darcy_solver == "darcy_p1_lm_interior" and perm_region_path
+                if darcy_solver in {"darcy_p1_lm_interior", "darcy_mixed"} and perm_region_path
                 else {}
             ),
         )
@@ -541,8 +652,8 @@ def run_one(
 def parse_args():
     ap = argparse.ArgumentParser(description="Run mesh.py geometry + darcy_P1_v2.py for organoids without copying scripts.")
     ap.add_argument("--stl-dir", default="../../files", help="Directory containing organoid-1.stl, organoid-2.stl, ...")
-    ap.add_argument("--trial-dir", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/prep/prepped/trial-8/", help="Directory containing organoid_1/branchingData_0.csv etc (e.g. .../input/trial-2)")
-    ap.add_argument("--coupled-root", default="coupled/run_0", help="Output root directory (default: coupled/run_0)")
+    ap.add_argument("--trial-dir", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/prep/prepped/trial-9/", help="Directory containing organoid_1/branchingData_0.csv etc (e.g. .../input/trial-2)")
+    ap.add_argument("--coupled-root", default="coupled-no-vasc/run_0", help="Output root directory (default: coupled/run_0)")
     ap.add_argument("--n", type=int, default=4, help="Number of organoids (default: 4)")
     ap.add_argument("--same-geometry-for-all-wells", action="store_true",
                     help="Use one shared tissue geometry for all organoids, falling back to STL if no VTU exists.")
@@ -556,6 +667,12 @@ def parse_args():
                     help="Robin transfer coefficient on arterial concave face (used when --concave-bc-mode robin).")
     ap.add_argument("--lp-venous", type=float, default=1e-9,
                     help="Robin transfer coefficient on venous concave face (used when --concave-bc-mode robin).")
+    ap.add_argument("--no-synthetic-vasculature", action="store_true",
+                    help="Skip 1D synthetic trees and tag only the concave arterial/venous interfaces.")
+    ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0,
+                    help="Fallback arterial concave pressure used when --no-synthetic-vasculature is enabled.")
+    ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0,
+                    help="Fallback venous concave pressure used when --no-synthetic-vasculature is enabled.")
     ap.add_argument("--inlet-flux-correction", action="store_true",
                     help="Enable iterative per-terminal inlet flux correction in darcy.py.")
     ap.add_argument("--inlet-flux-corr-max-iter", type=int, default=5,
@@ -574,13 +691,13 @@ def parse_args():
                     help="MPI ranks for Darcy solve (1 = serial in-process).")
     ap.add_argument("--darcy-mpirun-cmd", default="mpirun",
                     help="MPI launcher command for Darcy when --darcy-mpi-procs > 1.")
-    ap.add_argument("--darcy-solver", choices=["darcy", "darcy_mixed", "darcy_p1_lm", "darcy_p1_lm_interior"], default="darcy_p1_lm_interior",
+    ap.add_argument("--darcy-solver", choices=["darcy", "darcy_mixed", "darcy_p1_lm", "darcy_p1_lm_interior"], default="darcy_mixed",
                     help="Darcy solver module/script to run.")
     ap.add_argument("--perm-region-root", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere",
                     help="Directory, STL path, or pattern for organoid permeability regions. If a directory is given, organoid-k uses organoid-k.stl. You can also use a path containing 'X' as the organoid index placeholder.")
     ap.add_argument("--perm-low", type=float, default=1.0e-9,
                     help="Background Darcy permeability outside the organoid STL region.")
-    ap.add_argument("--perm-high", type=float, default=1.0e-7,
+    ap.add_argument("--perm-high", type=float, default=2.0e-7,
                     help="Darcy permeability inside the organoid STL region.")
     ap.add_argument("--perm-transition-width", type=float, default=0.01,
                     help="Half-width of the smooth transition shell around the organoid STL boundary.")
@@ -634,6 +751,9 @@ def main():
             concave_bc_mode=args.concave_bc_mode,
             lp_arterial=args.lp_arterial,
             lp_venous=args.lp_venous,
+            no_synthetic_vasculature=args.no_synthetic_vasculature,
+            fallback_inlet_pressure=args.fallback_inlet_pressure,
+            fallback_outlet_pressure=args.fallback_outlet_pressure,
             inlet_flux_correction=args.inlet_flux_correction,
             inlet_flux_corr_max_iter=args.inlet_flux_corr_max_iter,
             inlet_flux_corr_relax=args.inlet_flux_corr_relax,
