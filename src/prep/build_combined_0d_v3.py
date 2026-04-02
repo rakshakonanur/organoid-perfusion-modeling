@@ -159,6 +159,7 @@ def process_synthetic_model(
     prefix: str,
     next_vessel_id: int,
     inlet_bc_names_to_remove: List[str],
+    convert_retained_outlet_bcs_to_pressure: bool = False,
 ) -> Tuple[Dict[str, Any], int, List[RenameRecord], Optional[int]]:
     """Rename + reindex + remove inlet BCs."""
     rename_records: List[RenameRecord] = []
@@ -181,6 +182,16 @@ def process_synthetic_model(
         new = f"{prefix}{_slug(old)}" if old else f"{prefix}BC"
         bc_rename[old] = new
         bc2 = dict(bc)
+        if convert_retained_outlet_bcs_to_pressure and old.upper().startswith("OUT"):
+            vals = dict(_as_dict(bc2.get("bc_values")))
+            t = vals.get("t", [0.0, 1.0])
+            p_vals = vals.get("P")
+            if not isinstance(p_vals, list) or len(p_vals) == 0:
+                q_vals = vals.get("Q", [0.0, 0.0])
+                n = len(q_vals) if isinstance(q_vals, list) and len(q_vals) > 0 else (len(t) if isinstance(t, list) and len(t) > 0 else 2)
+                p_vals = [0.0 for _ in range(n)]
+            bc2["bc_type"] = "PRESSURE"
+            bc2["bc_values"] = {"P": p_vals, "t": t if isinstance(t, list) else [0.0, 1.0]}
         bc2["bc_name"] = new
         bcs_out.append(bc2)
         rename_records.append(RenameRecord(file_label, "bc", "", "", old, new))
@@ -357,15 +368,16 @@ def build_channel_model(
 
 def build_leaky_vessels(
     next_vessel_id: int,
-    inlet_roots: Dict[int, int],
-    outlet_roots: Dict[int, int],
+    inlet_roots: Optional[Dict[int, int]] = None,
+    outlet_roots: Optional[Dict[int, int]] = None,
+    organoid_ids: Optional[List[int]] = None,
     R_leak: float = 0.0,
     length_leak: float = 0.01,
 ) -> Tuple[Dict[int, int], Dict[int, int], List[Dict[str, Any]], List[Dict[str, Any]], int]:
     """
     Create simple 'leaky' pseudo-vessels for each organoid inlet/outlet.
 
-    For each organoid id in inlet_roots / outlet_roots we create:
+    For each organoid id we create:
       - an arterial-side leak vessel:  LEAK_ART_<i>
       - a venous-side  leak vessel:   LEAK_VEN_<i>
 
@@ -381,13 +393,18 @@ def build_leaky_vessels(
     bcs             : list of new BC dicts
     next_vessel_id  : updated counter
     """
+    inlet_roots = inlet_roots or {}
+    outlet_roots = outlet_roots or {}
+    if organoid_ids is None:
+        organoid_ids = sorted(set(inlet_roots) | set(outlet_roots))
+
     leak_inlet_vids: Dict[int, int] = {}
     leak_outlet_vids: Dict[int, int] = {}
     vessels: List[Dict[str, Any]] = []
     bcs: List[Dict[str, Any]] = []
 
     # Arterial-side leaks (organoid inlets)
-    for org_id in sorted(inlet_roots.keys()):
+    for org_id in organoid_ids:
         vid = next_vessel_id
         next_vessel_id += 1
         leak_inlet_vids[org_id] = vid
@@ -415,7 +432,7 @@ def build_leaky_vessels(
         })
 
     # Venous-side leaks (organoid outlets)
-    for org_id in sorted(outlet_roots.keys()):
+    for org_id in organoid_ids:
         vid = next_vessel_id
         next_vessel_id += 1
         leak_outlet_vids[org_id] = vid
@@ -449,11 +466,13 @@ def build_leaky_vessels(
 # -----------------------------
 def build_default_channel_junctions(
     seg_to_vid: Dict[str, int],
-    inlet_roots: Dict[int, int],
-    outlet_roots: Dict[int, int],
+    inlet_roots: Optional[Dict[int, int]] = None,
+    outlet_roots: Optional[Dict[int, int]] = None,
     leak_inlet_vids: Optional[Dict[int, int]] = None,
     leak_outlet_vids: Optional[Dict[int, int]] = None,
 ) -> List[Dict[str, Any]]:
+    inlet_roots = inlet_roots or {}
+    outlet_roots = outlet_roots or {}
     leak_inlet_vids = leak_inlet_vids or {}
     leak_outlet_vids = leak_outlet_vids or {}
 
@@ -472,8 +491,9 @@ def build_default_channel_junctions(
         ("arterial_seg4", "arterial_seg5", 4),
     ]
     for idx, (up, dn, org) in enumerate(art_pairs, start=1):
-        outs = [vid(dn), inlet_roots[org]]
-        # Add arterial-side leak branch if defined for this organoid
+        outs = [vid(dn)]
+        if org in inlet_roots:
+            outs.append(inlet_roots[org])
         if org in leak_inlet_vids:
             outs.append(leak_inlet_vids[org])
         junctions.append({
@@ -517,8 +537,9 @@ def build_default_channel_junctions(
         ("veinous_seg5", "veinous_seg6", 1),
     ]
     for idx, (up, dn, org) in enumerate(ven_pairs, start=1):
-        outs = [vid(dn), outlet_roots[org]]
-        # Add venous-side leak branch if defined for this organoid
+        outs = [vid(dn)]
+        if org in outlet_roots:
+            outs.append(outlet_roots[org])
         if org in leak_outlet_vids:
             outs.append(leak_outlet_vids[org])
         junctions.append({
@@ -601,6 +622,32 @@ def find_organoid_files(input_dir: Path) -> Dict[int, Dict[str, Path]]:
             f"Missing inlet/outlet file for organoids: {missing}. Expected organoid_#_inlet.in and organoid_#_outlet.in"
         )
     return organoids
+
+
+def find_organoid_ids(input_dir: Path) -> List[int]:
+    ids: set[int] = set()
+
+    for organoid_dir in sorted(input_dir.glob("organoid_*")):
+        if not organoid_dir.is_dir():
+            continue
+        oid = _infer_organoid_id(organoid_dir)
+        if oid is not None:
+            ids.add(oid)
+
+    for p in sorted(input_dir.rglob("organoid_*_*.in")):
+        oid = _infer_organoid_id(p)
+        if oid is not None:
+            ids.add(oid)
+
+    return sorted(ids)
+
+
+def _load_simulation_parameters_only(path: Path) -> Dict[str, Any]:
+    data = _load_json(path)
+    sim = data.get("simulation_parameters", {})
+    if not isinstance(sim, dict):
+        raise TypeError(f"simulation_parameters in {path} must be a JSON object")
+    return sim
 
 
 def extract_zip_to_temp(zip_path: Path) -> Path:
@@ -722,21 +769,29 @@ def prepare_trial_directory(
     return trial_dir
 
 
-def _prompt_source_dirs() -> List[Path]:
-    print("Select synthetic vasculature input mode:", file=sys.stderr)
-    print("  1) Repeat one source folder for all 4 wells", file=sys.stderr)
-    print("  2) Use 4 different source folders", file=sys.stderr)
-    mode = input("Enter 1 or 2: ").strip()
-    if mode == "1":
-        src = Path(input("Enter the synthetic vasculature folder path: ").strip()).expanduser().resolve()
-        return [src, src, src, src]
-    if mode == "2":
-        out: List[Path] = []
-        for i in range(1, 5):
-            src = Path(input(f"Enter source folder for well {i}: ").strip()).expanduser().resolve()
-            out.append(src)
-        return out
-    raise ValueError(f"Unrecognized mode '{mode}'")
+def prepare_empty_trial_directory(
+    trial_root: Path,
+    n_organoids: int,
+    trial_name: str = "",
+    overwrite: bool = False,
+) -> Path:
+    if int(n_organoids) <= 0:
+        raise ValueError("n_organoids must be positive when creating an empty no-synthetic trial directory")
+
+    trial_root.mkdir(parents=True, exist_ok=True)
+    trial_dir = trial_root / trial_name if trial_name else _next_trial_dir(trial_root)
+
+    if trial_dir.exists():
+        if overwrite:
+            shutil.rmtree(trial_dir)
+        else:
+            raise FileExistsError(f"Trial directory already exists: {trial_dir}")
+
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(1, int(n_organoids) + 1):
+        (trial_dir / f"organoid_{i}").mkdir(parents=True, exist_ok=True)
+
+    return trial_dir
 
 
 # -----------------------------
@@ -800,6 +855,16 @@ def main() -> None:
 
     ap.add_argument("--connections", type=str, default="", help="Optional JSON file overriding channel-organoid junctions")
     ap.add_argument("--print-connections-template", action="store_true", help="Print a JSON template for --connections and exit")
+    ap.add_argument("--no-synthetic-vasculature", action="store_true",
+                    help="Omit organoid inlet/outlet synthetic subnetworks and couple the channel only through leak branches.")
+    ap.add_argument("--n-organoids", type=int, default=4,
+                    help="Organoid count used when --no-synthetic-vasculature is enabled and no organoid .in files are available.")
+    ap.add_argument("--simulation-params-file", type=str, default="",
+                    help="Optional JSON/.in file to copy simulation_parameters from in no-synthetic mode.")
+    ap.add_argument("--number-of-cardiac-cycles", type=int, default=1,
+                    help="Fallback simulation_parameters value when no source file is available.")
+    ap.add_argument("--number-of-time-pts-per-cardiac-cycle", type=int, default=5,
+                    help="Fallback simulation_parameters value when no source file is available.")
     args = ap.parse_args()
 
     if args.print_connections_template:
@@ -811,13 +876,17 @@ def main() -> None:
 
     temp_dir: Optional[Path] = None
     try:
-        input_dir: Path
+        input_dir: Optional[Path] = None
         if args.synthetic_zip:
             zip_path = Path(args.synthetic_zip).resolve()
             if not zip_path.exists():
                 raise FileNotFoundError(zip_path)
             temp_dir = extract_zip_to_temp(zip_path)
             input_dir = temp_dir
+        elif args.input_dir:
+            input_dir = Path(args.input_dir).resolve()
+            if not input_dir.exists():
+                raise FileNotFoundError(input_dir)
         elif args.source_folder or args.source_folders:
             if args.source_folder and args.source_folders:
                 raise ValueError("Use either --source-folder or --source-folders, not both.")
@@ -839,35 +908,65 @@ def main() -> None:
             )
             print(f"[info] Created trial directory: {input_dir}")
         else:
-            if args.input_dir:
-                input_dir = Path(args.input_dir).resolve()
-                if not input_dir.exists():
-                    raise FileNotFoundError(input_dir)
-            elif sys.stdin.isatty():
-                source_dirs = _prompt_source_dirs()
+            if not (args.no_synthetic_vasculature and int(args.n_organoids) > 0):
+                raise ValueError("Provide either --input-dir, --synthetic-zip, --source-folder, or --source-folders")
+            if args.trial_root or args.trial_name:
                 trial_root = Path(args.trial_root).expanduser().resolve() if args.trial_root else Path.cwd().resolve()
-                input_dir = prepare_trial_directory(
-                    source_dirs=source_dirs,
+                input_dir = prepare_empty_trial_directory(
                     trial_root=trial_root,
+                    n_organoids=int(args.n_organoids),
                     trial_name=args.trial_name,
                     overwrite=args.overwrite_trial,
-                    dy_step=args.dy_step,
-                    shift_sign=args.shift_sign,
-                    shift_coords=(not args.no_shift_coords),
                 )
-                print(f"[info] Created trial directory: {input_dir}")
+                print(f"[info] Created no-synthetic trial directory: {input_dir}")
+
+        base_dir = input_dir if input_dir is not None else Path.cwd().resolve()
+        out_path = (base_dir / out_arg) if out_arg == "combined.in" else Path(out_arg).resolve()
+        map_path = (base_dir / map_arg) if map_arg == "rename_map.json" else Path(map_arg).resolve()
+
+        organoids: Dict[int, Dict[str, Path]] = {}
+        organoid_ids: List[int] = []
+        if input_dir is not None:
+            discovered_ids = find_organoid_ids(input_dir)
+            if args.no_synthetic_vasculature:
+                organoid_ids = discovered_ids
+                try:
+                    organoids = find_organoid_files(input_dir)
+                except Exception:
+                    organoids = {}
             else:
-                raise ValueError("Provide either --input-dir, --synthetic-zip, --source-folder, or --source-folders")
+                organoids = find_organoid_files(input_dir)
+                organoid_ids = sorted(organoids.keys())
 
-        out_path = (input_dir / out_arg) if out_arg == "combined.in" else Path(out_arg).resolve()
-        map_path = (input_dir / map_arg) if map_arg == "rename_map.json" else Path(map_arg).resolve()
+        if not organoid_ids and int(args.n_organoids) > 0:
+            organoid_ids = list(range(1, int(args.n_organoids) + 1))
+        if not organoid_ids:
+            raise RuntimeError(
+                "Could not infer organoid ids. Provide --input-dir with organoid_* folders "
+                "or pass --n-organoids in --no-synthetic-vasculature mode."
+            )
 
-        organoids = find_organoid_files(input_dir)
+        if args.simulation_params_file:
+            sim_params = _load_simulation_parameters_only(Path(args.simulation_params_file).expanduser().resolve())
+        elif organoids:
+            sim_params = _load_simulation_parameters_only(organoids[organoid_ids[0]]["inlet"])
+        elif input_dir is not None and (input_dir / "combined.in").exists():
+            sim_params = _load_simulation_parameters_only(input_dir / "combined.in")
+        else:
+            sim_params = {
+                "number_of_cardiac_cycles": int(args.number_of_cardiac_cycles),
+                "number_of_time_pts_per_cardiac_cycle": int(args.number_of_time_pts_per_cardiac_cycle),
+            }
 
-        first_model = _load_json(organoids[min(organoids.keys())]["inlet"])
         combined: Dict[str, Any] = {
-            "description": {"name": "combined_channel_plus_organoids"},
-            "simulation_parameters": first_model.get("simulation_parameters", {}),
+            "description": {
+                "name": (
+                    "combined_channel_plus_leaks"
+                    if args.no_synthetic_vasculature
+                    else "combined_channel_plus_organoids"
+                )
+            },
+            "simulation_parameters": sim_params,
             "boundary_conditions": [],
             "junctions": [],
             "vessels": [],
@@ -878,37 +977,39 @@ def main() -> None:
         inlet_roots: Dict[int, int] = {}
         outlet_roots: Dict[int, int] = {}
 
-        # Process synthetic organoid files
-        for org_id in sorted(organoids.keys()):
-            for side in ("inlet", "outlet"):
-                path = organoids[org_id][side]
-                model = _load_json(path)
+        if not args.no_synthetic_vasculature:
+            # Process synthetic organoid files
+            for org_id in organoid_ids:
+                for side in ("inlet", "outlet"):
+                    path = organoids[org_id][side]
+                    model = _load_json(path)
 
-                inlet_remove = ["INFLOW"] if side == "inlet" else ["PRESSURE_IN"]
-                prefix = f"organoid{org_id}_{side}_"
+                    inlet_remove = ["INFLOW"] if side == "inlet" else ["PRESSURE_IN"]
+                    prefix = f"organoid{org_id}_{side}_"
 
-                processed, next_vid, recs, root_new = process_synthetic_model(
-                    model=model,
-                    file_label=path.name,
-                    prefix=prefix,
-                    next_vessel_id=next_vid,
-                    inlet_bc_names_to_remove=inlet_remove,
-                )
+                    processed, next_vid, recs, root_new = process_synthetic_model(
+                        model=model,
+                        file_label=path.name,
+                        prefix=prefix,
+                        next_vessel_id=next_vid,
+                        inlet_bc_names_to_remove=inlet_remove,
+                        convert_retained_outlet_bcs_to_pressure=(side == "outlet"),
+                    )
 
-                rename_records.extend(recs)
-                combined["boundary_conditions"].extend(_as_list(processed.get("boundary_conditions")))
-                combined["junctions"].extend(_as_list(processed.get("junctions")))
-                combined["vessels"].extend(_as_list(processed.get("vessels")))
+                    rename_records.extend(recs)
+                    combined["boundary_conditions"].extend(_as_list(processed.get("boundary_conditions")))
+                    combined["junctions"].extend(_as_list(processed.get("junctions")))
+                    combined["vessels"].extend(_as_list(processed.get("vessels")))
 
-                if root_new is None:
-                    raise RuntimeError(f"Could not find root vessel in {path.name} (expected inlet BC {inlet_remove}).")
-                if side == "inlet":
-                    inlet_roots[org_id] = root_new
-                else:
-                    outlet_roots[org_id] = root_new
+                    if root_new is None:
+                        raise RuntimeError(f"Could not find root vessel in {path.name} (expected inlet BC {inlet_remove}).")
+                    if side == "inlet":
+                        inlet_roots[org_id] = root_new
+                    else:
+                        outlet_roots[org_id] = root_new
 
         # Build channel model
-                channel_xlsx = Path(args.channel_xlsx).resolve() if args.channel_xlsx else None
+        channel_xlsx = Path(args.channel_xlsx).resolve() if args.channel_xlsx else None
         channel_rows = _read_channel_table(channel_xlsx)
         channel_vessels, channel_bcs, seg_to_vid, next_vid, channel_recs = build_channel_model(
             rows=channel_rows,
@@ -932,6 +1033,7 @@ def main() -> None:
             next_vessel_id=next_vid,
             inlet_roots=inlet_roots,
             outlet_roots=outlet_roots,
+            organoid_ids=organoid_ids,
         )
         combined["vessels"].extend(leak_vessels)
         combined["boundary_conditions"].extend(leak_bcs)
@@ -949,6 +1051,7 @@ def main() -> None:
 
         validate_model(combined)
         _save_json(out_path, combined)
+        print(f"[info] Wrote combined deck: {out_path}")
 
         rename_map = {
             "records": [
@@ -964,6 +1067,7 @@ def main() -> None:
             ]
         }
         _save_json(map_path, rename_map)
+        print(f"[info] Wrote rename map: {map_path}")
 
     finally:
         if temp_dir and temp_dir.exists():
