@@ -209,8 +209,8 @@ def zero_all_interface_bcs(deck: dict, n_organoids: int) -> None:
             ensure_pressure_bc(bc)
             set_bc_constant(bc, "P", 0.0)
         for bc in outlet_bcs:
-            ensure_flow_bc(bc)
-            set_bc_constant(bc, "Q", 0.0)
+            ensure_pressure_bc(bc)
+            set_bc_constant(bc, "P", 0.0)
         for bc in leak_art:
             ensure_flow_bc(bc)
             set_bc_constant(bc, "Q", 0.0)
@@ -224,13 +224,15 @@ def apply_organoid_interface_from_json(
     organoid_idx: int,
     iface: dict,
     relax: float,
+    allow_missing_terminal_bcs: bool = False,
 ) -> None:
     p_in = iface.get("p_inlet_nodes", [])
-    q_out = iface.get("q_outlet", [])
+    p_out = iface.get("p_outlet_nodes", [])
     artery_leak = float(iface.get("q_artery_leak", 0.0))
     vein_leak = float(iface.get("q_venous_leak", 0.0))
+    skip_1d = bool(iface.get("skip_1d", False))
 
-    if not isinstance(p_in, list) or not isinstance(q_out, list):
+    if not isinstance(p_in, list) or not isinstance(p_out, list):
         die(f"interface_bc.json for organoid_{organoid_idx} missing p_inlet_nodes or p_outlet_nodes")
 
     inlet_bcs = find_bcs_with_prefix(deck, f"organoid{organoid_idx}_inlet_OUT")
@@ -238,18 +240,22 @@ def apply_organoid_interface_from_json(
     leak_art = find_bcs_with_prefix(deck, f"LEAK_ART_{organoid_idx}")
     leak_ven = find_bcs_with_prefix(deck, f"LEAK_VEN_{organoid_idx}")
 
-    if len(inlet_bcs) == 0 or len(outlet_bcs) == 0:
+    if (len(inlet_bcs) == 0 or len(outlet_bcs) == 0) and not (allow_missing_terminal_bcs or skip_1d):
         die(f"Missing organoid interface BC groups for organoid {organoid_idx}")
+    if len(inlet_bcs) == 0 and len(p_in) > 0:
+        die(f"Organoid {organoid_idx} has inlet pressures to apply but no inlet BC group in combined deck")
+    if len(outlet_bcs) == 0 and len(p_out) > 0:
+        die(f"Organoid {organoid_idx} has outlet pressures to apply but no outlet BC group in combined deck")
 
     m = min(len(inlet_bcs), len(p_in))
     for j in range(m):
         ensure_pressure_bc(inlet_bcs[j])
         set_bc_relaxed(inlet_bcs[j], "P", float(p_in[j]), relax)
 
-    m = min(len(outlet_bcs), len(q_out))
+    m = min(len(outlet_bcs), len(p_out))
     for j in range(m):
-        ensure_flow_bc(outlet_bcs[j])
-        set_bc_relaxed(outlet_bcs[j], "Q", float(-q_out[j]), relax)
+        ensure_pressure_bc(outlet_bcs[j])
+        set_bc_relaxed(outlet_bcs[j], "P", float(p_out[j]), relax)
 
     if leak_art:
         ensure_flow_bc(leak_art[0])
@@ -259,7 +265,12 @@ def apply_organoid_interface_from_json(
         set_bc_relaxed(leak_ven[0], "Q", float(-vein_leak), relax)
 
 
-def copy_seed_geometry(seed_run0: Path, run_dir: Path, n_organoids: int) -> None:
+def copy_seed_geometry(
+    seed_run0: Path,
+    run_dir: Path,
+    n_organoids: int,
+    no_synthetic_vasculature: bool = False,
+) -> None:
     tmp_mesh = seed_run0 / "_tmp_mesh"
     # Reuse run_all.py geometry copier to stay aligned with pipeline behavior.
     repo_src = Path(__file__).resolve().parents[1]
@@ -270,7 +281,12 @@ def copy_seed_geometry(seed_run0: Path, run_dir: Path, n_organoids: int) -> None
     def _copy_tmp_mesh_well(tmp_dir: Path, dst_geom: Path, k: int) -> None:
         dst_geom.mkdir(parents=True, exist_ok=True)
         # Copy canonical geometry/checkpoint files exactly as run_all.py does.
-        copy_shared_geometry_outputs(tmp_dir, dst_geom, well_idx=k)
+        copy_shared_geometry_outputs(
+            tmp_dir,
+            dst_geom,
+            well_idx=k,
+            copy_1d_artifacts=(not no_synthetic_vasculature),
+        )
 
         # Also copy branched-network XDMFs (+h5 sidecars), needed by generate_1d_files.
         src_in = tmp_dir / f"branched_network_inlet_well{k}.xdmf"
@@ -331,11 +347,20 @@ def sync_plot_templates(seed_run0: Path, run_dir: Path, n_organoids: int) -> Non
                     shutil.copy2(src, dst_dir / name)
 
 
-def copy_branching_files(trial_dir: Path, run_dir: Path, n_organoids: int) -> None:
+def copy_branching_files(
+    trial_dir: Optional[Path],
+    run_dir: Path,
+    n_organoids: int,
+    allow_missing: bool = False,
+) -> None:
     """
     Copy branchingData_0.csv and branchingData_1.csv from trial directory into
     each run/organoid_k folder.
     """
+    if trial_dir is None:
+        if allow_missing:
+            return
+        die("copy_branching_files requires a valid trial directory when allow_missing is false")
     for k in range(1, n_organoids + 1):
         src_org = trial_dir / f"organoid_{k}"
         dst_org = run_dir / f"organoid_{k}"
@@ -343,6 +368,8 @@ def copy_branching_files(trial_dir: Path, run_dir: Path, n_organoids: int) -> No
         for name in ("branchingData_0.csv", "branchingData_1.csv"):
             src = src_org / name
             if not src.exists():
+                if allow_missing:
+                    continue
                 die(f"Missing branching file: {src}")
             shutil.copy2(src, dst_org / name)
 
@@ -371,6 +398,68 @@ def read_seed_coords_from_branching(csv_path: Path, fallback: np.ndarray) -> np.
         return np.asarray(fallback, dtype=float).copy()
 
 
+def shifted_seed_fallback(base: np.ndarray, organoid_idx: int, dy_step: float) -> np.ndarray:
+    coords = np.asarray(base, dtype=float).copy()
+    coords[1] += -float(dy_step) * float(organoid_idx - 1)
+    return coords
+
+
+def _latest_named_row(csv_path: Path, vessel_name: str) -> Optional[dict]:
+    if not csv_path.exists():
+        return None
+
+    latest_row: Optional[dict] = None
+    latest_time = float("-inf")
+    with csv_path.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if str(row.get("name", "")).strip() != vessel_name:
+                continue
+            try:
+                t = float(row.get("time", 0.0))
+            except Exception:
+                t = 0.0
+            if latest_row is None or t >= latest_time:
+                latest_row = row
+                latest_time = t
+    return latest_row
+
+
+def _read_pressure_column(row: Optional[dict], column: str) -> Optional[float]:
+    if row is None:
+        return None
+    raw = row.get(column, None)
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def read_leak_pressures_from_output(
+    output_csv: Path,
+    organoid_idx: int,
+) -> tuple[Optional[float], Optional[float]]:
+    art_row = _latest_named_row(output_csv, f"leak_art_{organoid_idx}")
+    ven_row = _latest_named_row(output_csv, f"leak_ven_{organoid_idx}")
+    return _read_pressure_column(art_row, "pressure_out"), _read_pressure_column(ven_row, "pressure_out")
+
+def resolve_leak_pressures_for_darcy(
+    primary_output_csv: Path,
+    organoid_idx: int,
+    fallback_output_csv: Optional[Path] = None,
+) -> tuple[Optional[float], Optional[float]]:
+    p_art, p_ven = read_leak_pressures_from_output(primary_output_csv, organoid_idx)
+    if fallback_output_csv is not None and (p_art is None or p_ven is None):
+        fb_art, fb_ven = read_leak_pressures_from_output(fallback_output_csv, organoid_idx)
+        if p_art is None:
+            p_art = fb_art
+        if p_ven is None:
+            p_ven = fb_ven
+    return p_art, p_ven
+
+
 def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndarray, coords_outlet: np.ndarray, dy_step: float) -> None:
     repo_src = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_src / "geometry"))
@@ -393,8 +482,14 @@ def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndar
             geom / f"branched_network_outlet_well{k}.xdmf",
         )
 
-        c_in = read_seed_coords_from_branching(org / "branchingData_0.csv", np.asarray(coords_inlet, dtype=float))
-        c_out = read_seed_coords_from_branching(org / "branchingData_1.csv", np.asarray(coords_outlet, dtype=float))
+        c_in = read_seed_coords_from_branching(
+            org / "branchingData_0.csv",
+            shifted_seed_fallback(np.asarray(coords_inlet, dtype=float), k, dy_step),
+        )
+        c_out = read_seed_coords_from_branching(
+            org / "branchingData_1.csv",
+            shifted_seed_fallback(np.asarray(coords_outlet, dtype=float), k, dy_step),
+        )
 
         mesh_mod.current_dir = geom
         mesh_mod.generate_1d_files(
@@ -415,13 +510,35 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
     darcy_script = Path(args.darcy_script).expanduser().resolve()
     if not darcy_script.exists():
         die(f"Missing Darcy script: {darcy_script}")
+    output_csv = run_dir / "output.csv"
+    trial_output_csv = None
+    if getattr(args, "trial_dir", ""):
+        trial_output_csv = Path(args.trial_dir).expanduser().resolve() / "output.csv"
 
     for k in range(1, args.n_organoids + 1):
         org = run_dir / f"organoid_{k}"
         geom = org / "geometry"
-        c_in = read_seed_coords_from_branching(org / "branchingData_0.csv", np.array(args.coords_inlet, dtype=float))
-        c_out = read_seed_coords_from_branching(org / "branchingData_1.csv", np.array(args.coords_outlet, dtype=float))
+        c_in = read_seed_coords_from_branching(
+            org / "branchingData_0.csv",
+            shifted_seed_fallback(np.array(args.coords_inlet, dtype=float), k, args.dy_step),
+        )
+        c_out = read_seed_coords_from_branching(
+            org / "branchingData_1.csv",
+            shifted_seed_fallback(np.array(args.coords_outlet, dtype=float), k, args.dy_step),
+        )
         perm_region_path = resolve_perm_region_for_organoid(args.perm_region_root, k) if args.perm_region_root else ""
+        fallback_inlet_pressure = float(args.fallback_inlet_pressure)
+        fallback_outlet_pressure = float(args.fallback_outlet_pressure)
+        if args.no_synthetic_vasculature:
+            p_art, p_ven = resolve_leak_pressures_for_darcy(
+                output_csv,
+                k,
+                fallback_output_csv=trial_output_csv,
+            )
+            if p_art is not None:
+                fallback_inlet_pressure = float(p_art)
+            if p_ven is not None:
+                fallback_outlet_pressure = float(p_ven)
 
         darcy_args = [
             "--bioreactor-domain", str(geom / "bioreactor.xdmf"),
@@ -441,9 +558,12 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
             "--concave-bc-mode", str(args.concave_bc_mode),
             "--lp-arterial", str(args.lp_arterial),
             "--lp-venous", str(args.lp_venous),
+            *(["--skip-1d"] if args.no_synthetic_vasculature else []),
+            "--fallback-inlet-pressure", str(fallback_inlet_pressure),
+            "--fallback-outlet-pressure", str(fallback_outlet_pressure),
             "--out-dir", str(org),
         ]
-        if darcy_script.stem == "darcy_p1_lm_interior" and perm_region_path:
+        if darcy_script.stem in {"darcy_p1_lm_interior", "darcy_mixed"} and perm_region_path:
             darcy_args.extend([
                 "--perm-region-path", perm_region_path,
                 "--perm-low", str(args.perm_low),
@@ -475,14 +595,73 @@ def _max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
     return float(np.max(np.abs(aa - bb) / den))
 
 
-def convergence_for_organoid(iface_path: Path, tol_q: float, tol_p: float) -> tuple[bool, float, float]:
+def _bc_scalar_value(bc: Optional[dict], key: str) -> Optional[float]:
+    if bc is None:
+        return None
+    vals = bc.get("bc_values", {})
+    arr = vals.get(key, None)
+    if isinstance(arr, list) and len(arr) > 0:
+        try:
+            return float(arr[0])
+        except Exception:
+            return None
+    return None
+
+
+def _current_leak_flow_targets(deck: dict, organoid_idx: int) -> Optional[np.ndarray]:
+    leak_art = find_bcs_with_prefix(deck, f"LEAK_ART_{organoid_idx}")
+    leak_ven = find_bcs_with_prefix(deck, f"LEAK_VEN_{organoid_idx}")
+    q_art_bc = _bc_scalar_value(leak_art[0], "Q") if leak_art else None
+    q_ven_bc = _bc_scalar_value(leak_ven[0], "Q") if leak_ven else None
+    if q_art_bc is None or q_ven_bc is None:
+        return None
+    # Deck BCs are stored with opposite sign from Darcy leak fluxes.
+    return np.asarray([-q_art_bc, -q_ven_bc], dtype=float)
+
+
+def convergence_for_organoid(
+    iface_path: Path,
+    tol_q: float,
+    tol_p: float,
+    prev_iface_path: Optional[Path] = None,
+    current_deck: Optional[dict] = None,
+    organoid_idx: Optional[int] = None,
+) -> tuple[bool, float, float]:
     iface = load_json(iface_path)
+    if bool(iface.get("skip_1d", False)):
+        q = np.asarray(
+            [iface.get("q_artery_leak", 0.0), iface.get("q_venous_leak", 0.0)],
+            dtype=float,
+        )
+        q_t: Optional[np.ndarray] = None
+        if current_deck is not None and organoid_idx is not None:
+            q_t = _current_leak_flow_targets(current_deck, organoid_idx)
+        if q_t is None:
+            return False, float("inf"), float("inf")
+        p = np.asarray(
+            [iface.get("p_concave_inlet_bc", 0.0), iface.get("p_concave_outlet_bc", 0.0)],
+            dtype=float,
+        )
+        if prev_iface_path is None or not prev_iface_path.exists():
+            return False, float("inf"), float("inf")
+        prev = load_json(prev_iface_path)
+        p_t = np.asarray(
+            [prev.get("p_concave_inlet_bc", 0.0), prev.get("p_concave_outlet_bc", 0.0)],
+            dtype=float,
+        )
+        rq = _max_rel(q, q_t, floor=1e-20)
+        rp = _max_rel(p, p_t, floor=1e-12)
+        return (rq <= tol_q and rp <= tol_p), rq, rp
+
     q = np.asarray(iface.get("q_inlet", []), dtype=float)
     q_t = np.asarray(iface.get("q_inlet_target", []), dtype=float)
     p_in = np.asarray(iface.get("p_inlet_nodes", []), dtype=float)
     p_in_t = np.asarray(iface.get("p_inlet_target", []), dtype=float)
     p_out = np.asarray(iface.get("p_outlet_nodes", []), dtype=float)
     p_out_t = np.asarray(iface.get("p_outlet_target", []), dtype=float)
+
+    if q.size == 0 and q_t.size == 0 and p_in.size == 0 and p_out.size == 0:
+        return False, float("inf"), float("inf")
 
     rq = _max_rel(q, q_t, floor=1e-20)
     rp = max(_max_rel(p_in, p_in_t, floor=1e-12), _max_rel(p_out, p_out_t, floor=1e-12))
@@ -491,12 +670,12 @@ def convergence_for_organoid(iface_path: Path, tol_q: float, tol_p: float) -> tu
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Organoid coupling driver with geometry reuse + P1-LM Darcy.")
-    ap.add_argument("--template-combined", default="../prep/prepped/trial-8/combined.in")
-    ap.add_argument("--trial-dir", default="../prep/prepped/trial-8/",
-                    help="Directory containing organoid_k/branchingData_{0,1}.csv")
-    ap.add_argument("--seed-run0", default="../prep/coupled/run_0",
+    ap.add_argument("--template-combined", default="../prep/prepped/trial-9/combined.in")
+    ap.add_argument("--trial-dir", default="../prep/prepped/trial-9/",
+                    help="Optional trial directory used to copy branchingData_{0,1}.csv into each run. Not required in --no-synthetic-vasculature mode.")
+    ap.add_argument("--seed-run0", default="../prep/coupled-no-vasc/run_0",
                     help="Existing run_0 folder with 3D meshing/tagging to reuse.")
-    ap.add_argument("--coupled-root", default="../coupling-output")
+    ap.add_argument("--coupled-root", default="../coupling-output-no-vasc",)
 
     ap.add_argument("--n-organoids", type=int, default=4)
     ap.add_argument("--n-ramp", type=int, default=10)
@@ -514,7 +693,7 @@ def parse_args() -> argparse.Namespace:
 
     ap.add_argument("--svzerodsolver", default="svzerodsolver")
     ap.add_argument("--run-and-split", default="../prep/run_and_split_svzerod.py")
-    ap.add_argument("--darcy-script", default="../solves/darcy_p1_lm_interior.py")
+    ap.add_argument("--darcy-script", default="../solves/darcy_mixed.py")
     ap.add_argument("--darcy-mpi-procs", type=int, default=1,
                     help="MPI ranks for Darcy solves (1 = serial).")
     ap.add_argument("--darcy-mpirun-cmd", default="/opt/miniconda3/envs/fenicsx-env/bin/mpiexec.hydra",
@@ -532,6 +711,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet")
     ap.add_argument("--lp-arterial", type=float, default=0.0)
     ap.add_argument("--lp-venous", type=float, default=0.0)
+    ap.add_argument("--no-synthetic-vasculature", action="store_true",
+                    help="Use leak pressures to drive Darcy and skip organoid 1D terminal coupling.")
+    ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0,
+                    help="Fallback arterial concave pressure when leak_art_k is unavailable in output.csv.")
+    ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0,
+                    help="Fallback venous concave pressure when leak_ven_k is unavailable in output.csv.")
 
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--debug", action="store_true")
@@ -547,47 +732,62 @@ def main() -> None:
     seed_run0 = Path(args.seed_run0).expanduser().resolve()
     if not seed_run0.exists():
         die(f"Seed run_0 does not exist: {seed_run0}")
-    trial_dir = Path(args.trial_dir).expanduser().resolve()
-    if not trial_dir.exists():
-        die(f"Trial directory does not exist: {trial_dir}")
+    trial_dir: Optional[Path] = None
+    if args.trial_dir:
+        candidate_trial_dir = Path(args.trial_dir).expanduser().resolve()
+        if candidate_trial_dir.exists():
+            trial_dir = candidate_trial_dir
+        elif not args.no_synthetic_vasculature:
+            die(f"Trial directory does not exist: {candidate_trial_dir}")
 
     coupled_root = Path(args.coupled_root).expanduser().resolve()
-    # coupled_root.mkdir(parents=True, exist_ok=True)
+    coupled_root.mkdir(parents=True, exist_ok=True)
 
-    # # Build run_0
-    # run0 = coupled_root / "run_0"
-    # if run0.exists() and args.overwrite:
-    #     shutil.rmtree(run0)
-    # run0.mkdir(parents=True, exist_ok=True)
-    # combined0 = run0 / "combined.in"
-    # shutil.copy2(template, combined0)
-    # deck0 = load_json(combined0)
-    # apply_channel_ramp(
-    #     deck0,
-    #     args.channel_inlet_bc,
-    #     Q0=float(args.channel_inlet_Q0),
-    #     scale=0.0,
-    #     outlet_name=args.channel_outlet_bc if args.use_outlet_pressure_ramp else None,
-    #     outlet_P0=float(args.channel_outlet_P0),
-    # )
-    # zero_all_interface_bcs(deck0, args.n_organoids)
-    # save_json(combined0, deck0)
-    # ensure_organoid_dirs(run0, args.n_organoids)
-    # sync_plot_templates(seed_run0, run0, args.n_organoids)
+    # Build run_0
+    run0 = coupled_root / "run_0"
+    if run0.exists() and args.overwrite:
+        shutil.rmtree(run0)
+    run0.mkdir(parents=True, exist_ok=True)
+    combined0 = run0 / "combined.in"
+    shutil.copy2(template, combined0)
+    deck0 = load_json(combined0)
+    apply_channel_ramp(
+        deck0,
+        args.channel_inlet_bc,
+        Q0=float(args.channel_inlet_Q0),
+        scale=0.0,
+        outlet_name=args.channel_outlet_bc if args.use_outlet_pressure_ramp else None,
+        outlet_P0=float(args.channel_outlet_P0),
+    )
+    zero_all_interface_bcs(deck0, args.n_organoids)
+    save_json(combined0, deck0)
+    ensure_organoid_dirs(run0, args.n_organoids)
+    sync_plot_templates(seed_run0, run0, args.n_organoids)
 
-    # run([
-    #     sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
-    #     "--exe", args.svzerodsolver,
-    #     "--input", str(combined0),
-    #     "--outdir", str(run0),
-    #     "--output", "output.csv",
-    #     "--organoid-root", str(run0),
-    # ] + (["--debug"] if args.debug else []))
+    run([
+        sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
+        "--exe", args.svzerodsolver,
+        "--input", str(combined0),
+        "--outdir", str(run0),
+        "--output", "output.csv",
+        "--organoid-root", str(run0),
+    ] + (["--debug"] if args.debug else []))
 
-    # copy_seed_geometry(seed_run0, run0, args.n_organoids)
-    # copy_branching_files(trial_dir, run0, args.n_organoids)
-    # update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
-    # run_darcy_for_all(run0, args)
+    copy_seed_geometry(
+        seed_run0,
+        run0,
+        args.n_organoids,
+        no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
+    )
+    copy_branching_files(
+        trial_dir,
+        run0,
+        args.n_organoids,
+        allow_missing=bool(args.no_synthetic_vasculature),
+    )
+    if not args.no_synthetic_vasculature:
+        update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
+    run_darcy_for_all(run0, args)
 
     # Coupling loop: ramp then iterate to convergence
     total_steps = int(args.n_ramp) + int(args.max_iter)
@@ -619,6 +819,7 @@ def main() -> None:
                 k,
                 load_json(iface_prev),
                 relax=float(args.relaxation),
+                allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
             )
         save_json(combined_i, deck)
         ensure_organoid_dirs(cur, args.n_organoids)
@@ -633,9 +834,20 @@ def main() -> None:
             "--organoid-root", str(cur),
         ] + (["--debug"] if args.debug else []))
 
-        copy_seed_geometry(seed_run0, cur, args.n_organoids)
-        copy_branching_files(trial_dir, cur, args.n_organoids)
-        update_1d_checkpoints(cur, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
+        copy_seed_geometry(
+            seed_run0,
+            cur,
+            args.n_organoids,
+            no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
+        )
+        copy_branching_files(
+            trial_dir,
+            cur,
+            args.n_organoids,
+            allow_missing=bool(args.no_synthetic_vasculature),
+        )
+        if not args.no_synthetic_vasculature:
+            update_1d_checkpoints(cur, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
         run_darcy_for_all(cur, args)
 
         # convergence after ramp
@@ -643,8 +855,16 @@ def main() -> None:
             all_ok = True
             print(f"\n[check] coupling iteration {i - args.n_ramp}/{args.max_iter}")
             for k in range(1, args.n_organoids + 1):
+                iface_prev = prev / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
                 iface_cur = cur / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
-                ok, rq, rp = convergence_for_organoid(iface_cur, tol_q=args.tol_q, tol_p=args.tol_p)
+                ok, rq, rp = convergence_for_organoid(
+                    iface_cur,
+                    tol_q=args.tol_q,
+                    tol_p=args.tol_p,
+                    prev_iface_path=(iface_prev if args.no_synthetic_vasculature else None),
+                    current_deck=(deck if args.no_synthetic_vasculature else None),
+                    organoid_idx=(k if args.no_synthetic_vasculature else None),
+                )
                 all_ok = all_ok and ok
                 print(f"  organoid_{k}: rel_q={rq:.3e}, rel_p={rp:.3e}, converged={ok}")
             if all_ok:
