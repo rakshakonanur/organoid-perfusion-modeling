@@ -40,3 +40,8 @@ ucsf/
 *.avi
 src/synthetic-vasculature-generation/0D_Output/
 src/coupling-output-old/
+src/coupling-output-masked/
+src/coupling-output-no-synthetic/
+src/coupling-output-no-vasc/
+src/prep/coupled-no-vasc/
+*.asv
