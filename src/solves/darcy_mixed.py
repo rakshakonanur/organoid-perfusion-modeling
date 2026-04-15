@@ -1271,6 +1271,8 @@ if __name__ == "__main__":
     ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
     ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
     ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
+    ap.add_argument("--checkpoint-time-index", type=int, default=-1,
+                    help="Checkpoint time index to read from 1D pressure/flow/area histories (-1 = last).")
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.175, 0.9, 0.55])
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.175, 0.9, 0.55])
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet",
@@ -1326,6 +1328,7 @@ if __name__ == "__main__":
         skip_1d=args.skip_1d,
         fallback_inlet_pressure=args.fallback_inlet_pressure,
         fallback_outlet_pressure=args.fallback_outlet_pressure,
+        checkpoint_time_index=args.checkpoint_time_index,
         inlet_flux_correction=args.inlet_flux_correction,
         inlet_flux_corr_max_iter=args.inlet_flux_corr_max_iter,
         inlet_flux_corr_relax=args.inlet_flux_corr_relax,

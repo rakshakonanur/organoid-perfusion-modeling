@@ -142,6 +142,22 @@ def import_area_data(mesh_obj, bp_file: str, comm=MPI.COMM_WORLD):
     return out   # list of Functions
 
 
+def select_checkpoint_entry(history, checkpoint_time_index: int, label: str):
+    if not history:
+        raise ValueError(f"No checkpoint entries found for {label}")
+
+    n_hist = len(history)
+    idx = int(checkpoint_time_index)
+    if idx < 0:
+        idx += n_hist
+    if idx < 0 or idx >= n_hist:
+        raise IndexError(
+            f"checkpoint_time_index={checkpoint_time_index} is out of range for {label} "
+            f"(available entries: {n_hist})"
+        )
+    return history[idx]
+
+
 # ===================================================================
 #                PERFUSION SOLVER WITH FULL COUPLING
 # ===================================================================
@@ -160,6 +176,7 @@ class PerfusionSolver:
                  skip_1d: bool = False,
                  fallback_inlet_pressure: float = 0.0,
                  fallback_outlet_pressure: float = 0.0,
+                 checkpoint_time_index: int = -1,
                  inlet_flux_correction: bool = False,
                  inlet_flux_corr_max_iter: int = 5,
                  inlet_flux_corr_relax: float = 0.5,
@@ -184,6 +201,7 @@ class PerfusionSolver:
         self.skip_1d = bool(skip_1d)
         self.fallback_inlet_pressure = float(fallback_inlet_pressure)
         self.fallback_outlet_pressure = float(fallback_outlet_pressure)
+        self.checkpoint_time_index = int(checkpoint_time_index)
 
         # 1D tree terminal territory meshes/checkpoints.
         # Read only on rank 0 (COMM_SELF), then broadcast sampled arrays with
@@ -210,21 +228,39 @@ class PerfusionSolver:
                 self.outlet_mesh, self.outlet_tags = import_mesh(mesh_outlet_file, comm=MPI.COMM_SELF)
 
                 print("[1d] Rank 0 reading pressure checkpoints", flush=True)
-                self.p_A_k = import_pressure_data(self.inlet_mesh, pres_inlet_file, comm=MPI.COMM_SELF)[-1]
-                self.p_V_k = import_pressure_data(self.outlet_mesh, pres_outlet_file, comm=MPI.COMM_SELF)[-1]
+                p_in_hist = import_pressure_data(self.inlet_mesh, pres_inlet_file, comm=MPI.COMM_SELF)
+                p_out_hist = import_pressure_data(self.outlet_mesh, pres_outlet_file, comm=MPI.COMM_SELF)
+                self.p_A_k = select_checkpoint_entry(
+                    p_in_hist, self.checkpoint_time_index, "inlet pressure checkpoints"
+                )
+                self.p_V_k = select_checkpoint_entry(
+                    p_out_hist, self.checkpoint_time_index, "outlet pressure checkpoints"
+                )
 
                 print("[1d] Rank 0 reading flow checkpoints", flush=True)
-                self.q_A_k = import_flow_data(self.inlet_mesh, flow_inlet_file, comm=MPI.COMM_SELF)[-1]
-                self.q_V_k = import_flow_data(self.outlet_mesh, flow_outlet_file, comm=MPI.COMM_SELF)[-1]
+                q_in_hist = import_flow_data(self.inlet_mesh, flow_inlet_file, comm=MPI.COMM_SELF)
+                q_out_hist = import_flow_data(self.outlet_mesh, flow_outlet_file, comm=MPI.COMM_SELF)
+                self.q_A_k = select_checkpoint_entry(
+                    q_in_hist, self.checkpoint_time_index, "inlet flow checkpoints"
+                )
+                self.q_V_k = select_checkpoint_entry(
+                    q_out_hist, self.checkpoint_time_index, "outlet flow checkpoints"
+                )
 
                 self.a_A_k = None
                 self.a_V_k = None
                 if area_inlet_file is not None and Path(area_inlet_file).exists():
                     print("[1d] Rank 0 reading inlet area checkpoint", flush=True)
-                    self.a_A_k = import_area_data(self.inlet_mesh, area_inlet_file, comm=MPI.COMM_SELF)[-1]
+                    a_in_hist = import_area_data(self.inlet_mesh, area_inlet_file, comm=MPI.COMM_SELF)
+                    self.a_A_k = select_checkpoint_entry(
+                        a_in_hist, self.checkpoint_time_index, "inlet area checkpoints"
+                    )
                 if area_outlet_file is not None and Path(area_outlet_file).exists():
                     print("[1d] Rank 0 reading outlet area checkpoint", flush=True)
-                    self.a_V_k = import_area_data(self.outlet_mesh, area_outlet_file, comm=MPI.COMM_SELF)[-1]
+                    a_out_hist = import_area_data(self.outlet_mesh, area_outlet_file, comm=MPI.COMM_SELF)
+                    self.a_V_k = select_checkpoint_entry(
+                        a_out_hist, self.checkpoint_time_index, "outlet area checkpoints"
+                    )
 
                 print("[1d] Rank 0 sampling terminal data", flush=True)
                 self._extract_terminal_data()
@@ -1789,6 +1825,8 @@ if __name__ == "__main__":
     ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
     ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
     ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
+    ap.add_argument("--checkpoint-time-index", type=int, default=-1,
+                    help="Checkpoint time index to read from 1D pressure/flow/area histories (-1 = last).")
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.175, 0.9, 0.55])
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.175, 0.9, 0.55])
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet",
@@ -1830,6 +1868,7 @@ if __name__ == "__main__":
         skip_1d=args.skip_1d,
         fallback_inlet_pressure=args.fallback_inlet_pressure,
         fallback_outlet_pressure=args.fallback_outlet_pressure,
+        checkpoint_time_index=args.checkpoint_time_index,
         inlet_flux_correction=args.inlet_flux_correction,
         inlet_flux_corr_max_iter=args.inlet_flux_corr_max_iter,
         inlet_flux_corr_relax=args.inlet_flux_corr_relax,
