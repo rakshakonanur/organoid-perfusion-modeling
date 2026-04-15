@@ -1,0 +1,10 @@
+name: fenicsx-env
+channels:
+  - defaults
+dependencies:
+  - pyvista
+  - fenics-dolfinx
+  - mpich
+  - vtk
+  - adios4dolfinx
+prefix: /opt/miniconda3/envs/fenicsx-env
