@@ -27,6 +27,19 @@ class Generate:
     def __init__(self):
         pass
 
+    @staticmethod
+    def _make_tree_parameters(**kwargs):
+        """
+        Support both legacy and newer svVascularize TreeParameters APIs.
+        """
+        try:
+            return TreeParameters(**kwargs)
+        except TypeError:
+            params = TreeParameters()
+            for key, value in kwargs.items():
+                setattr(params, key, value)
+            return params
+
     def set_parameters(self,**kwargs):
         self.parameters = {}
         self.parameters['k']    = kwargs.get('k',2)
@@ -143,11 +156,7 @@ class Generate:
         root = self.parameters['inlet'].reshape(1,-1)
         direction = self.parameters['inlet_normal']
         num_branches = self.parameters['num_branches']
-        print("TreeParameters ref:", TreeParameters)
-        print("Defined in module:", getattr(TreeParameters, "__module__", "?"))
-        print("Signature:", inspect.signature(TreeParameters))
-        print("Source file:", inspect.getsourcefile(TreeParameters))
-        params = TreeParameters(terminal_pressure=50.0*1333.22,
+        params = self._make_tree_parameters(terminal_pressure=50.0*1333.22,
                         root_pressure=120.0*1333.22,
                         terminal_flow=0.03/60/num_branches)
         cerm_tree = Tree()
@@ -175,12 +184,12 @@ class Generate:
         folder = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep
         cerm_forest = Forest(n_networks=number_of_networks, n_trees_per_network=trees_per_network,physical_clearance=1e-4,compete=True) 
         cerm_forest.set_domain(cermSurf)
-        params_inlet = TreeParameters(terminal_pressure=0.01*1333.22,
+        params_inlet = self._make_tree_parameters(terminal_pressure=0.01*1333.22,
                         root_pressure=0.02*1333.22,
                         terminal_flow=1e-5/60/num_branches,
                         fluid_density = 1.0,
                         kinematic_viscosity = 0.007)
-        params_outlet = TreeParameters(terminal_pressure=0.0*1333.22,
+        params_outlet = self._make_tree_parameters(terminal_pressure=0.0*1333.22,
                         root_pressure=0.01*1333.22,
                         terminal_flow=1e-5/60/num_branches,
                         fluid_density = 1.0,
@@ -197,9 +206,10 @@ class Generate:
             for j in range(trees_per_network[i]): # currently only writes the first network, can be modified to write all networks
                 self.data = networks[0][j].data
                 self.save_data(filename="branchingData_{}.csv".format(j))
-                merged_model = networks[0][j].export_solid(watertight=False) # use watertight = True for 3d models
-                os.makedirs(outdir+os.sep+"3d_tmp", exist_ok=True)
-                merged_model.save(outdir+os.sep+"3d_tmp"+os.sep+"geom3D_{}.vtp".format(j))
+                solid_outdir = outdir + os.sep + "3d_tmp"
+                os.makedirs(solid_outdir, exist_ok=True)
+                merged_model = networks[0][j].export_solid(outdir=solid_outdir, watertight=False) # use watertight = True for 3d models
+                merged_model.save(solid_outdir + os.sep + "geom3D_{}.vtp".format(j))
 
         # cerm_forest.connect() # suppressed for now
         # cerm_forest.connections.tree_connections[0].show().show()
@@ -276,7 +286,7 @@ class Generate:
         from svv.simulation.fluid.rom.zero_d.zerod_tree import export_0d_simulation
         # sim = Simulation(tree=cerm_tree)
         export_0d_simulation(tree=cerm_tree, get_0d_solver=False, path_to_0d_solver=path_to_0d_solver,outdir=outdir,folder=folder,number_cardiac_cycles=num_cardiac_cycles,
-                             number_time_pts_per_cycle=num_time_pts_per_cycle,distal_pressure=distal_pressure, geom_filename="geom.csv", scaled=scaled, capacitance=False)
+                             number_time_pts_per_cycle=num_time_pts_per_cycle,distal_pressure=distal_pressure, geom_filename="geom.csv", capacitance=False)
         if scaled:
             edit_flows = False
         else:
