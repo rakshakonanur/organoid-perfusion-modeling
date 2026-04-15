@@ -17,10 +17,25 @@
                 <prop key="Original File" value="steady.flow"/>
                 <prop key="Period" value="1.0"/>
                 <prop key="Point Number" value="201"/>
+                <prop key="Pressure" value=""/>
+                <prop key="Pressure Period" value=""/>
+                <prop key="Pressure Scaling" value=""/>
+                <prop key="Timed Pressure" value=""/>
+                <prop key="Values" value=""/>
             </cap>
             <cap name="outlet">
+                <prop key="Analytic Shape" value=""/>
                 <prop key="BC Type" value="Resistance"/>
+                <prop key="Flip Normal" value=""/>
+                <prop key="Flow Rate" value=""/>
+                <prop key="Fourier Modes" value=""/>
+                <prop key="Original File" value=""/>
+                <prop key="Period" value=""/>
+                <prop key="Point Number" value=""/>
                 <prop key="Pressure" value="0"/>
+                <prop key="Pressure Period" value=""/>
+                <prop key="Pressure Scaling" value=""/>
+                <prop key="Timed Pressure" value=""/>
                 <prop key="Values" value="1"/>
             </cap>
         </cap_props>

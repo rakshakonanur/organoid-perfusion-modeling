@@ -1,6 +1,6 @@
 clc; clear; close all;
 
-t = linspace(0,200/120,166);
+t = linspace(0,200/120/3,30);
 beta = 2.65; % parameter that determines the pulsatility
 Nr = 3; % number of rollers
 Q_bar = 3.62/60; % average flow rate in mL/s

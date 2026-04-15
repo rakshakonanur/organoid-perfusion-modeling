@@ -45,3 +45,5 @@ src/coupling-output-no-synthetic/
 src/coupling-output-no-vasc/
 src/prep/coupled-no-vasc/
 *.asv
+coupling-output-transient/
+*.pvd

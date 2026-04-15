@@ -1345,9 +1345,9 @@
     ],
     "simulation_parameters": {
         "density": 1.0,
-        "model_name": "fluid-domain",
-        "number_of_cardiac_cycles": 1,
-        "number_of_time_pts_per_cardiac_cycle": 16,
+        "model_name": "held-down-no-taper",
+        "number_of_cardiac_cycles": 3,
+        "number_of_time_pts_per_cardiac_cycle": 166,
         "viscosity": 0.007
     },
     "vessels": [

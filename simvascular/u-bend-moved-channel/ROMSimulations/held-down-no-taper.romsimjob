@@ -191,8 +191,8 @@
         <convert_results_props>
             <prop key="Export NumPy" value="1"/>
             <prop key="Project Centerlines" value="1"/>
-            <prop key="Project To 3D Mesh" value="0"/>
-            <prop key="Simulation Name" value="3d-sim"/>
+            <prop key="Project To 3D Mesh" value="1"/>
+            <prop key="Simulation Name" value="3d-sim-held-down"/>
         </convert_results_props>
         <mesh_props>
             <prop key="Adaptive Meshing" value="0"/>
@@ -205,9 +205,9 @@
         </wall_props>
         <var_props/>
         <solver_props>
-            <prop key="Number of Timesteps" value="10"/>
+            <prop key="Number of Timesteps" value="100"/>
             <prop key="Number of Timesteps between Saving Data" value="1"/>
-            <prop key="Time Step Size" value="0.1"/>
+            <prop key="Time Step Size" value="0.01"/>
         </solver_props>
         <run_props/>
     </job>

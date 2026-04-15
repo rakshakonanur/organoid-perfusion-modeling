@@ -110,10 +110,10 @@
 [DEBUG MESSAGE] Setup degrees-of-freedom of blocks
 [DEBUG MESSAGE] Setup model-dependent parameters
 [DEBUG MESSAGE] Load initial condition
-[DEBUG MESSAGE] Cardiac cycle period 1
+[DEBUG MESSAGE] Cardiac cycle period 1.66667
 [DEBUG MESSAGE] Calculate steady initial condition
 [DEBUG MESSAGE] Setup initial state dependent parameters
 [DEBUG MESSAGE] Setup time integration
 [DEBUG MESSAGE] Run time integration
-[DEBUG MESSAGE] Avg. number of nonlinear iterations per time step: 1
+[DEBUG MESSAGE] Avg. number of nonlinear iterations per time step: 2.52929
 [DEBUG MESSAGE] Write output

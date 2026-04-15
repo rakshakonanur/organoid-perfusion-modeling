@@ -9,9 +9,9 @@
 [generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
 [generate-1d-mesh] INFO - Material model: LINEAR
 [generate-1d-mesh] INFO - Minimum number of finite elements per segment: 5
-[generate-1d-mesh] INFO - Model name: fluid-domain
+[generate-1d-mesh] INFO - Model name: held-down-no-taper
 [generate-1d-mesh] INFO - Model order: 0
-[generate-1d-mesh] INFO - Number of time steps: 10
+[generate-1d-mesh] INFO - Number of time steps: 100
 [generate-1d-mesh] INFO - Outflow bc file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u-bend-moved-channel/ROMSimulations/held-down-no-taper
 [generate-1d-mesh] INFO - Outflow bc type: ['resistance.dat']
 [generate-1d-mesh] INFO - Outlet face names file: '/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u-bend-moved-channel/ROMSimulations/held-down-no-taper/outlet_face_names.dat'.
@@ -20,7 +20,7 @@
 [generate-1d-mesh] INFO - Sub-segment size is adaptive: 0
 [generate-1d-mesh] INFO - Save data frequency: 1
 [generate-1d-mesh] INFO - Solver output file: solver_0d.json
-[generate-1d-mesh] INFO - Simulation time step: 0.100000
+[generate-1d-mesh] INFO - Simulation time step: 0.010000
 [generate-1d-mesh] INFO - Uniform boundary conditions: False
 [generate-1d-mesh] INFO - Units: cm
 [generate-1d-mesh] INFO - Viscosity: 0.007000
