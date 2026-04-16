@@ -496,6 +496,89 @@ def run_darcy_time_series(
             run(cmd)
 
 
+def run_darcy_time_series_batched(
+    iter_dir: Path,
+    args: argparse.Namespace,
+    selected_indices: np.ndarray,
+    selected_times: np.ndarray,
+    coupling_iteration: int,
+) -> None:
+    script = Path(args.darcy_timeseries_script).expanduser().resolve()
+    if not script.exists():
+        die(f"Missing Darcy time-series script: {script}")
+
+    output_csv = iter_dir / "output.csv"
+    write_fields = bool(
+        int(args.darcy_field_output_every) > 0
+        and int(coupling_iteration) > 0
+        and int(coupling_iteration) % int(args.darcy_field_output_every) == 0
+    )
+
+    for k in range(1, args.n_organoids + 1):
+        org = iter_dir / f"organoid_{k}"
+        geom = org / "geometry"
+        coords_in = read_seed_coords_from_branching(
+            org / "branchingData_0.csv",
+            shifted_seed_fallback(np.asarray(args.coords_inlet, dtype=float), k, args.dy_step),
+        )
+        coords_out = read_seed_coords_from_branching(
+            org / "branchingData_1.csv",
+            shifted_seed_fallback(np.asarray(args.coords_outlet, dtype=float), k, args.dy_step),
+        )
+        perm_region_path = resolve_perm_region_for_organoid(args.perm_region_root, k) if args.perm_region_root else ""
+        out_dir = org / "out_darcy_transient"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            sys.executable,
+            str(script),
+            "--bioreactor-domain", str(geom / "bioreactor.xdmf"),
+            "--facet-file", str(geom / "mesh_tags.xdmf"),
+            "--mesh-inlet-file", str(geom / "tagged_branches_inlet.bp"),
+            "--mesh-outlet-file", str(geom / "tagged_branches_outlet.bp"),
+            "--pres-inlet-file", str(geom / "pressure_checkpoint_inlet.bp"),
+            "--pres-outlet-file", str(geom / "pressure_checkpoint_outlet.bp"),
+            "--flow-inlet-file", str(geom / "flow_checkpoint_inlet.bp"),
+            "--flow-outlet-file", str(geom / "flow_checkpoint_outlet.bp"),
+            "--area-inlet-file", str(geom / "area_checkpoint_inlet.bp"),
+            "--area-outlet-file", str(geom / "area_checkpoint_outlet.bp"),
+            "--coords-inlet", *map(str, coords_in),
+            "--coords-outlet", *map(str, coords_out),
+            "--branching-in-file", str(org / "branchingData_0.csv"),
+            "--branching-out-file", str(org / "branchingData_1.csv"),
+            "--concave-bc-mode", str(args.concave_bc_mode),
+            "--lp-arterial", str(args.lp_arterial),
+            "--lp-venous", str(args.lp_venous),
+            "--fallback-inlet-pressure", str(args.fallback_inlet_pressure),
+            "--fallback-outlet-pressure", str(args.fallback_outlet_pressure),
+            "--organoid-index", str(k),
+            "--out-dir", str(out_dir),
+            "--time-indices", *[str(int(idx)) for idx in np.asarray(selected_indices, dtype=int)],
+            "--time-values", *[str(float(t)) for t in np.asarray(selected_times, dtype=float)],
+        ]
+        if args.no_synthetic_vasculature:
+            cmd.append("--skip-1d")
+            cmd.extend(["--leak-pressure-output-csv", str(output_csv)])
+        if perm_region_path:
+            cmd.extend([
+                "--perm-region-path", perm_region_path,
+                "--perm-low", str(args.perm_low),
+                "--perm-high", str(args.perm_high),
+                "--perm-transition-width", str(args.perm_transition_width),
+            ])
+        if write_fields:
+            cmd.append("--write-fields")
+        if int(args.darcy_mpi_procs) > 1:
+            mpi_launcher = resolve_mpi_launcher(str(args.darcy_mpirun_cmd))
+            cmd = [
+                mpi_launcher,
+                "-n",
+                str(args.darcy_mpi_procs),
+                *cmd,
+            ]
+        run(cmd)
+
+
 def max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
     aa = np.asarray(a, dtype=float).ravel()
     bb = np.asarray(b, dtype=float).ravel()
@@ -514,6 +597,25 @@ def collect_interface_waveforms(
 ) -> Dict[int, dict]:
     results: Dict[int, dict] = {}
     for k in range(1, n_organoids + 1):
+        timeseries_path = iter_dir / f"organoid_{k}" / "out_darcy_transient" / "interface_bc_timeseries.json"
+        if timeseries_path.exists():
+            raw = load_json(timeseries_path)
+            results[k] = {
+                "times": np.asarray(raw.get("times", selected_times), dtype=float),
+                "skip_1d": bool(raw.get("skip_1d", False)),
+                "p_inlet_nodes": np.asarray(raw.get("p_inlet_nodes", []), dtype=float),
+                "p_outlet_nodes": np.asarray(raw.get("p_outlet_nodes", []), dtype=float),
+                "q_artery_leak": np.asarray(raw.get("q_artery_leak", []), dtype=float),
+                "q_venous_leak": np.asarray(raw.get("q_venous_leak", []), dtype=float),
+                "q_inlet": np.asarray(raw.get("q_inlet", []), dtype=float),
+                "q_inlet_target": np.asarray(raw.get("q_inlet_target", []), dtype=float),
+                "p_inlet_target": np.asarray(raw.get("p_inlet_target", []), dtype=float),
+                "p_outlet_target": np.asarray(raw.get("p_outlet_target", []), dtype=float),
+                "p_concave_inlet_bc": np.asarray(raw.get("p_concave_inlet_bc", []), dtype=float),
+                "p_concave_outlet_bc": np.asarray(raw.get("p_concave_outlet_bc", []), dtype=float),
+            }
+            continue
+
         paths = [
             iter_dir / f"organoid_{k}" / "out_darcy_transient" / f"time_{int(idx):04d}" / "out_darcy" / "interface_bc.json"
             for idx in selected_indices
@@ -703,11 +805,16 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--svzerodsolver", default="svzerodsolver")
     ap.add_argument("--run-and-split", default=str(repo_src / "prep" / "run_and_split_svzerod.py"))
     ap.add_argument("--darcy-script", default=str(repo_src / "solves" / "darcy_mixed.py"))
+    ap.add_argument("--darcy-timeseries-script", default=str(repo_src / "solves" / "darcy_mixed_timeseries.py"))
     ap.add_argument("--darcy-mpi-procs", type=int, default=1,
                     help="MPI ranks for each Darcy solve (1 = serial).")
     ap.add_argument("--darcy-mpirun-cmd", default="/opt/miniconda3/envs/fenicsx-env/bin/mpiexec.hydra")
     ap.add_argument("--darcy-time-index-stride", type=int, default=1,
                     help="Solve Darcy every Nth transient checkpoint and always include the final checkpoint.")
+    ap.add_argument("--use-batched-darcy-timeseries", action="store_true",
+                    help="Run one mixed-Darcy process per organoid across all selected times and write interface_bc_timeseries.json.")
+    ap.add_argument("--darcy-field-output-every", type=int, default=0,
+                    help="Write p.xdmf/u.xdmf time series every N transient coupling iterations (0 disables field output).")
 
     ap.add_argument("--dy-step", type=float, default=0.6)
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-.28, 0.9, .5375])
@@ -846,6 +953,7 @@ def main() -> None:
                 "--outdir", str(iter_dir),
                 "--output", "output.csv",
                 "--organoid-root", str(iter_dir),
+                "--no-plot",
             ] + (["--debug"] if args.debug else []))
 
             if not args.no_synthetic_vasculature:
@@ -859,7 +967,11 @@ def main() -> None:
 
             output_times = read_unique_output_times(iter_dir / "output.csv")
             selected_indices, selected_times = select_time_indices(output_times, args.darcy_time_index_stride)
-            run_darcy_time_series(iter_dir, args, selected_indices, selected_times)
+            coupling_iteration = stage_idx * int(args.max_iter) + it + 1
+            if args.use_batched_darcy_timeseries:
+                run_darcy_time_series_batched(iter_dir, args, selected_indices, selected_times, coupling_iteration)
+            else:
+                run_darcy_time_series(iter_dir, args, selected_indices, selected_times)
 
             waveforms = collect_interface_waveforms(iter_dir, args.n_organoids, selected_indices, selected_times)
             all_ok, metrics = compute_convergence(

@@ -492,18 +492,45 @@ def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndar
         )
 
         mesh_mod.current_dir = geom
-        mesh_mod.generate_1d_files(
+        inlet_output_csv = in_dir / "output.csv"
+        inlet_geom_csv = in_dir / "geom.csv"
+        outlet_output_csv = out_dir / "output.csv"
+        outlet_geom_csv = out_dir / "geom.csv"
+
+        inlet_generator = (
+            mesh_mod.generate_1d_files_from_csv
+            if hasattr(mesh_mod, "generate_1d_files_from_csv")
+            and inlet_output_csv.exists()
+            and inlet_geom_csv.exists()
+            else mesh_mod.generate_1d_files
+        )
+        outlet_generator = (
+            mesh_mod.generate_1d_files_from_csv
+            if hasattr(mesh_mod, "generate_1d_files_from_csv")
+            and outlet_output_csv.exists()
+            and outlet_geom_csv.exists()
+            else mesh_mod.generate_1d_files
+        )
+
+        inlet_kwargs = dict(
             xdmf_file=xdmf_in.name,
             output_dir=str(in_dir),
             file_prefix="_inlet",
             inlet_coords=c_in,
         )
-        mesh_mod.generate_1d_files(
+        outlet_kwargs = dict(
             xdmf_file=xdmf_out.name,
             output_dir=str(out_dir),
             file_prefix="_outlet",
             inlet_coords=c_out,
         )
+        if inlet_generator is mesh_mod.generate_1d_files_from_csv:
+            inlet_kwargs["rewrite_branch_tags"] = False
+        if outlet_generator is mesh_mod.generate_1d_files_from_csv:
+            outlet_kwargs["rewrite_branch_tags"] = False
+
+        inlet_generator(**inlet_kwargs)
+        outlet_generator(**outlet_kwargs)
 
 
 def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
@@ -771,6 +798,7 @@ def main() -> None:
         "--outdir", str(run0),
         "--output", "output.csv",
         "--organoid-root", str(run0),
+        "--no-plot",
     ] + (["--debug"] if args.debug else []))
 
     copy_seed_geometry(
@@ -832,6 +860,7 @@ def main() -> None:
             "--outdir", str(cur),
             "--output", "output.csv",
             "--organoid-root", str(cur),
+            "--no-plot",
         ] + (["--debug"] if args.debug else []))
 
         copy_seed_geometry(
