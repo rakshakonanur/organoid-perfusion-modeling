@@ -6,6 +6,7 @@ import csv
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
+import runtime_env  # noqa: F401
 
 import adios4dolfinx
 import dolfinx as dfx

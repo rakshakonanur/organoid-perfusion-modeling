@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 import glob
+import runtime_env  # noqa: F401
 
 import numpy as np
 import ufl

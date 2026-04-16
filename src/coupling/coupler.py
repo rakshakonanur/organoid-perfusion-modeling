@@ -23,7 +23,9 @@ def die(msg: str) -> None:
 
 def run(cmd: List[str], cwd: Optional[Path] = None) -> None:
     print(f"[run] {' '.join(map(str, cmd))}  (cwd={cwd})", flush=True)
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+    env = os.environ.copy()
+    env.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True, env=env)
 
 
 def resolve_mpi_launcher(user_cmd: str) -> str:

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import re
 import hashlib
+import runtime_env  # noqa: F401
 import adios4dolfinx
 import dolfinx as dfx
 import numpy as np

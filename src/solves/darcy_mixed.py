@@ -2,6 +2,7 @@ import argparse
 import json
 import glob
 from pathlib import Path
+import runtime_env  # noqa: F401
 
 import numpy as np
 import ufl

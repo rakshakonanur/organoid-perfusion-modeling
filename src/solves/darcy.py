@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import runtime_env  # noqa: F401
 import ufl
 import numpy   as np
 import dolfinx as dfx
