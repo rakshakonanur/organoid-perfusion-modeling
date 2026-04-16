@@ -24,6 +24,14 @@ from vtk.util.numpy_support import vtk_to_numpy
 ################################################################################
 
 
+def _mesh_cache_root() -> Path:
+    for key in ("SLURM_TMPDIR", "TMPDIR", "TEMP", "TMP"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            return Path(val).expanduser().resolve()
+    return Path("/tmp") / os.environ.get("USER", "unknown")
+
+
 def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
     """
     Read 3D perfusion mesh and facet meshtags.
@@ -58,7 +66,11 @@ def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
     facet_path = Path(facet_file).expanduser().resolve()
     key = f"{mesh_path}|{facet_path}|{mesh_path.stat().st_mtime_ns}|{facet_path.stat().st_mtime_ns}"
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
-    cache_bp = mesh_path.parent / f".darcy_mesh_facets_cache_{digest}.bp"
+    cache_dir = _mesh_cache_root() / "darcy_mesh_cache"
+    if comm.rank == 0:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    comm.barrier()
+    cache_bp = cache_dir / f"mesh_facets_cache_{digest}.bp"
 
     if comm.rank == 0 and not cache_bp.exists():
         print(f"[mesh] Building BP cache for 3D mesh/facets: {cache_bp}", flush=True)
