@@ -51,7 +51,10 @@ from dolfinx.io import XDMFFile
 try:
     from dolfinx.io import gmshio
 except ImportError:
-    import dolfinx.io.gmshio as gmshio
+    try:
+        import dolfinx.io.gmshio as gmshio
+    except ImportError:
+        import dolfinx.io.gmsh as gmshio
 from dolfinx import mesh as dmesh
 from basix.ufl import element
 
