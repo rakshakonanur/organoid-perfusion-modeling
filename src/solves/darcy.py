@@ -1059,6 +1059,7 @@ class PerfusionSolver:
 
         problem = LinearProblem(
             a, L,
+            petsc_options_prefix="darcy_div_projection_",
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
@@ -1615,6 +1616,7 @@ class PerfusionSolver:
 
         problem = LinearProblem(
             a, L, bcs=bcs,
+            petsc_options_prefix="darcy_pressure_solve_primary_",
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
@@ -1655,6 +1657,7 @@ class PerfusionSolver:
         L_form = fem.form(L)
         problem = LinearProblem(
             a, L, bcs=bcs,
+            petsc_options_prefix="darcy_pressure_solve_secondary_",
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
