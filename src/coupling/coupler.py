@@ -5,6 +5,7 @@ import argparse
 import importlib
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,9 +24,32 @@ def die(msg: str) -> None:
 
 def run(cmd: List[str], cwd: Optional[Path] = None) -> None:
     print(f"[run] {' '.join(map(str, cmd))}  (cwd={cwd})", flush=True)
+    env = build_subprocess_env(cmd)
+    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True, env=env)
+
+
+def build_subprocess_env(cmd: List[str]) -> dict:
     env = os.environ.copy()
     env.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True, env=env)
+
+    if cmd:
+        launcher = Path(str(cmd[0])).name
+        if launcher in {"mpiexec", "mpirun", "mpiexec.hydra"}:
+            # Nested MPI launches inside Slurm job steps can inherit PMI/PMIx
+            # variables that conflict with the launcher bundled in the active
+            # Python environment.
+            for key in (
+                "PMI_FD",
+                "PMI_RANK",
+                "PMI_SIZE",
+                "PMIX_NAMESPACE",
+                "PMIX_RANK",
+                "PMIX_SERVER_URI2",
+                "PMIX_SERVER_URI21",
+                "SLURM_MPI_TYPE",
+            ):
+                env.pop(key, None)
+    return env
 
 
 def resolve_mpi_launcher(user_cmd: str) -> str:
@@ -45,6 +69,14 @@ def resolve_mpi_launcher(user_cmd: str) -> str:
         if cand.exists() and os.access(cand, os.X_OK):
             return str(cand)
     return user_cmd
+
+
+def build_mpi_command(user_cmd: str, nprocs: int, payload: List[str]) -> List[str]:
+    launcher = resolve_mpi_launcher(str(user_cmd).strip())
+    parts = shlex.split(launcher) if str(launcher).strip() else []
+    if not parts:
+        raise ValueError("MPI launcher command must not be empty")
+    return [*parts, "-n", str(int(nprocs)), *payload]
 
 
 def resolve_perm_region_for_organoid(base: str, organoid_idx: int) -> str:
@@ -600,15 +632,11 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
                 "--perm-transition-width", str(args.perm_transition_width),
             ])
         if int(args.darcy_mpi_procs) > 1:
-            mpi_launcher = resolve_mpi_launcher(str(args.darcy_mpirun_cmd))
-            cmd = [
-                mpi_launcher,
-                "-n",
-                str(args.darcy_mpi_procs),
-                sys.executable,
-                str(darcy_script),
-                *darcy_args,
-            ]
+            cmd = build_mpi_command(
+                str(args.darcy_mpirun_cmd),
+                int(args.darcy_mpi_procs),
+                [sys.executable, str(darcy_script), *darcy_args],
+            )
         else:
             cmd = [sys.executable, str(darcy_script), *darcy_args]
         run(cmd)

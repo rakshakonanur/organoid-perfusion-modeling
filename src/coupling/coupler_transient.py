@@ -12,9 +12,9 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from coupler import (
+    build_mpi_command,
     die,
     run,
-    resolve_mpi_launcher,
     copy_tree,
     load_json,
     save_json,
@@ -569,13 +569,11 @@ def run_darcy_time_series_batched(
         if write_fields:
             cmd.append("--write-fields")
         if int(args.darcy_mpi_procs) > 1:
-            mpi_launcher = resolve_mpi_launcher(str(args.darcy_mpirun_cmd))
-            cmd = [
-                mpi_launcher,
-                "-n",
-                str(args.darcy_mpi_procs),
-                *cmd,
-            ]
+            cmd = build_mpi_command(
+                str(args.darcy_mpirun_cmd),
+                int(args.darcy_mpi_procs),
+                cmd,
+            )
         run(cmd)
 
 
