@@ -33,6 +33,9 @@ import re
 import glob
 import logging
 from pathlib import Path
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
 from send2trash import send2trash
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
