@@ -27,6 +27,7 @@ NOTE: This script assumes your VTU is a tetrahedral volume mesh.
 
 from __future__ import annotations
 
+import csv
 import os, subprocess, shutil
 import re
 import glob
@@ -351,6 +352,230 @@ def load_vtp(directory: str):
         area = area_[::points_per_section]
 
     return centerlineVel, centerlineFlow, pressure, centerlineCoords, area
+
+
+def _parse_branch_segment_name(name: str) -> Tuple[int, int]:
+    raw = str(name).strip()
+    m = re.search(r"branch[_\-\s]*(\d+)[_\-\s]*seg[_\-\s]*(\d+)", raw, flags=re.IGNORECASE)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+
+    parts = raw.split("_")
+    if len(parts) >= 2:
+        try:
+            branch = int(parts[0].replace("branch", "").strip(" _-"))
+            segment = int(parts[1].replace("seg", "").strip(" _-"))
+            return branch, segment
+        except Exception as exc:
+            raise ValueError(f"Failed to parse branch/segment from {name!r}") from exc
+
+    raise ValueError(f"Unrecognized 1D vessel name format: {name!r}")
+
+
+def load_csv_timeseries(
+    directory: str,
+    n_axial_samples: int = 101,
+) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Build the same centerline-style arrays previously recovered from VTP files,
+    but directly from output.csv + geom.csv.
+
+    Returns
+    -------
+    centerlineVel, centerlineFlow, pressure, centerlineCoords, area, times, tangents
+    """
+    base = Path(directory)
+    geom_path = base / "geom.csv"
+    output_path = base / "output.csv"
+    if not geom_path.exists():
+        raise FileNotFoundError(f"Missing geom.csv for direct checkpoint generation: {geom_path}")
+    if not output_path.exists():
+        raise FileNotFoundError(f"Missing output.csv for direct checkpoint generation: {output_path}")
+
+    geom_data = np.genfromtxt(geom_path, delimiter=",", dtype=float)
+    if geom_data.ndim == 1:
+        geom_data = geom_data.reshape(1, -1)
+    if geom_data.size == 0 or geom_data.shape[1] < 8:
+        raise ValueError(f"Expected geom.csv with at least 8 columns, got shape {geom_data.shape} from {geom_path}")
+
+    rows_by_key: Dict[Tuple[int, int], Dict[float, Tuple[float, float, float, float]]] = {}
+    with output_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            branch, segment = _parse_branch_segment_name(row["name"])
+            time = float(row["time"])
+            flow_in = float(row["flow_in"])
+            flow_out = float(row["flow_out"])
+            pressure_in = float(row["pressure_in"])
+            pressure_out = float(row["pressure_out"])
+            rows_by_key.setdefault((branch, segment), {})[time] = (
+                flow_in,
+                flow_out,
+                pressure_in,
+                pressure_out,
+            )
+
+    if not rows_by_key:
+        raise ValueError(f"No 1D timeseries rows were found in {output_path}")
+
+    ordered_keys = sorted(rows_by_key.keys())
+    ref_times = np.asarray(sorted(rows_by_key[ordered_keys[0]].keys()), dtype=float)
+    if ref_times.size == 0:
+        raise ValueError(f"No timesteps found in {output_path}")
+
+    ordered_profiles: Dict[Tuple[int, int], List[Tuple[float, float, float, float]]] = {}
+    for key in ordered_keys:
+        time_map = rows_by_key[key]
+        key_times = np.asarray(sorted(time_map.keys()), dtype=float)
+        if key_times.size != ref_times.size or not np.allclose(key_times, ref_times, rtol=1e-12, atol=1e-12):
+            raise ValueError(
+                f"Inconsistent timestep grids in {output_path}; "
+                f"{key} has {key_times.size} times, expected {ref_times.size}"
+            )
+        ordered_profiles[key] = [time_map[t] for t in key_times]
+
+    s = np.linspace(0.0, 1.0, int(max(n_axial_samples, 2)), dtype=float)
+    pressure_by_time: List[List[np.ndarray]] = [[] for _ in range(ref_times.size)]
+    flow_by_time: List[List[np.ndarray]] = [[] for _ in range(ref_times.size)]
+    centerline_coords_parts: List[np.ndarray] = []
+    tangents_parts: List[np.ndarray] = []
+    area_parts: List[np.ndarray] = []
+
+    for branch, segment in ordered_keys:
+        if branch < 0 or branch >= len(geom_data):
+            raise IndexError(
+                f"Branch index {branch} referenced in {output_path} is out of range for geom.csv with "
+                f"{len(geom_data)} rows"
+            )
+        row = geom_data[branch]
+        start = np.asarray(row[0:3], dtype=float)
+        end = np.asarray(row[3:6], dtype=float)
+        radius = float(row[7])
+        area_value = float(np.pi * max(radius, 0.0) ** 2)
+        tangent = _normalize(end - start)
+
+        centerline_coords_parts.append(start[None, :] + s[:, None] * (end - start)[None, :])
+        tangents_parts.append(np.tile(tangent[None, :], (s.size, 1)))
+        area_parts.append(np.full(s.size, area_value, dtype=float))
+
+        for tidx, (flow_in, flow_out, pressure_in, pressure_out) in enumerate(ordered_profiles[(branch, segment)]):
+            flow_by_time[tidx].append(np.linspace(flow_in, flow_out, s.size, dtype=float))
+            pressure_by_time[tidx].append(
+                np.linspace(pressure_in / 1333.22, pressure_out / 1333.22, s.size, dtype=float)
+            )
+
+    centerline_coords = np.vstack(centerline_coords_parts)
+    tangents = np.vstack(tangents_parts)
+    area = np.concatenate(area_parts)
+    centerline_flow = [np.concatenate(chunks) for chunks in flow_by_time]
+    pressure = [np.concatenate(chunks) for chunks in pressure_by_time]
+    centerline_vel = [flow / np.maximum(area, 1e-30) for flow in centerline_flow]
+    return centerline_vel, centerline_flow, pressure, centerline_coords, area, ref_times, tangents
+
+
+def _write_tagged_branch_bp(
+    mesh: dfx.mesh.Mesh,
+    facet_tag: dfx.mesh.MeshTags,
+    file_prefix: str,
+    rewrite: bool,
+) -> None:
+    path = current_dir / f"tagged_branches{file_prefix}.bp"
+    if path.exists() and not rewrite:
+        return
+    if path.exists():
+        send2trash(path)
+    adios4dolfinx.write_mesh(Path(str(path)), mesh, engine="BP4")
+    adios4dolfinx.write_meshtags(Path(str(path)), mesh, facet_tag, engine="BP4")
+
+
+def generate_1d_files_from_csv(
+    xdmf_file: str,
+    output_dir: str,
+    file_prefix: str = "",
+    inlet_coords: np.ndarray = None,
+    n_axial_samples: int = 101,
+    rewrite_branch_tags: bool = False,
+):
+    """
+    Faster checkpoint-generation path for coupled iterations.
+
+    Reads output.csv + geom.csv directly and writes the BP checkpoint files used
+    by Darcy/transport, bypassing plot_0d_results_to_3d.py and all VTP/PNG
+    intermediate outputs.
+    """
+    with XDMFFile(MPI.COMM_WORLD, current_dir / xdmf_file, "r") as xdmf:
+        mesh = xdmf.read_mesh(name="Grid")
+
+    P1 = dfx.fem.functionspace(mesh, ("CG", 1))
+    P1_vec = element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,))
+    P1vec = dfx.fem.functionspace(mesh, P1_vec)
+    dof_coords = P1.tabulate_dof_coordinates()
+
+    velocity_fn = dfx.fem.Function(P1vec)
+    pressure_fn = dfx.fem.Function(P1)
+    flow_fn = dfx.fem.Function(P1)
+    area_fn = dfx.fem.Function(P1)
+
+    centerlineVel, centerlineFlow, pressure, centerlineCoords, area, times, tangents = load_csv_timeseries(
+        output_dir, n_axial_samples=n_axial_samples
+    )
+
+    fdim = mesh.topology.dim - 1
+    mesh.topology.create_connectivity(fdim, mesh.topology.dim)
+    outlet_coords, facet_tag = branch_mesh_tagging(mesh, inlet=inlet_coords)
+    _write_tagged_branch_bp(mesh, facet_tag, file_prefix, rewrite=rewrite_branch_tags)
+
+    tree = cKDTree(centerlineCoords)
+    _, indices = tree.query(dof_coords)
+    indices = np.asarray(indices, dtype=int)
+    sampled_tangents = tangents[indices]
+
+    if (current_dir / f"velocity_checkpoint{file_prefix}.bp").exists():
+        send2trash(current_dir / f"velocity_checkpoint{file_prefix}.bp")
+    if (current_dir / f"pressure_checkpoint{file_prefix}.bp").exists():
+        send2trash(current_dir / f"pressure_checkpoint{file_prefix}.bp")
+    if (current_dir / f"flow_checkpoint{file_prefix}.bp").exists():
+        send2trash(current_dir / f"flow_checkpoint{file_prefix}.bp")
+    if (current_dir / f"area_checkpoint{file_prefix}.bp").exists():
+        send2trash(current_dir / f"area_checkpoint{file_prefix}.bp")
+
+    interpolated_area = area[indices]
+    for tidx, time_value in enumerate(times):
+        interpolated_velocity = centerlineVel[tidx][indices]
+        interpolated_pressure = pressure[tidx][indices]
+        interpolated_flow = centerlineFlow[tidx][indices]
+
+        velocity_fn.x.array[:] = (interpolated_velocity[:, np.newaxis] * sampled_tangents).flatten()
+        pressure_fn.x.array[:] = interpolated_pressure
+        flow_fn.x.array[:] = interpolated_flow
+        area_fn.x.array[:] = interpolated_area
+
+        adios4dolfinx.write_function(
+            Path(current_dir / f"velocity_checkpoint{file_prefix}.bp"),
+            u=velocity_fn,
+            time=float(time_value),
+            name="f",
+        )
+        adios4dolfinx.write_function(
+            Path(current_dir / f"pressure_checkpoint{file_prefix}.bp"),
+            u=pressure_fn,
+            time=float(time_value),
+            name="f",
+        )
+        adios4dolfinx.write_function(
+            Path(current_dir / f"flow_checkpoint{file_prefix}.bp"),
+            u=flow_fn,
+            time=float(time_value),
+            name="f",
+        )
+        adios4dolfinx.write_function(
+            Path(current_dir / f"area_checkpoint{file_prefix}.bp"),
+            u=area_fn,
+            time=float(time_value),
+            name="f",
+        )
+
+    return outlet_coords
 
 
 def generate_1d_files(xdmf_file: str, output_dir: str, file_prefix: str = "", inlet_coords: np.ndarray = None):
