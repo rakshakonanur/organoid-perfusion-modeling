@@ -59,10 +59,17 @@ def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
             facet_tags_loc = xdmf.read_meshtags(m_loc, name="mesh_tags")
         return m_loc, facet_tags_loc
 
-    if comm.size == 1:
+    use_bp_cache = os.environ.get("TRANSPORT_USE_BP_MESH_CACHE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    if comm.size == 1 or not use_bp_cache:
         return _read_xdmf(comm)
 
-    # For MPI runs, avoid direct parallel XDMF/HDF5 reads by caching to ADIOS BP.
+    # Optional fallback for clusters where direct parallel XDMF/HDF5 reads are unstable.
     mesh_path = Path(mesh_file).expanduser().resolve()
     facet_path = Path(facet_file).expanduser().resolve()
     key = f"{mesh_path}|{facet_path}|{mesh_path.stat().st_mtime_ns}|{facet_path.stat().st_mtime_ns}"
@@ -177,6 +184,8 @@ class TransportSolver:
         self.x_outlet = np.zeros((0, 3), dtype=float)
         self.q_inlet_vals = np.zeros((0,), dtype=float)
         self.q_outlet_vals = np.zeros((0,), dtype=float)
+        self._velocity_point_coords = None
+        self._velocity_local_point_ids = None
 
         if not self.skip_1d:
             # 1D inlet/outlet terminal meshes + checkpointed terminal flows.
@@ -245,12 +254,15 @@ class TransportSolver:
         u.x.scatter_forward()
         return u
 
-    def _read_vtu_velocity_flat(self, vtu_file: str) -> np.ndarray:
+    def _read_vtu_velocity_point_data(self, vtu_file: str):
         reader = vtk.vtkXMLUnstructuredGridReader()
         reader.SetFileName(str(vtu_file))
         reader.Update()
 
         grid = reader.GetOutput()
+        points = grid.GetPoints()
+        if points is None:
+            raise RuntimeError(f"Could not read mesh points from velocity file: {vtu_file}")
         velocity = grid.GetPointData().GetArray("f")
         if velocity is None and grid.GetPointData().GetNumberOfArrays() > 0:
             velocity = grid.GetPointData().GetArray(0)
@@ -258,7 +270,9 @@ class TransportSolver:
             raise RuntimeError(
                 f"Could not find point-data array 'f' in velocity file: {vtu_file}"
             )
-        return np.asarray(vtk_to_numpy(velocity), dtype=np.float64).reshape(-1)
+        coords = np.asarray(vtk_to_numpy(points.GetData()), dtype=np.float64)
+        values = np.asarray(vtk_to_numpy(velocity), dtype=np.float64)
+        return coords, values
 
     def _velocity_function_from_flat(self, flat_values: np.ndarray):
         V = fem.functionspace(
@@ -280,6 +294,91 @@ class TransportSolver:
         u.x.array[:] = flat
         u.x.scatter_forward()
         return u
+
+    def _velocity_function_from_point_data(self, coords: np.ndarray, values: np.ndarray):
+        V = fem.functionspace(
+            self.mesh,
+            element(
+                "Lagrange",
+                self.mesh.basix_cell(),
+                1,
+                shape=(self.mesh.geometry.dim,),
+            ),
+        )
+        u = fem.Function(V)
+
+        coords = np.asarray(coords, dtype=np.float64)
+        values = np.asarray(values, dtype=np.float64)
+        if coords.ndim != 2 or values.ndim != 2:
+            raise ValueError("Velocity point data must be 2D arrays")
+        if coords.shape[0] != values.shape[0]:
+            raise ValueError(
+                "Velocity coordinate/value arrays are inconsistent: "
+                f"{coords.shape[0]} coords vs {values.shape[0]} values."
+            )
+        if values.shape[1] != self.mesh.geometry.dim:
+            raise ValueError(
+                "Velocity value dimension does not match the transport mesh. "
+                f"Expected {self.mesh.geometry.dim}, found {values.shape[1]}."
+            )
+
+        local_coords = np.asarray(self.mesh.geometry.x, dtype=np.float64)
+        if local_coords.shape[0] * self.mesh.geometry.dim == u.x.array.size and local_coords.shape[0] == values.shape[0]:
+            # Serial fast path when the VTU point ordering already matches the mesh ordering.
+            self._velocity_point_coords = coords
+            self._velocity_local_point_ids = None
+            u.x.array[:] = values.reshape(-1)
+            u.x.scatter_forward()
+            return u
+
+        tree = cKDTree(coords)
+        _, nn = tree.query(local_coords)
+        self._velocity_point_coords = coords
+        self._velocity_local_point_ids = np.asarray(nn, dtype=int)
+        mapped = values[np.asarray(nn, dtype=int)]
+        u.x.array[:] = mapped.reshape(-1)
+        u.x.scatter_forward()
+        return u
+
+    def _map_velocity_point_values_to_local_flat(self, coords: np.ndarray, values: np.ndarray) -> np.ndarray:
+        coords = np.asarray(coords, dtype=np.float64)
+        values = np.asarray(values, dtype=np.float64)
+        if coords.ndim != 2 or values.ndim != 2:
+            raise ValueError("Velocity point data must be 2D arrays")
+        if coords.shape[0] != values.shape[0]:
+            raise ValueError(
+                "Velocity coordinate/value arrays are inconsistent: "
+                f"{coords.shape[0]} coords vs {values.shape[0]} values."
+            )
+        if values.shape[1] != self.mesh.geometry.dim:
+            raise ValueError(
+                "Velocity value dimension does not match the transport mesh. "
+                f"Expected {self.mesh.geometry.dim}, found {values.shape[1]}."
+            )
+
+        V = fem.functionspace(
+            self.mesh,
+            element(
+                "Lagrange",
+                self.mesh.basix_cell(),
+                1,
+                shape=(self.mesh.geometry.dim,),
+            ),
+        )
+        expected_size = V.dofmap.index_map.size_local * V.dofmap.index_map_bs
+        local_coords = np.asarray(self.mesh.geometry.x, dtype=np.float64)
+
+        if local_coords.shape[0] * self.mesh.geometry.dim == expected_size and local_coords.shape[0] == values.shape[0]:
+            self._velocity_point_coords = coords
+            self._velocity_local_point_ids = None
+            return values.reshape(-1).copy()
+
+        tree = cKDTree(coords)
+        _, nn = tree.query(local_coords)
+        self._velocity_point_coords = coords
+        self._velocity_local_point_ids = np.asarray(nn, dtype=int)
+        mapped = values[self._velocity_local_point_ids]
+        return mapped.reshape(-1).copy()
 
     def _xdmf_reader(self):
         for name in ("vtkXdmf3ReaderT", "vtkXdmf3Reader", "vtkXdmfReader"):
@@ -435,7 +534,13 @@ class TransportSolver:
         suffix = velocity_path.suffix.lower()
         if suffix == ".xdmf":
             times, vtu_paths = self._convert_xdmf_velocity_to_vtu_series(str(velocity_path))
-            series_arrays = np.vstack([self._read_vtu_velocity_flat(str(p)) for p in vtu_paths])
+            point_series = [self._read_vtu_velocity_point_data(str(p)) for p in vtu_paths]
+            coords0 = np.asarray(point_series[0][0], dtype=np.float64)
+            vals0 = np.asarray(point_series[0][1], dtype=np.float64)
+            series_arrays = np.stack(
+                [self._map_velocity_point_values_to_local_flat(coords0, np.asarray(vals, dtype=np.float64)) for _, vals in point_series],
+                axis=0,
+            )
             u = self._velocity_function_from_flat(series_arrays[-1])
             return u, times, series_arrays
         u = self._read_vtu_velocity(str(velocity_path))
@@ -474,7 +579,14 @@ class TransportSolver:
         flat = self._velocity_at_time(t)
         if flat is None:
             return False
-        self.velocity.x.array[:] = np.asarray(flat, dtype=np.float64)
+        arr = np.asarray(flat, dtype=np.float64)
+        arr = arr.reshape(-1)
+        if arr.size != self.velocity.x.array.size:
+            raise ValueError(
+                "Mapped velocity field size does not match the local transport vector. "
+                f"Expected {self.velocity.x.array.size} values, found {arr.size}."
+            )
+        self.velocity.x.array[:] = arr
         self.velocity.x.scatter_forward()
         return True
 
