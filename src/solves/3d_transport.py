@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import hashlib
+import xml.etree.ElementTree as ET
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 import adios4dolfinx
 import dolfinx as dfx
@@ -148,8 +149,8 @@ class TransportSolver:
             bioreactor_domain, facet_file
         )
 
-        # Darcy velocity field projected to nodal P1 values and written as VTU.
-        self.velocity = self._load_velocity(vel_file)
+        # Darcy velocity field projected to nodal P1 values.
+        self.velocity, self.velocity_times, self._velocity_series = self._load_velocity(vel_file)
 
         self.skip_1d = bool(skip_1d)
         self.inlet_mesh = None
@@ -209,13 +210,15 @@ class TransportSolver:
     ###########################################################################
     # Velocity import
     ###########################################################################
-    def _load_velocity(self, vtu_file: str):
+    def _read_vtu_velocity(self, vtu_file: str):
         reader = vtk.vtkXMLUnstructuredGridReader()
         reader.SetFileName(str(vtu_file))
         reader.Update()
 
         grid = reader.GetOutput()
         velocity = grid.GetPointData().GetArray("f")
+        if velocity is None and grid.GetPointData().GetNumberOfArrays() > 0:
+            velocity = grid.GetPointData().GetArray(0)
         if velocity is None:
             raise RuntimeError(
                 f"Could not find point-data array 'f' in velocity file: {vtu_file}"
@@ -242,12 +245,245 @@ class TransportSolver:
         u.x.scatter_forward()
         return u
 
+    def _read_vtu_velocity_flat(self, vtu_file: str) -> np.ndarray:
+        reader = vtk.vtkXMLUnstructuredGridReader()
+        reader.SetFileName(str(vtu_file))
+        reader.Update()
+
+        grid = reader.GetOutput()
+        velocity = grid.GetPointData().GetArray("f")
+        if velocity is None and grid.GetPointData().GetNumberOfArrays() > 0:
+            velocity = grid.GetPointData().GetArray(0)
+        if velocity is None:
+            raise RuntimeError(
+                f"Could not find point-data array 'f' in velocity file: {vtu_file}"
+            )
+        return np.asarray(vtk_to_numpy(velocity), dtype=np.float64).reshape(-1)
+
+    def _velocity_function_from_flat(self, flat_values: np.ndarray):
+        V = fem.functionspace(
+            self.mesh,
+            element(
+                "Lagrange",
+                self.mesh.basix_cell(),
+                1,
+                shape=(self.mesh.geometry.dim,),
+            ),
+        )
+        u = fem.Function(V)
+        flat = np.asarray(flat_values, dtype=np.float64).reshape(-1)
+        if u.x.array.size != flat.size:
+            raise ValueError(
+                "Velocity field size does not match the transport mesh. "
+                f"Expected {u.x.array.size} values, found {flat.size}."
+            )
+        u.x.array[:] = flat
+        u.x.scatter_forward()
+        return u
+
+    def _xdmf_reader(self):
+        for name in ("vtkXdmf3ReaderT", "vtkXdmf3Reader", "vtkXdmfReader"):
+            cls = getattr(vtk, name, None)
+            if cls is not None:
+                return cls()
+        raise RuntimeError(
+            "VTK in this environment does not provide an XDMF reader "
+            "(tried vtkXdmf3ReaderT, vtkXdmf3Reader, vtkXdmfReader)."
+        )
+
+    def _convert_xdmf_velocity_to_vtu(self, xdmf_file: str) -> Path:
+        xdmf_path = Path(xdmf_file).expanduser().resolve()
+        if not xdmf_path.exists():
+            raise FileNotFoundError(f"Missing XDMF velocity file: {xdmf_path}")
+
+        out_dir = xdmf_path.parent
+        cached_vtu = out_dir / "u_p0_000000.vtu"
+        data_sidecar = xdmf_path.with_suffix(".h5")
+        newest_src_mtime = max(
+            p.stat().st_mtime
+            for p in (xdmf_path, data_sidecar)
+            if p.exists()
+        )
+        if cached_vtu.exists() and cached_vtu.stat().st_mtime >= newest_src_mtime:
+            if self.mesh.comm.rank == 0:
+                print(f"[transport] Reusing cached velocity VTU: {cached_vtu}", flush=True)
+            return cached_vtu
+
+        if self.mesh.comm.rank == 0:
+            print(f"[transport] Converting XDMF velocity to VTU: {xdmf_path} -> {cached_vtu}", flush=True)
+            reader = self._xdmf_reader()
+            reader.SetFileName(str(xdmf_path))
+            reader.UpdateInformation()
+
+            n_steps = 0
+            if hasattr(reader, "GetNumberOfTimeSteps"):
+                try:
+                    n_steps = int(reader.GetNumberOfTimeSteps())
+                except Exception:
+                    n_steps = 0
+            if n_steps > 0 and hasattr(reader, "SetTimeStep"):
+                reader.SetTimeStep(n_steps - 1)
+            elif n_steps > 0 and hasattr(reader, "UpdateTimeStep"):
+                try:
+                    time_steps = [reader.GetTimeStep(i) for i in range(n_steps)]
+                    reader.UpdateTimeStep(float(time_steps[-1]))
+                except Exception:
+                    pass
+
+            reader.Update()
+            grid = reader.GetOutput()
+            if grid is None:
+                raise RuntimeError(f"Failed to read XDMF velocity file: {xdmf_path}")
+
+            writer = vtk.vtkXMLUnstructuredGridWriter()
+            writer.SetFileName(str(cached_vtu))
+            writer.SetInputData(grid)
+            ok = writer.Write()
+            if ok != 1:
+                raise RuntimeError(f"Failed to write converted VTU velocity file: {cached_vtu}")
+
+            pvd_path = out_dir / "u_p0_000000.pvd"
+            if pvd_path.exists():
+                try:
+                    pvd_path.unlink()
+                except Exception:
+                    pass
+        self.mesh.comm.barrier()
+        return cached_vtu
+
+    def _extract_xdmf_velocity_times(self, xdmf_file: str) -> list[float]:
+        root = ET.parse(xdmf_file).getroot()
+        grids = root.findall(".//Grid[@GridType='Collection']/Grid")
+        if not grids:
+            grids = root.findall(".//Domain/Grid[@GridType='Collection']/Grid")
+        times: list[float] = []
+        for grid in grids:
+            time_node = grid.find("Time")
+            if time_node is None:
+                continue
+            raw = time_node.attrib.get("Value", None)
+            if raw is None:
+                continue
+            try:
+                times.append(float(raw))
+            except Exception:
+                continue
+        return times
+
+    def _convert_xdmf_velocity_to_vtu_series(self, xdmf_file: str):
+        xdmf_path = Path(xdmf_file).expanduser().resolve()
+        data_sidecar = xdmf_path.with_suffix(".h5")
+        out_dir = xdmf_path.parent
+        time_values = self._extract_xdmf_velocity_times(str(xdmf_path))
+        if not time_values:
+            # Fall back to a single converted snapshot if there is no explicit temporal collection.
+            single = self._convert_xdmf_velocity_to_vtu(str(xdmf_path))
+            return np.asarray([0.0], dtype=np.float64), [single]
+
+        newest_src_mtime = max(
+            p.stat().st_mtime for p in (xdmf_path, data_sidecar) if p.exists()
+        )
+        vtu_paths = [out_dir / f"u_p0_{i:06d}.vtu" for i in range(len(time_values))]
+
+        series_times = None
+        series_paths = None
+        if self.mesh.comm.rank == 0:
+            up_to_date = all(p.exists() and p.stat().st_mtime >= newest_src_mtime for p in vtu_paths)
+            if up_to_date:
+                series_times = np.asarray(time_values, dtype=np.float64)
+                series_paths = [str(p) for p in vtu_paths]
+                print(f"[transport] Reusing cached velocity VTU series in: {out_dir}", flush=True)
+
+        if self.mesh.comm.rank == 0 and series_times is None:
+            reader = self._xdmf_reader()
+            reader.SetFileName(str(xdmf_path))
+            reader.UpdateInformation()
+            print(f"[transport] Converting XDMF velocity series to VTU snapshots in: {out_dir}", flush=True)
+            for i, tval in enumerate(time_values):
+                if hasattr(reader, "SetTimeStep"):
+                    reader.SetTimeStep(i)
+                    reader.Update()
+                elif hasattr(reader, "UpdateTimeStep"):
+                    try:
+                        reader.UpdateTimeStep(float(tval))
+                    except Exception:
+                        reader.Update()
+                else:
+                    reader.Update()
+
+                grid = reader.GetOutput()
+                if grid is None:
+                    raise RuntimeError(f"Failed to read XDMF velocity file: {xdmf_path}")
+                writer = vtk.vtkXMLUnstructuredGridWriter()
+                writer.SetFileName(str(vtu_paths[i]))
+                writer.SetInputData(grid)
+                ok = writer.Write()
+                if ok != 1:
+                    raise RuntimeError(f"Failed to write converted VTU velocity file: {vtu_paths[i]}")
+
+            series_times = np.asarray(time_values, dtype=np.float64)
+            series_paths = [str(p) for p in vtu_paths]
+
+        series_times = self.mesh.comm.bcast(series_times, root=0)
+        series_paths = self.mesh.comm.bcast(series_paths, root=0)
+        if series_times is None or series_paths is None:
+            raise RuntimeError(f"Failed to convert/load XDMF velocity time series: {xdmf_path}")
+        return np.asarray(series_times, dtype=np.float64), [Path(p) for p in series_paths]
+
+    def _load_velocity(self, velocity_file: str):
+        velocity_path = Path(velocity_file).expanduser().resolve()
+        suffix = velocity_path.suffix.lower()
+        if suffix == ".xdmf":
+            times, vtu_paths = self._convert_xdmf_velocity_to_vtu_series(str(velocity_path))
+            series_arrays = np.vstack([self._read_vtu_velocity_flat(str(p)) for p in vtu_paths])
+            u = self._velocity_function_from_flat(series_arrays[-1])
+            return u, times, series_arrays
+        u = self._read_vtu_velocity(str(velocity_path))
+        return u, np.asarray([0.0], dtype=np.float64), None
+
+    def _velocity_at_time(self, t: float) -> np.ndarray | None:
+        if self._velocity_series is None or len(self.velocity_times) <= 1:
+            return None
+        times = np.asarray(self.velocity_times, dtype=float)
+        vals = np.asarray(self._velocity_series, dtype=np.float64)
+        if vals.shape[0] != len(times):
+            raise ValueError("Velocity time-series lengths are inconsistent")
+
+        period = float(times[-1])
+        if period > 0.0:
+            t_eval = float(t) % period
+            if np.isclose(t_eval, 0.0) and float(t) > 0.0:
+                t_eval = period
+        else:
+            t_eval = float(t)
+
+        if t_eval <= times[0]:
+            return vals[0].copy()
+        if t_eval >= times[-1]:
+            return vals[-1].copy()
+
+        j = int(np.searchsorted(times, t_eval, side="right") - 1)
+        j = max(0, min(j, len(times) - 2))
+        t0, t1 = float(times[j]), float(times[j + 1])
+        if t1 == t0:
+            return vals[j].copy()
+        alpha = (t_eval - t0) / (t1 - t0)
+        return (1.0 - alpha) * vals[j] + alpha * vals[j + 1]
+
+    def _update_velocity_for_time(self, t: float) -> bool:
+        flat = self._velocity_at_time(t)
+        if flat is None:
+            return False
+        self.velocity.x.array[:] = np.asarray(flat, dtype=np.float64)
+        self.velocity.x.scatter_forward()
+        return True
+
     def _inlet_concentration(self, t: float) -> float:
         """
         Time-dependent inlet concentration. Replace this with the desired profile.
         """
         t_on = 0.0
-        t_off = 100.0
+        t_off = 1000.0
         if t_on <= t <= t_off:
             return self.c_in_value
         return 0.0
@@ -765,6 +1001,11 @@ class TransportSolver:
             t += self.dt
             c_in.value = dfx.default_scalar_type(self._inlet_concentration(t))
 
+            if self._update_velocity_for_time(t):
+                A = assemble_matrix(a_form)
+                A.assemble()
+                solver.setOperators(A)
+
             b.zeroEntries()
             assemble_vector(b, L_form)
             b.ghostUpdate(
@@ -916,7 +1157,7 @@ if __name__ == "__main__":
     ap.add_argument(
         "--vel-file",
         default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/coupling-output/run_20/organoid_3/out_darcy/u_p0_000000.vtu",
-        help="Darcy velocity VTU containing point-data array 'f'.",
+        help="Darcy velocity file. Accepts legacy VTU or batched transient u.xdmf; XDMF is converted and cached as u_p0_000000.vtu.",
     )
     ap.add_argument(
         "--interface-bc-file",
@@ -937,7 +1178,7 @@ if __name__ == "__main__":
     ap.add_argument("--T", type=float, default=10000.0)
     ap.add_argument("--dt", type=float, default=10.0)
     ap.add_argument("--D-value", type=float, default=1e-8)
-    ap.add_argument("--c-in-value", type=float, default=1.0)
+    ap.add_argument("--c-in-value", type=float, default=10000.0)
     ap.add_argument("--out-file", default="transport_c_no_vasc.xdmf")
     ap.add_argument(
         "--organoid-ids",

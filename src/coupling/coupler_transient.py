@@ -846,7 +846,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Transient quasi-static coupling driver restarting from a converged steady-state run."
     )
-    ap.add_argument("--steady-run", default=str(repo_src / "coupling-output" / "run_20"),
+    ap.add_argument("--steady-run", default=str(repo_src / "coupling-output-no-vasc" / "run_20"),
                     help="Converged steady-state run to restart from.")
     ap.add_argument("--transient-root", default=str(repo_src / "coupling-output-transient"),
                     help="Output root for transient outer coupling iterations.")
@@ -885,7 +885,7 @@ def parse_args() -> argparse.Namespace:
                     help="Solve Darcy every Nth transient checkpoint and always include the final checkpoint.")
     ap.add_argument("--use-batched-darcy-timeseries", action="store_true",
                     help="Run one mixed-Darcy process per organoid across all selected times and write interface_bc_timeseries.json.")
-    ap.add_argument("--darcy-field-output-every", type=int, default=0,
+    ap.add_argument("--darcy-field-output-every", type=int, default=1,
                     help="Write p.xdmf/u.xdmf time series every N transient coupling iterations (0 disables field output).")
 
     ap.add_argument("--dy-step", type=float, default=0.6)
