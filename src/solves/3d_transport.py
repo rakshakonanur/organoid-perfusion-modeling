@@ -1,9 +1,10 @@
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import hashlib
-import runtime_env  # noqa: F401
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 import adios4dolfinx
 import dolfinx as dfx
 import numpy as np

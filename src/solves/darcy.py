@@ -1,6 +1,7 @@
 import argparse
 import hashlib
-import runtime_env  # noqa: F401
+import os
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 import ufl
 import numpy   as np
 import dolfinx as dfx

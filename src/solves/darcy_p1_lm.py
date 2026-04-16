@@ -1,7 +1,8 @@
 import argparse
 import json
+import os
 from pathlib import Path
-import runtime_env  # noqa: F401
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import numpy as np
 import ufl

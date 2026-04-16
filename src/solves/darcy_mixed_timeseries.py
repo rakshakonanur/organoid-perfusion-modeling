@@ -4,9 +4,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
-import runtime_env  # noqa: F401
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import adios4dolfinx
 import dolfinx as dfx
