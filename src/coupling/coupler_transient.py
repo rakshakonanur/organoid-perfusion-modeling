@@ -661,6 +661,29 @@ def max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
     return float(np.max(np.abs(aa[:n] - bb[:n]) / den))
 
 
+def waveform_error_metrics(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> Dict[str, float]:
+    aa = np.asarray(a, dtype=float).ravel()
+    bb = np.asarray(b, dtype=float).ravel()
+    if aa.size == 0 or bb.size == 0:
+        return {
+            "max_scaled": 0.0,
+            "l2_normalized": 0.0,
+            "max_abs": 0.0,
+        }
+    n = min(aa.size, bb.size)
+    aa = aa[:n]
+    bb = bb[:n]
+    diff = aa - bb
+    max_abs = float(np.max(np.abs(diff)))
+    rms_target = float(np.sqrt(np.mean(bb**2)))
+    l2_target = float(np.linalg.norm(bb))
+    return {
+        "max_scaled": max_abs / max(rms_target, floor),
+        "l2_normalized": float(np.linalg.norm(diff)) / max(l2_target, floor),
+        "max_abs": max_abs,
+    }
+
+
 def collect_interface_waveforms(
     iter_dir: Path,
     n_organoids: int,
@@ -739,18 +762,33 @@ def compute_convergence(
                 max_rel(-np.asarray(data["q_artery_leak"], dtype=float), q_art_target),
                 max_rel(-np.asarray(data["q_venous_leak"], dtype=float), q_ven_target),
             )
+            q_art_metrics = waveform_error_metrics(
+                -np.asarray(data["q_artery_leak"], dtype=float),
+                q_art_target,
+            )
+            q_ven_metrics = waveform_error_metrics(
+                -np.asarray(data["q_venous_leak"], dtype=float),
+                q_ven_target,
+            )
+            q_metrics = {
+                "max_scaled": float(max(q_art_metrics["max_scaled"], q_ven_metrics["max_scaled"])),
+                "l2_normalized": float(max(q_art_metrics["l2_normalized"], q_ven_metrics["l2_normalized"])),
+                "max_abs": float(max(q_art_metrics["max_abs"], q_ven_metrics["max_abs"])),
+                "artery": q_art_metrics,
+                "venous": q_ven_metrics,
+            }
             rp = 0.0
         else:
             rq = 0.0
             rp = 0.0
+            q_darcy_rows = []
+            q_target_rows = []
             for i in range(len(data["times"])):
-                rq = max(
-                    rq,
-                    max_rel(
-                        np.asarray(data["q_inlet"][i], dtype=float),
-                        np.asarray(data["q_inlet_target"][i], dtype=float),
-                    ),
-                )
+                q_row = np.asarray(data["q_inlet"][i], dtype=float)
+                q_target_row = np.asarray(data["q_inlet_target"][i], dtype=float)
+                q_darcy_rows.append(q_row.ravel())
+                q_target_rows.append(q_target_row.ravel())
+                rq = max(rq, max_rel(q_row, q_target_row))
                 rp = max(
                     rp,
                     max_rel(
@@ -764,8 +802,20 @@ def compute_convergence(
                         floor=1e-12,
                     ),
                 )
+            q_metrics = waveform_error_metrics(
+                np.concatenate(q_darcy_rows) if q_darcy_rows else np.zeros((0,), dtype=float),
+                np.concatenate(q_target_rows) if q_target_rows else np.zeros((0,), dtype=float),
+            )
         ok = bool(rq <= tol_q and rp <= tol_p)
-        metrics[k] = {"rel_q": float(rq), "rel_p": float(rp), "converged": ok}
+        metrics[k] = {
+            "rel_q": float(rq),
+            "rel_p": float(rp),
+            "q_max_scaled": float(q_metrics["max_scaled"]),
+            "q_l2_normalized": float(q_metrics["l2_normalized"]),
+            "q_max_abs": float(q_metrics["max_abs"]),
+            "q_metrics": q_metrics,
+            "converged": ok,
+        }
         all_ok = all_ok and ok
     return all_ok, metrics
 
@@ -1110,6 +1160,9 @@ def main() -> None:
                     metric = metrics[k]
                     print(
                         f"  organoid_{k}: rel_q={metric['rel_q']:.3e}, "
+                        f"q_max_scaled={metric['q_max_scaled']:.3e}, "
+                        f"q_l2={metric['q_l2_normalized']:.3e}, "
+                        f"q_max_abs={metric['q_max_abs']:.3e}, "
                         f"rel_p={metric['rel_p']:.3e}, converged={metric['converged']}"
                     )
 
