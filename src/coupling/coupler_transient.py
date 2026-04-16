@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+from mpi4py import MPI
 
 from coupler import (
     build_mpi_command,
@@ -577,6 +578,79 @@ def run_darcy_time_series_batched(
         run(cmd)
 
 
+def run_darcy_time_series_batched_inprocess(
+    iter_dir: Path,
+    args: argparse.Namespace,
+    selected_indices: np.ndarray,
+    selected_times: np.ndarray,
+    coupling_iteration: int,
+) -> None:
+    script = Path(args.darcy_timeseries_script).expanduser().resolve()
+    if not script.exists():
+        die(f"Missing Darcy time-series script: {script}")
+    script_dir = str(script.parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import darcy_mixed_timeseries as darcy_timeseries
+
+    comm = MPI.COMM_WORLD
+    output_csv = iter_dir / "output.csv"
+    write_fields = bool(
+        int(args.darcy_field_output_every) > 0
+        and int(coupling_iteration) > 0
+        and int(coupling_iteration) % int(args.darcy_field_output_every) == 0
+    )
+
+    for k in range(1, args.n_organoids + 1):
+        org = iter_dir / f"organoid_{k}"
+        geom = org / "geometry"
+        coords_in = read_seed_coords_from_branching(
+            org / "branchingData_0.csv",
+            shifted_seed_fallback(np.asarray(args.coords_inlet, dtype=float), k, args.dy_step),
+        )
+        coords_out = read_seed_coords_from_branching(
+            org / "branchingData_1.csv",
+            shifted_seed_fallback(np.asarray(args.coords_outlet, dtype=float), k, args.dy_step),
+        )
+        perm_region_path = resolve_perm_region_for_organoid(args.perm_region_root, k) if args.perm_region_root else ""
+        out_dir = org / "out_darcy_transient"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        darcy_timeseries.run_job(
+            bioreactor_domain=str(geom / "bioreactor.xdmf"),
+            facet_file=str(geom / "mesh_tags.xdmf"),
+            mesh_inlet_file=str(geom / "tagged_branches_inlet.bp"),
+            mesh_outlet_file=str(geom / "tagged_branches_outlet.bp"),
+            pres_inlet_file=str(geom / "pressure_checkpoint_inlet.bp"),
+            pres_outlet_file=str(geom / "pressure_checkpoint_outlet.bp"),
+            flow_inlet_file=str(geom / "flow_checkpoint_inlet.bp"),
+            flow_outlet_file=str(geom / "flow_checkpoint_outlet.bp"),
+            area_inlet_file=str(geom / "area_checkpoint_inlet.bp"),
+            area_outlet_file=str(geom / "area_checkpoint_outlet.bp"),
+            coords_inlet=coords_in,
+            coords_outlet=coords_out,
+            branching_in_file=str(org / "branchingData_0.csv"),
+            branching_out_file=str(org / "branchingData_1.csv"),
+            concave_bc_mode=str(args.concave_bc_mode),
+            lp_arterial=float(args.lp_arterial),
+            lp_venous=float(args.lp_venous),
+            fallback_inlet_pressure=float(args.fallback_inlet_pressure),
+            fallback_outlet_pressure=float(args.fallback_outlet_pressure),
+            organoid_index=int(k),
+            out_dir=str(out_dir),
+            checkpoint_indices=[int(idx) for idx in np.asarray(selected_indices, dtype=int)],
+            checkpoint_times=[float(t) for t in np.asarray(selected_times, dtype=float)],
+            skip_1d=bool(args.no_synthetic_vasculature),
+            leak_pressure_output_csv=str(output_csv) if args.no_synthetic_vasculature else None,
+            perm_region_path=perm_region_path,
+            perm_low=float(args.perm_low),
+            perm_high=float(args.perm_high),
+            perm_transition_width=float(args.perm_transition_width),
+            write_fields=write_fields,
+        )
+        comm.barrier()
+
+
 def max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
     aa = np.asarray(a, dtype=float).ravel()
     bb = np.asarray(b, dtype=float).ravel()
@@ -839,6 +913,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    comm = MPI.COMM_WORLD
+    rank = comm.rank
     args = parse_args()
     steady_run = Path(args.steady_run).expanduser().resolve()
     if not steady_run.exists():
@@ -917,135 +993,164 @@ def main() -> None:
             if iter_dir.exists() and not args.overwrite:
                 die(f"Iteration directory already exists (use --overwrite to replace): {iter_dir}")
 
-            prepare_iteration_dir(steady_run, iter_dir, args.n_organoids)
+            if rank == 0:
+                prepare_iteration_dir(steady_run, iter_dir, args.n_organoids)
 
-            deck = json.loads(json.dumps(base_deck))
-            update_simulation_parameters(
-                deck,
-                int(args.number_of_cardiac_cycles),
-                int(args.number_of_time_pts_per_cardiac_cycle),
-            )
-            apply_channel_waveforms(
-                deck,
-                args.channel_inlet_bc,
-                inflow_t_cycle,
-                inflow_q,
-                args.channel_outlet_bc,
-                outlet_t_cycle,
-                outlet_p,
-            )
-            for k in range(1, args.n_organoids + 1):
-                apply_organoid_interface_state(
+                deck = json.loads(json.dumps(base_deck))
+                update_simulation_parameters(
                     deck,
-                    k,
-                    current_state[k],
-                    coupling_times,
-                    allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
+                    int(args.number_of_cardiac_cycles),
+                    int(args.number_of_time_pts_per_cardiac_cycle),
                 )
-            save_json(iter_dir / "combined.in", deck)
-
-            run([
-                sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
-                "--exe", args.svzerodsolver,
-                "--input", str(iter_dir / "combined.in"),
-                "--outdir", str(iter_dir),
-                "--output", "output.csv",
-                "--organoid-root", str(iter_dir),
-                "--no-plot",
-            ] + (["--debug"] if args.debug else []))
-
-            if not args.no_synthetic_vasculature:
-                update_1d_checkpoints(
-                    iter_dir,
-                    args.n_organoids,
-                    np.asarray(args.coords_inlet, dtype=float),
-                    np.asarray(args.coords_outlet, dtype=float),
-                    args.dy_step,
+                apply_channel_waveforms(
+                    deck,
+                    args.channel_inlet_bc,
+                    inflow_t_cycle,
+                    inflow_q,
+                    args.channel_outlet_bc,
+                    outlet_t_cycle,
+                    outlet_p,
                 )
+                for k in range(1, args.n_organoids + 1):
+                    apply_organoid_interface_state(
+                        deck,
+                        k,
+                        current_state[k],
+                        coupling_times,
+                        allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
+                    )
+                save_json(iter_dir / "combined.in", deck)
 
-            output_times = read_unique_output_times(iter_dir / "output.csv")
-            selected_indices, selected_times = select_time_indices(output_times, args.darcy_time_index_stride)
+                run([
+                    sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
+                    "--exe", args.svzerodsolver,
+                    "--input", str(iter_dir / "combined.in"),
+                    "--outdir", str(iter_dir),
+                    "--output", "output.csv",
+                    "--organoid-root", str(iter_dir),
+                    "--no-plot",
+                ] + (["--debug"] if args.debug else []))
+
+                if not args.no_synthetic_vasculature:
+                    update_1d_checkpoints(
+                        iter_dir,
+                        args.n_organoids,
+                        np.asarray(args.coords_inlet, dtype=float),
+                        np.asarray(args.coords_outlet, dtype=float),
+                        args.dy_step,
+                    )
+
+                output_times = read_unique_output_times(iter_dir / "output.csv")
+                selected_indices, selected_times = select_time_indices(output_times, args.darcy_time_index_stride)
+            else:
+                selected_indices, selected_times = None, None
+            comm.barrier()
+            selected_indices = np.asarray(comm.bcast(selected_indices, root=0), dtype=int)
+            selected_times = np.asarray(comm.bcast(selected_times, root=0), dtype=float)
             coupling_iteration = stage_idx * int(args.max_iter) + it + 1
             if args.use_batched_darcy_timeseries:
-                run_darcy_time_series_batched(iter_dir, args, selected_indices, selected_times, coupling_iteration)
+                if comm.size > 1:
+                    if int(args.darcy_mpi_procs) != int(comm.size):
+                        die(
+                            f"When launching coupler_transient.py under MPI, "
+                            f"--darcy-mpi-procs must match MPI size ({comm.size}), "
+                            f"got {args.darcy_mpi_procs}."
+                        )
+                    run_darcy_time_series_batched_inprocess(iter_dir, args, selected_indices, selected_times, coupling_iteration)
+                else:
+                    run_darcy_time_series_batched(iter_dir, args, selected_indices, selected_times, coupling_iteration)
             else:
-                run_darcy_time_series(iter_dir, args, selected_indices, selected_times)
+                if rank == 0:
+                    run_darcy_time_series(iter_dir, args, selected_indices, selected_times)
+            comm.barrier()
 
-            waveforms = collect_interface_waveforms(iter_dir, args.n_organoids, selected_indices, selected_times)
-            all_ok, metrics = compute_convergence(
-                waveforms,
-                current_state,
-                coupling_times,
-                tol_q=float(args.tol_q),
-                tol_p=float(args.tol_p),
-            )
-
-            target_state = build_target_state_from_waveforms(waveforms, coupling_times)
-            summary = {
-                "stage_index": stage_idx,
-                "pulse_alpha": float(pulse_alpha),
-                "iteration": it,
-                "steady_run": str(steady_run),
-                "cycle_period": float(cycle_period),
-                "number_of_cardiac_cycles": int(args.number_of_cardiac_cycles),
-                "number_of_time_pts_per_cardiac_cycle": int(args.number_of_time_pts_per_cardiac_cycle),
-                "pulse_ramp_stages": int(args.pulse_ramp_stages),
-                "pulse_ramp_baseline": str(args.pulse_ramp_baseline),
-                "channel_inflow_baseline": float(inflow_baseline),
-                "channel_outlet_baseline": float(outlet_baseline),
-                "coupling_times_per_cycle": coupling_times_cycle.tolist(),
-                "coupling_times": coupling_times.tolist(),
-                "channel_inflow_waveform": {"t": inflow_t_cycle.tolist(), "Q": inflow_q.tolist()},
-                "channel_outlet_waveform": {"t": outlet_t_cycle.tolist(), "P": outlet_p.tolist()},
-                "selected_output_times": selected_times.tolist(),
-                "selected_output_indices": selected_indices.tolist(),
-                "current_state": serialize_state(current_state),
-                "target_state": serialize_state(target_state),
-                "measured_waveforms": serialize_waveforms(waveforms),
-                "convergence": {str(k): v for k, v in metrics.items()},
-                "converged": bool(all_ok),
-            }
-            save_json(iter_dir / "transient_summary.json", summary)
-            last_iter_dir = iter_dir
-
-            print(
-                f"\n[check] pulse stage {stage_idx + 1}/{len(pulse_alphas)} "
-                f"(alpha={pulse_alpha:.3f}), transient coupling iteration {it + 1}/{args.max_iter}"
-            )
-            for k in range(1, args.n_organoids + 1):
-                metric = metrics[k]
-                print(
-                    f"  organoid_{k}: rel_q={metric['rel_q']:.3e}, "
-                    f"rel_p={metric['rel_p']:.3e}, converged={metric['converged']}"
+            if rank == 0:
+                waveforms = collect_interface_waveforms(iter_dir, args.n_organoids, selected_indices, selected_times)
+                all_ok, metrics = compute_convergence(
+                    waveforms,
+                    current_state,
+                    coupling_times,
+                    tol_q=float(args.tol_q),
+                    tol_p=float(args.tol_p),
                 )
+
+                target_state = build_target_state_from_waveforms(waveforms, coupling_times)
+                summary = {
+                    "stage_index": stage_idx,
+                    "pulse_alpha": float(pulse_alpha),
+                    "iteration": it,
+                    "steady_run": str(steady_run),
+                    "cycle_period": float(cycle_period),
+                    "number_of_cardiac_cycles": int(args.number_of_cardiac_cycles),
+                    "number_of_time_pts_per_cardiac_cycle": int(args.number_of_time_pts_per_cardiac_cycle),
+                    "pulse_ramp_stages": int(args.pulse_ramp_stages),
+                    "pulse_ramp_baseline": str(args.pulse_ramp_baseline),
+                    "channel_inflow_baseline": float(inflow_baseline),
+                    "channel_outlet_baseline": float(outlet_baseline),
+                    "coupling_times_per_cycle": coupling_times_cycle.tolist(),
+                    "coupling_times": coupling_times.tolist(),
+                    "channel_inflow_waveform": {"t": inflow_t_cycle.tolist(), "Q": inflow_q.tolist()},
+                    "channel_outlet_waveform": {"t": outlet_t_cycle.tolist(), "P": outlet_p.tolist()},
+                    "selected_output_times": selected_times.tolist(),
+                    "selected_output_indices": selected_indices.tolist(),
+                    "current_state": serialize_state(current_state),
+                    "target_state": serialize_state(target_state),
+                    "measured_waveforms": serialize_waveforms(waveforms),
+                    "convergence": {str(k): v for k, v in metrics.items()},
+                    "converged": bool(all_ok),
+                }
+                save_json(iter_dir / "transient_summary.json", summary)
+                last_iter_dir = iter_dir
+
+                print(
+                    f"\n[check] pulse stage {stage_idx + 1}/{len(pulse_alphas)} "
+                    f"(alpha={pulse_alpha:.3f}), transient coupling iteration {it + 1}/{args.max_iter}"
+                )
+                for k in range(1, args.n_organoids + 1):
+                    metric = metrics[k]
+                    print(
+                        f"  organoid_{k}: rel_q={metric['rel_q']:.3e}, "
+                        f"rel_p={metric['rel_p']:.3e}, converged={metric['converged']}"
+                    )
+
+                if all_ok:
+                    current_state = target_state
+                    stage_converged = True
+                else:
+                    current_state = relax_state(current_state, target_state, float(args.relaxation))
+            else:
+                all_ok = False
+                stage_converged = False
+            all_ok = bool(comm.bcast(all_ok, root=0))
+            stage_converged = bool(comm.bcast(stage_converged, root=0))
 
             if all_ok:
-                current_state = target_state
-                stage_converged = True
+                if rank == 0:
+                    if stage_idx == len(pulse_alphas) - 1:
+                        print(f"\n[done] transient coupling converged at {iter_dir.name}.")
+                    else:
+                        print(
+                            f"\n[stage] pulse stage {stage_idx + 1}/{len(pulse_alphas)} "
+                            f"converged at alpha={pulse_alpha:.3f}; continuing to the next stage."
+                        )
                 if stage_idx == len(pulse_alphas) - 1:
-                    print(f"\n[done] transient coupling converged at {iter_dir.name}.")
                     return
-                print(
-                    f"\n[stage] pulse stage {stage_idx + 1}/{len(pulse_alphas)} "
-                    f"converged at alpha={pulse_alpha:.3f}; continuing to the next stage."
-                )
                 break
 
-            current_state = relax_state(current_state, target_state, float(args.relaxation))
-
-        if not stage_converged:
+        if rank == 0 and not stage_converged:
             print(
                 f"\n[stage] pulse stage {stage_idx + 1}/{len(pulse_alphas)} "
                 f"reached max iterations at alpha={pulse_alpha:.3f}."
             )
 
-    if last_iter_dir is not None:
+    if rank == 0 and last_iter_dir is not None:
         print(
             f"\n[done] completed pulse-ramp continuation without full convergence at the final stage. "
             f"Last results are in {last_iter_dir}."
         )
         return
-    print(f"\n[done] no transient iterations were completed.")
+    if rank == 0:
+        print(f"\n[done] no transient iterations were completed.")
 
 
 if __name__ == "__main__":

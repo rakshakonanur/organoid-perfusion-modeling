@@ -845,56 +845,124 @@ def parse_args():
     return ap.parse_args()
 
 
-def main():
+def run_job(
+    *,
+    bioreactor_domain,
+    facet_file,
+    mesh_inlet_file,
+    mesh_outlet_file,
+    pres_inlet_file,
+    pres_outlet_file,
+    flow_inlet_file,
+    flow_outlet_file,
+    coords_inlet,
+    coords_outlet,
+    checkpoint_indices,
+    checkpoint_times,
+    out_dir,
+    area_inlet_file=None,
+    area_outlet_file=None,
+    branching_in_file=None,
+    branching_out_file=None,
+    skip_1d: bool = False,
+    fallback_inlet_pressure: float = 0.0,
+    fallback_outlet_pressure: float = 0.0,
+    concave_bc_mode: str = "dirichlet",
+    lp_arterial: float = 0.0,
+    lp_venous: float = 0.0,
+    perm_region_path: str = "",
+    perm_low: float = 1.0e-8,
+    perm_high: float = 1.0e-6,
+    perm_transition_width: float = 0.01,
+    leak_pressure_output_csv=None,
+    organoid_index: int = 0,
+    write_fields: bool = False,
+):
     global current_dir
-    args = parse_args()
 
-    time_indices = resolve_selected_indices(args.time_indices)
-    time_values = np.asarray(args.time_values, dtype=float)
+    time_indices = resolve_selected_indices(checkpoint_indices)
+    time_values = np.asarray(checkpoint_times, dtype=float)
     if time_values.size not in {0, len(time_indices)}:
         raise ValueError("--time-values must be omitted or have the same length as --time-indices")
     if time_values.size == 0:
         time_values = np.asarray(time_indices, dtype=float)
 
-    current_dir = Path(args.out_dir).expanduser().resolve()
+    current_dir = Path(out_dir).expanduser().resolve()
     current_dir.mkdir(parents=True, exist_ok=True)
     darcy_cg.current_dir = current_dir
     darcy_mixed.current_dir = current_dir
 
     solver = TimeSeriesPerfusionSolver(
-        args.bioreactor_domain,
-        args.facet_file,
-        args.mesh_inlet_file,
-        args.mesh_outlet_file,
-        args.pres_inlet_file,
-        args.pres_outlet_file,
-        args.flow_inlet_file,
-        args.flow_outlet_file,
-        np.asarray(args.coords_inlet, dtype=float),
-        np.asarray(args.coords_outlet, dtype=float),
+        bioreactor_domain,
+        facet_file,
+        mesh_inlet_file,
+        mesh_outlet_file,
+        pres_inlet_file,
+        pres_outlet_file,
+        flow_inlet_file,
+        flow_outlet_file,
+        np.asarray(coords_inlet, dtype=float),
+        np.asarray(coords_outlet, dtype=float),
         checkpoint_indices=time_indices,
         checkpoint_times=time_values,
-        area_inlet_file=args.area_inlet_file if args.area_inlet_file else None,
-        area_outlet_file=args.area_outlet_file if args.area_outlet_file else None,
-        concave_bc_mode=args.concave_bc_mode,
-        lp_arterial=args.lp_arterial,
-        lp_venous=args.lp_venous,
-        skip_1d=args.skip_1d,
-        fallback_inlet_pressure=args.fallback_inlet_pressure,
-        fallback_outlet_pressure=args.fallback_outlet_pressure,
-        perm_region_path=args.perm_region_path,
-        perm_low=args.perm_low,
-        perm_high=args.perm_high,
-        perm_transition_width=args.perm_transition_width,
-        branching_in_file=args.branching_in_file if args.branching_in_file else None,
-        branching_out_file=args.branching_out_file if args.branching_out_file else None,
-        leak_pressure_output_csv=(Path(args.leak_pressure_output_csv) if args.leak_pressure_output_csv else None),
-        organoid_index=int(args.organoid_index),
+        area_inlet_file=area_inlet_file,
+        area_outlet_file=area_outlet_file,
+        concave_bc_mode=concave_bc_mode,
+        lp_arterial=lp_arterial,
+        lp_venous=lp_venous,
+        skip_1d=skip_1d,
+        fallback_inlet_pressure=fallback_inlet_pressure,
+        fallback_outlet_pressure=fallback_outlet_pressure,
+        perm_region_path=perm_region_path,
+        perm_low=perm_low,
+        perm_high=perm_high,
+        perm_transition_width=perm_transition_width,
+        branching_in_file=branching_in_file,
+        branching_out_file=branching_out_file,
+        leak_pressure_output_csv=(Path(leak_pressure_output_csv) if leak_pressure_output_csv else None),
+        organoid_index=int(organoid_index),
     )
     runner = MixedTimeSeriesRunner(solver)
-    runner.run_time_series(time_indices, time_values, current_dir, write_fields=bool(args.write_fields))
+    payload = runner.run_time_series(time_indices, time_values, current_dir, write_fields=bool(write_fields))
     if MPI.COMM_WORLD.rank == 0:
         print("Darcy mixed time-series solve complete.")
+    return payload
+
+
+def main():
+    args = parse_args()
+    run_job(
+        bioreactor_domain=args.bioreactor_domain,
+        facet_file=args.facet_file,
+        mesh_inlet_file=args.mesh_inlet_file,
+        mesh_outlet_file=args.mesh_outlet_file,
+        pres_inlet_file=args.pres_inlet_file,
+        pres_outlet_file=args.pres_outlet_file,
+        flow_inlet_file=args.flow_inlet_file,
+        flow_outlet_file=args.flow_outlet_file,
+        coords_inlet=args.coords_inlet,
+        coords_outlet=args.coords_outlet,
+        checkpoint_indices=args.time_indices,
+        checkpoint_times=args.time_values,
+        out_dir=args.out_dir,
+        area_inlet_file=args.area_inlet_file if args.area_inlet_file else None,
+        area_outlet_file=args.area_outlet_file if args.area_outlet_file else None,
+        branching_in_file=args.branching_in_file if args.branching_in_file else None,
+        branching_out_file=args.branching_out_file if args.branching_out_file else None,
+        skip_1d=bool(args.skip_1d),
+        fallback_inlet_pressure=float(args.fallback_inlet_pressure),
+        fallback_outlet_pressure=float(args.fallback_outlet_pressure),
+        concave_bc_mode=args.concave_bc_mode,
+        lp_arterial=float(args.lp_arterial),
+        lp_venous=float(args.lp_venous),
+        perm_region_path=args.perm_region_path,
+        perm_low=float(args.perm_low),
+        perm_high=float(args.perm_high),
+        perm_transition_width=float(args.perm_transition_width),
+        leak_pressure_output_csv=args.leak_pressure_output_csv if args.leak_pressure_output_csv else None,
+        organoid_index=int(args.organoid_index),
+        write_fields=bool(args.write_fields),
+    )
 
 
 if __name__ == "__main__":
