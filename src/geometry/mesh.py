@@ -47,7 +47,11 @@ from scipy.spatial import ConvexHull, cKDTree
 from mpi4py import MPI
 import adios4dolfinx
 import dolfinx as dfx
-from dolfinx.io import XDMFFile, gmshio
+from dolfinx.io import XDMFFile
+try:
+    from dolfinx.io import gmshio
+except ImportError:
+    import dolfinx.io.gmshio as gmshio
 from dolfinx import mesh as dmesh
 from basix.ufl import element
 
