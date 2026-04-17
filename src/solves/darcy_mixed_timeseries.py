@@ -826,6 +826,12 @@ class MixedTimeSeriesRunner:
                     entry["checkpoint_index"] = int(checkpoint_index)
                     entry["time"] = time_value
                     entries.append(entry)
+                    if self.mesh.comm.rank == 0:
+                        print(
+                            f"[progress] completed Darcy time-series step {step_idx + 1}/{len(checkpoint_indices)} "
+                            f"(checkpoint_index={int(checkpoint_index)}, time={time_value})",
+                            flush=True,
+                        )
         else:
             for step_idx, checkpoint_index in enumerate(checkpoint_indices):
                 time_value = float(checkpoint_times[step_idx])
@@ -839,6 +845,12 @@ class MixedTimeSeriesRunner:
                 entry["checkpoint_index"] = int(checkpoint_index)
                 entry["time"] = time_value
                 entries.append(entry)
+                if self.mesh.comm.rank == 0:
+                    print(
+                        f"[progress] completed Darcy time-series step {step_idx + 1}/{len(checkpoint_indices)} "
+                        f"(checkpoint_index={int(checkpoint_index)}, time={time_value})",
+                        flush=True,
+                    )
 
         payload = {
             "checkpoint_indices": [int(i) for i in checkpoint_indices],
