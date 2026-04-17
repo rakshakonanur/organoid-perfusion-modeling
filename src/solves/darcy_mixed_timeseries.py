@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import resource
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -28,6 +29,19 @@ from darcy_mixed import PerfusionSolver as MixedPerfusionSolver
 current_dir = Path(
     "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/solves"
 )
+
+
+def _debug_stage(label: str, *, comm=MPI.COMM_WORLD) -> None:
+    try:
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if os.uname().sysname == "Darwin":
+            rss_mb = rss_kb / (1024.0 * 1024.0)
+        else:
+            rss_mb = rss_kb / 1024.0
+        msg = f"[debug] {label} | rank={comm.rank} | maxrss_mb={rss_mb:.1f}"
+    except Exception:
+        msg = f"[debug] {label} | rank={comm.rank}"
+    print(msg, flush=True)
 
 
 def read_pressure_entry(mesh_obj, bp_file: str, entry_index: int, comm=MPI.COMM_WORLD):
@@ -526,6 +540,7 @@ class MixedTimeSeriesRunner:
         self.dx = ufl.dx(mesh)
         self.ds = ufl.Measure("ds", domain=mesh, subdomain_data=facet_tags)
         self.n = ufl.FacetNormal(mesh)
+        _debug_stage("entered _prepare_static_problem", comm=mesh.comm)
 
         stl_files = solver._resolve_perm_region_stls(solver.perm_region_path)
         if stl_files:
@@ -535,6 +550,7 @@ class MixedTimeSeriesRunner:
                     ", ".join(str(p) for p in stl_files),
                     flush=True,
                 )
+            _debug_stage("starting STL permeability build", comm=mesh.comm)
             Kfun = solver.make_K_from_stl_regions_DG0(
                 mesh,
                 stl_files=stl_files,
@@ -542,7 +558,9 @@ class MixedTimeSeriesRunner:
                 K_high=solver.perm_high,
                 transition_width=solver.perm_transition_width,
             )
+            _debug_stage("finished STL permeability build", comm=mesh.comm)
         else:
+            _debug_stage("starting default permeability build", comm=mesh.comm)
             K_base = 1e-7
             K_wall = 1e-7
             K_high = 1.0e-8
@@ -574,6 +592,7 @@ class MixedTimeSeriesRunner:
             Kfun = fem.Function(K_wall_blobs.function_space)
             Kfun.x.array[:] = K_wall_blobs.x.array[:] + K_blobs.x.array[:]
             Kfun.x.scatter_forward()
+            _debug_stage("finished default permeability build", comm=mesh.comm)
 
         I = ufl.Identity(mesh.geometry.dim)
         e = ufl.as_vector((1.0, 0.0, 0.0))
@@ -634,8 +653,10 @@ class MixedTimeSeriesRunner:
 
         self.a_form = fem.form(self.a)
         self.bcs = solver._build_flux_bcs_mixed(self.M, zero_flux_markers)
+        _debug_stage("starting mixed matrix assembly", comm=mesh.comm)
         self.A = assemble_matrix(self.a_form, bcs=self.bcs)
         self.A.assemble()
+        _debug_stage("finished mixed matrix assembly", comm=mesh.comm)
         self.bc_dofs = solver._collect_bc_dofs(self.bcs)
 
         inlet_ext_mask = np.array([solver._split_marker_facets(int(m))[0].size > 0 for m in inlet_marks], dtype=bool)
@@ -651,7 +672,9 @@ class MixedTimeSeriesRunner:
         self.ksp.setType("preonly")
         self.ksp.getPC().setType("lu")
         self.ksp.getPC().setFactorSolverType("mumps")
+        _debug_stage("starting constraint solves / LU factorization", comm=mesh.comm)
         self.z_list = [solver._solve_linear(self.ksp, c) for c in self.c_vecs]
+        _debug_stage("finished constraint solves / LU factorization", comm=mesh.comm)
 
         nt = len(self.inlet_marks_ext)
         self.S = np.zeros((nt, nt), dtype=float)
@@ -664,6 +687,7 @@ class MixedTimeSeriesRunner:
             element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,)),
         )
         self.projector = CachedProjector(self.P1vec)
+        _debug_stage("finished _prepare_static_problem", comm=mesh.comm)
 
     def _build_rhs(self):
         solver = self.solver
@@ -710,8 +734,13 @@ class MixedTimeSeriesRunner:
 
     def solve_current_state(self):
         solver = self.solver
+        idx = getattr(solver, "checkpoint_time_index", None)
+        tval = getattr(solver, "checkpoint_time_value", None)
+        _debug_stage(f"starting solve_current_state checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         b, q_target_ext = self._build_rhs()
+        _debug_stage(f"assembled RHS checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         z0 = solver._solve_linear(self.ksp, b)
+        _debug_stage(f"finished base linear solve checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
 
         nt = len(self.inlet_marks_ext)
         rhs = np.zeros(nt, dtype=float)
@@ -751,11 +780,16 @@ class MixedTimeSeriesRunner:
         interface_bc = solver._compute_interface_bc(p_h, u_h, self.q_src, Q_art_leak, Q_ven_leak)
         interface_bc.update(boundary_audit)
         interface_bc.update(solver._build_mass_balance_report(interface_bc, boundary_audit, self.Q_tot))
+        _debug_stage(f"finished solve_current_state checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         return p_h, u_h, interface_bc
 
     def run_time_series(self, checkpoint_indices: Sequence[int], checkpoint_times: Sequence[float], out_dir: Path, write_fields: bool):
         out_dir.mkdir(parents=True, exist_ok=True)
         entries: List[dict] = []
+        _debug_stage(
+            f"starting run_time_series n_times={len(checkpoint_indices)} write_fields={bool(write_fields)}",
+            comm=self.mesh.comm,
+        )
 
         if write_fields:
             with io.XDMFFile(self.mesh.comm, out_dir / "p.xdmf", "w") as p_writer, io.XDMFFile(
@@ -765,11 +799,19 @@ class MixedTimeSeriesRunner:
                 u_writer.write_mesh(self.mesh)
                 for step_idx, checkpoint_index in enumerate(checkpoint_indices):
                     time_value = float(checkpoint_times[step_idx])
+                    _debug_stage(
+                        f"time-series step start step={step_idx} checkpoint_index={checkpoint_index} time={time_value}",
+                        comm=self.mesh.comm,
+                    )
                     self.solver.set_checkpoint_index(int(checkpoint_index), time_value)
                     p_h, u_h, interface_bc = self.solve_current_state()
                     u_P1 = self.projector(u_h)
                     p_writer.write_function(p_h, time_value)
                     u_writer.write_function(u_P1, time_value)
+                    _debug_stage(
+                        f"time-series step wrote fields step={step_idx} checkpoint_index={checkpoint_index} time={time_value}",
+                        comm=self.mesh.comm,
+                    )
 
                     entry = dict(interface_bc)
                     entry["checkpoint_index"] = int(checkpoint_index)
@@ -778,6 +820,10 @@ class MixedTimeSeriesRunner:
         else:
             for step_idx, checkpoint_index in enumerate(checkpoint_indices):
                 time_value = float(checkpoint_times[step_idx])
+                _debug_stage(
+                    f"time-series step start step={step_idx} checkpoint_index={checkpoint_index} time={time_value}",
+                    comm=self.mesh.comm,
+                )
                 self.solver.set_checkpoint_index(int(checkpoint_index), time_value)
                 _p_h, _u_h, interface_bc = self.solve_current_state()
                 entry = dict(interface_bc)
@@ -806,6 +852,7 @@ class MixedTimeSeriesRunner:
         if self.mesh.comm.rank == 0:
             with open(out_dir / "interface_bc_timeseries.json", "w", encoding="utf-8") as fp:
                 json.dump(payload, fp, indent=2)
+        _debug_stage("finished run_time_series", comm=self.mesh.comm)
 
         return payload
 
@@ -880,6 +927,7 @@ def run_job(
 ):
     global current_dir
 
+    _debug_stage("run_job start")
     time_indices = resolve_selected_indices(checkpoint_indices)
     time_values = np.asarray(checkpoint_times, dtype=float)
     if time_values.size not in {0, len(time_indices)}:
@@ -891,6 +939,9 @@ def run_job(
     current_dir.mkdir(parents=True, exist_ok=True)
     darcy_cg.current_dir = current_dir
     darcy_mixed.current_dir = current_dir
+    _debug_stage(
+        f"creating TimeSeriesPerfusionSolver n_times={len(time_indices)} skip_1d={bool(skip_1d)} write_fields={bool(write_fields)}"
+    )
 
     solver = TimeSeriesPerfusionSolver(
         bioreactor_domain,
@@ -922,7 +973,9 @@ def run_job(
         leak_pressure_output_csv=(Path(leak_pressure_output_csv) if leak_pressure_output_csv else None),
         organoid_index=int(organoid_index),
     )
+    _debug_stage("constructed TimeSeriesPerfusionSolver")
     runner = MixedTimeSeriesRunner(solver)
+    _debug_stage("constructed MixedTimeSeriesRunner")
     payload = runner.run_time_series(time_indices, time_values, current_dir, write_fields=bool(write_fields))
     if MPI.COMM_WORLD.rank == 0:
         print("Darcy mixed time-series solve complete.")
