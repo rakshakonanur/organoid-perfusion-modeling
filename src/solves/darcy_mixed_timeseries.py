@@ -235,6 +235,7 @@ class TimeSeriesPerfusionSolver(MixedPerfusionSolver):
         branching_out_file=None,
         leak_pressure_output_csv: Optional[Path] = None,
         organoid_index: int = 0,
+        linear_solver_mode: str = "direct",
     ):
         self.perm_region_path = str(perm_region_path).strip()
         self.perm_low = float(perm_low)
@@ -264,6 +265,7 @@ class TimeSeriesPerfusionSolver(MixedPerfusionSolver):
             self.checkpoint_times = np.asarray(self.checkpoint_indices, dtype=float)
         self.leak_pressure_output_csv = Path(leak_pressure_output_csv).expanduser().resolve() if leak_pressure_output_csv else None
         self.organoid_index = int(organoid_index)
+        self.linear_solver_mode = str(linear_solver_mode).strip().lower()
 
         comm = self.mesh.comm
         self._timeseries_samples: Dict[int, dict] = {}
@@ -524,6 +526,45 @@ class MixedTimeSeriesRunner:
         self.mesh = solver.mesh
         self._prepare_static_problem()
 
+    def _configure_linear_solver(self) -> PETSc.KSP:
+        mesh = self.mesh
+        mode = getattr(self.solver, "linear_solver_mode", "direct")
+        ksp = PETSc.KSP().create(mesh.comm)
+        ksp.setOperators(self.A)
+        ksp.setOptionsPrefix("darcy_ts_")
+
+        if mode == "fieldsplit":
+            is_u = PETSc.IS().createGeneral(np.asarray(self.U_to_W, dtype=np.int32), comm=mesh.comm)
+            is_p = PETSc.IS().createGeneral(np.asarray(self.P_to_W, dtype=np.int32), comm=mesh.comm)
+            ksp.setType("gmres")
+            ksp.setGMRESRestart(100)
+            ksp.setTolerances(rtol=1e-8, atol=1e-10, max_it=500)
+            pc = ksp.getPC()
+            pc.setType("fieldsplit")
+            pc.setFieldSplitType(PETSc.PC.CompositeType.SCHUR)
+            pc.setFieldSplitSchurFactType(PETSc.PC.SchurFactType.FULL)
+            pc.setFieldSplitSchurPreType(PETSc.PC.SchurPreType.SELFP, None)
+            pc.setFieldSplitIS(("u", is_u), ("p", is_p))
+            ksp.setUp()
+            subksps = pc.getFieldSplitSubKSP()
+            if len(subksps) >= 1:
+                subksps[0].setType("preonly")
+                subpc0 = subksps[0].getPC()
+                if mesh.comm.size > 1:
+                    subpc0.setType("bjacobi")
+                else:
+                    subpc0.setType("ilu")
+            if len(subksps) >= 2:
+                subksps[1].setType("preonly")
+                subksps[1].getPC().setType("jacobi")
+        else:
+            ksp.setType("preonly")
+            ksp.getPC().setType("lu")
+            ksp.getPC().setFactorSolverType("mumps")
+
+        ksp.setFromOptions()
+        return ksp
+
     def _prepare_static_problem(self) -> None:
         mesh = self.mesh
         solver = self.solver
@@ -535,6 +576,8 @@ class MixedTimeSeriesRunner:
         P_el = element("DG", mesh.basix_cell(), 0)
         M_el = mixed_element([U_el, P_el])
         self.M = fem.functionspace(mesh, M_el)
+        self.U_block, self.U_to_W = self.M.sub(0).collapse()
+        self.P_block, self.P_to_W = self.M.sub(1).collapse()
         self.u_trial, self.p_trial = ufl.TrialFunctions(self.M)
         self.w_test, self.v_test = ufl.TestFunctions(self.M)
         self.dx = ufl.dx(mesh)
@@ -607,8 +650,7 @@ class MixedTimeSeriesRunner:
         Kx = perm_low + alpha * (5.0 * perm_high - perm_low)
         self.Kinv_tensor = (1.0 / K_perp) * I + ((1.0 / Kx) - (1.0 / K_perp)) * ufl.outer(e, e)
 
-        P, _ = self.M.sub(1).collapse()
-        self.q_src = solver._build_q_src(P)
+        self.q_src = solver._build_q_src(self.P_block)
         Q_local = fem.assemble_scalar(fem.form(self.q_src * self.dx))
         self.Q_tot = mesh.comm.allreduce(Q_local, op=MPI.SUM)
 
@@ -659,22 +701,19 @@ class MixedTimeSeriesRunner:
         _debug_stage("finished mixed matrix assembly", comm=mesh.comm)
         self.bc_dofs = solver._collect_bc_dofs(self.bcs)
 
-        inlet_ext_mask = np.array([solver._split_marker_facets(int(m))[0].size > 0 for m in inlet_marks], dtype=bool)
-        inlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in inlet_marks], dtype=bool)
-        outlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in outlet_marks], dtype=bool)
-        self.inlet_marks_ext = np.asarray(inlet_marks, dtype=int)[inlet_ext_mask]
-        self.inlet_marks_int = np.asarray(inlet_marks, dtype=int)[inlet_int_mask]
-        self.outlet_marks_int = np.asarray(outlet_marks, dtype=int)[outlet_int_mask]
+        self.inlet_ext_mask = np.array([solver._split_marker_facets(int(m))[0].size > 0 for m in inlet_marks], dtype=bool)
+        self.inlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in inlet_marks], dtype=bool)
+        self.outlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in outlet_marks], dtype=bool)
+        self.inlet_marks_ext = np.asarray(inlet_marks, dtype=int)[self.inlet_ext_mask]
+        self.inlet_marks_int = np.asarray(inlet_marks, dtype=int)[self.inlet_int_mask]
+        self.outlet_marks_int = np.asarray(outlet_marks, dtype=int)[self.outlet_int_mask]
 
         self.c_vecs = solver._build_constraint_vectors(self.M, self.inlet_marks_ext, self.bc_dofs)
-        self.ksp = PETSc.KSP().create(mesh.comm)
-        self.ksp.setOperators(self.A)
-        self.ksp.setType("preonly")
-        self.ksp.getPC().setType("lu")
-        self.ksp.getPC().setFactorSolverType("mumps")
-        _debug_stage("starting constraint solves / LU factorization", comm=mesh.comm)
+        self.ksp = self._configure_linear_solver()
+        solver_mode = getattr(solver, "linear_solver_mode", "direct")
+        _debug_stage(f"starting constraint solves / factorization (mode={solver_mode})", comm=mesh.comm)
         self.z_list = [solver._solve_linear(self.ksp, c) for c in self.c_vecs]
-        _debug_stage("finished constraint solves / LU factorization", comm=mesh.comm)
+        _debug_stage(f"finished constraint solves / factorization (mode={solver_mode})", comm=mesh.comm)
 
         nt = len(self.inlet_marks_ext)
         self.S = np.zeros((nt, nt), dtype=float)
@@ -709,10 +748,8 @@ class MixedTimeSeriesRunner:
                 if 0 <= idx < len(solver.q_outlet):
                     q_out_target_out[j] = abs(float(solver.q_outlet[idx]))
 
-        inlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in self.inlet_marks], dtype=bool)
-        outlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in self.outlet_marks], dtype=bool)
-        q_in_target_int = np.asarray(q_in_target_in, dtype=float)[inlet_int_mask]
-        q_out_target_int = np.asarray(q_out_target_out, dtype=float)[outlet_int_mask]
+        q_in_target_int = np.asarray(q_in_target_in, dtype=float)[self.inlet_int_mask]
+        q_out_target_int = np.asarray(q_out_target_out, dtype=float)[self.outlet_int_mask]
 
         L += solver._build_embedded_port_flow_rhs(
             self.v_test,
@@ -727,9 +764,7 @@ class MixedTimeSeriesRunner:
         apply_lifting(b, [self.a_form], [self.bcs])
         b.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE)
         set_bc(b, self.bcs)
-        q_target_ext = np.asarray(q_target, dtype=float)[
-            np.array([self.solver._split_marker_facets(int(m))[0].size > 0 for m in self.inlet_marks], dtype=bool)
-        ]
+        q_target_ext = np.asarray(q_target, dtype=float)[self.inlet_ext_mask]
         return b, q_target_ext
 
     def solve_current_state(self):
@@ -910,6 +945,7 @@ def parse_args():
     ap.add_argument("--organoid-index", type=int, default=0)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--write-fields", action="store_true")
+    ap.add_argument("--linear-solver-mode", choices=["direct", "fieldsplit"], default="direct")
     return ap.parse_args()
 
 
@@ -945,6 +981,7 @@ def run_job(
     leak_pressure_output_csv=None,
     organoid_index: int = 0,
     write_fields: bool = False,
+    linear_solver_mode: str = "direct",
 ):
     global current_dir
 
@@ -993,6 +1030,7 @@ def run_job(
         branching_out_file=branching_out_file,
         leak_pressure_output_csv=(Path(leak_pressure_output_csv) if leak_pressure_output_csv else None),
         organoid_index=int(organoid_index),
+        linear_solver_mode=str(linear_solver_mode),
     )
     _debug_stage("constructed TimeSeriesPerfusionSolver")
     runner = MixedTimeSeriesRunner(solver)
@@ -1036,6 +1074,7 @@ def main():
         leak_pressure_output_csv=args.leak_pressure_output_csv if args.leak_pressure_output_csv else None,
         organoid_index=int(args.organoid_index),
         write_fields=bool(args.write_fields),
+        linear_solver_mode=str(args.linear_solver_mode),
     )
 
 
