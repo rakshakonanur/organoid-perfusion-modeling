@@ -351,16 +351,25 @@ def _read_leaf_branch_names(branching_csv: Path) -> List[str]:
     if not branching_csv.exists():
         die(f"Missing branching CSV: {branching_csv}")
 
+    def _is_blank(value: object) -> bool:
+        text = str(value if value is not None else "").strip().lower()
+        return text in {"", "nan", "none", "null"}
+
     leaves: List[int] = []
     with branching_csv.open("r", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            c1 = str(row.get("Child1", "")).strip()
-            c2 = str(row.get("Child2", "")).strip()
-            if c1 or c2:
+            c1 = row.get("Child1", "")
+            c2 = row.get("Child2", "")
+            if not (_is_blank(c1) and _is_blank(c2)):
                 continue
-            raw_idx = str(row.get("Index", "")).strip() or str(row.get("", "")).strip()
-            if not raw_idx:
+            raw_idx = None
+            for key in ("Index", "", "Unnamed: 0"):
+                candidate = row.get(key, None)
+                if not _is_blank(candidate):
+                    raw_idx = str(candidate).strip()
+                    break
+            if raw_idx is None:
                 continue
             try:
                 leaves.append(int(float(raw_idx)))
