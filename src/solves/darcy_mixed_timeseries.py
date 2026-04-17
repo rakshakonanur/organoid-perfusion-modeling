@@ -759,11 +759,15 @@ class MixedTimeSeriesRunner:
         x_h = fem.Function(self.M)
         x.copy(result=x_h.x.petsc_vec)
         x_h.x.scatter_forward()
+        _debug_stage(f"copied corrected mixed solution checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
 
         u_sub, p_sub = x_h.split()
+        _debug_stage(f"split mixed solution checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         u_h = u_sub.collapse()
         p_h = p_sub.collapse()
+        _debug_stage(f"collapsed mixed solution checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
 
+        _debug_stage(f"starting boundary audit checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         Q_art_leak = fem.assemble_scalar(
             fem.form(ufl.dot(u_h, self.n) * self.ds(int(solver.arterial_concave_marker)))
         )
@@ -773,13 +777,18 @@ class MixedTimeSeriesRunner:
         Q_art_leak = self.mesh.comm.allreduce(Q_art_leak, op=MPI.SUM)
         Q_ven_leak = self.mesh.comm.allreduce(Q_ven_leak, op=MPI.SUM)
         boundary_audit = solver._audit_boundary_fluxes(u_h)
+        _debug_stage(f"finished boundary audit checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
 
         if hasattr(solver, "K_tensor"):
             delattr(solver, "K_tensor")
 
+        _debug_stage(f"starting _compute_interface_bc checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         interface_bc = solver._compute_interface_bc(p_h, u_h, self.q_src, Q_art_leak, Q_ven_leak)
+        _debug_stage(f"finished _compute_interface_bc checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
+        _debug_stage(f"starting mass balance report checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         interface_bc.update(boundary_audit)
         interface_bc.update(solver._build_mass_balance_report(interface_bc, boundary_audit, self.Q_tot))
+        _debug_stage(f"finished mass balance report checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         _debug_stage(f"finished solve_current_state checkpoint_index={idx} time={tval}", comm=self.mesh.comm)
         return p_h, u_h, interface_bc
 
