@@ -328,6 +328,171 @@ def read_unique_output_times(output_csv: Path) -> np.ndarray:
     return np.unique(np.asarray(times, dtype=float))
 
 
+def _read_split_rows_at_time(csv_path: Path, time_value: float = 0.0, tol: float = 1e-9) -> List[dict]:
+    if not csv_path.exists():
+        die(f"Missing split CSV: {csv_path}")
+
+    rows: List[dict] = []
+    with csv_path.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                t = float(row.get("time", 0.0))
+            except Exception:
+                continue
+            if abs(t - float(time_value)) <= float(tol):
+                rows.append(row)
+    if not rows:
+        die(f"No rows found at time={time_value} in {csv_path}")
+    return rows
+
+
+def _read_leaf_branch_names(branching_csv: Path) -> List[str]:
+    if not branching_csv.exists():
+        die(f"Missing branching CSV: {branching_csv}")
+
+    leaves: List[int] = []
+    with branching_csv.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            c1 = str(row.get("Child1", "")).strip()
+            c2 = str(row.get("Child2", "")).strip()
+            if c1 or c2:
+                continue
+            raw_idx = str(row.get("Index", "")).strip() or str(row.get("", "")).strip()
+            if not raw_idx:
+                continue
+            try:
+                leaves.append(int(float(raw_idx)))
+            except Exception:
+                continue
+    if not leaves:
+        die(f"Could not determine terminal leaf branches from {branching_csv}")
+    return [f"branch {idx}_seg0" for idx in sorted(set(leaves))]
+
+
+def _match_terminal_names(
+    target_values: np.ndarray,
+    split_rows: List[dict],
+    leaf_names: List[str],
+    value_key: str = "pressure_out",
+) -> List[str]:
+    rows_by_name = {str(row.get("name", "")).strip(): row for row in split_rows}
+    candidates = []
+    for name in leaf_names:
+        row = rows_by_name.get(name)
+        if row is None:
+            continue
+        raw = row.get(value_key, None)
+        if raw in (None, ""):
+            continue
+        try:
+            candidates.append((name, float(raw)))
+        except Exception:
+            continue
+
+    if len(candidates) < int(np.asarray(target_values).size):
+        die(
+            f"Not enough terminal rows in split data to map {np.asarray(target_values).size} targets "
+            f"using {value_key}. Found {len(candidates)} candidates."
+        )
+
+    unused = list(range(len(candidates)))
+    ordered_names: List[str] = []
+    for target in np.asarray(target_values, dtype=float).ravel():
+        best = min(unused, key=lambda i: abs(candidates[i][1] - float(target)))
+        ordered_names.append(candidates[best][0])
+        unused.remove(best)
+    return ordered_names
+
+
+def _build_canonical_terminal_order(steady_run: Path, n_organoids: int) -> Dict[int, dict]:
+    order: Dict[int, dict] = {}
+    split_dir = steady_run / "split"
+    for k in range(1, n_organoids + 1):
+        iface_path = steady_run / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
+        iface = load_json(iface_path)
+
+        inlet_rows = _read_split_rows_at_time(split_dir / f"organoid_{k}_inlet.csv", time_value=0.0)
+        outlet_rows = _read_split_rows_at_time(split_dir / f"organoid_{k}_outlet.csv", time_value=0.0)
+        inlet_leaves = _read_leaf_branch_names(steady_run / f"organoid_{k}" / "branchingData_0.csv")
+        outlet_leaves = _read_leaf_branch_names(steady_run / f"organoid_{k}" / "branchingData_1.csv")
+
+        order[k] = {
+            "inlet": _match_terminal_names(
+                np.asarray(iface.get("p_inlet_target", iface.get("p_inlet_nodes", [])), dtype=float),
+                inlet_rows,
+                inlet_leaves,
+                value_key="pressure_out",
+            ),
+            "outlet": _match_terminal_names(
+                np.asarray(iface.get("p_outlet_target", iface.get("p_outlet_nodes", [])), dtype=float),
+                outlet_rows,
+                outlet_leaves,
+                value_key="pressure_out",
+            ),
+        }
+    return order
+
+
+def _reorder_terminal_axis(values: np.ndarray, current_names: List[str], canonical_names: List[str]) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 0 or arr.size == 0:
+        return arr
+    if arr.shape[-1] != len(current_names):
+        die(
+            f"Terminal array has width {arr.shape[-1]} but current terminal ordering has "
+            f"{len(current_names)} entries."
+        )
+    index_by_name = {name: i for i, name in enumerate(current_names)}
+    missing = [name for name in canonical_names if name not in index_by_name]
+    if missing:
+        die(f"Missing terminal branches in transient ordering: {missing[:5]}")
+    perm = [index_by_name[name] for name in canonical_names]
+    return np.take(arr, perm, axis=-1)
+
+
+def _reorder_waveform_terminals(
+    iter_dir: Path,
+    organoid_idx: int,
+    data: dict,
+    canonical_order: Dict[int, dict],
+) -> dict:
+    if bool(data.get("skip_1d", False)):
+        return data
+
+    split_dir = iter_dir / "split"
+    inlet_rows = _read_split_rows_at_time(split_dir / f"organoid_{organoid_idx}_inlet.csv", time_value=0.0)
+    outlet_rows = _read_split_rows_at_time(split_dir / f"organoid_{organoid_idx}_outlet.csv", time_value=0.0)
+    inlet_leaves = _read_leaf_branch_names(iter_dir / f"organoid_{organoid_idx}" / "branchingData_0.csv")
+    outlet_leaves = _read_leaf_branch_names(iter_dir / f"organoid_{organoid_idx}" / "branchingData_1.csv")
+
+    p_in_target = np.asarray(data.get("p_inlet_target", []), dtype=float)
+    p_out_target = np.asarray(data.get("p_outlet_target", []), dtype=float)
+    if p_in_target.ndim != 2 or p_out_target.ndim != 2 or p_in_target.shape[0] == 0 or p_out_target.shape[0] == 0:
+        return data
+
+    inlet_names = _match_terminal_names(p_in_target[0], inlet_rows, inlet_leaves, value_key="pressure_out")
+    outlet_names = _match_terminal_names(p_out_target[0], outlet_rows, outlet_leaves, value_key="pressure_out")
+
+    reordered = dict(data)
+    for key in ("p_inlet_nodes", "p_inlet_target", "q_inlet", "q_inlet_target"):
+        if key in data:
+            reordered[key] = _reorder_terminal_axis(
+                np.asarray(data[key], dtype=float),
+                inlet_names,
+                canonical_order[organoid_idx]["inlet"],
+            )
+    for key in ("p_outlet_nodes", "p_outlet_target"):
+        if key in data:
+            reordered[key] = _reorder_terminal_axis(
+                np.asarray(data[key], dtype=float),
+                outlet_names,
+                canonical_order[organoid_idx]["outlet"],
+            )
+    return reordered
+
+
 def select_time_indices(times: np.ndarray, stride: int) -> tuple[np.ndarray, np.ndarray]:
     if times.size == 0:
         return np.zeros(0, dtype=int), np.zeros(0, dtype=float)
@@ -691,6 +856,7 @@ def collect_interface_waveforms(
     n_organoids: int,
     selected_indices: np.ndarray,
     selected_times: np.ndarray,
+    canonical_order: Optional[Dict[int, dict]] = None,
 ) -> Dict[int, dict]:
     results: Dict[int, dict] = {}
     for k in range(1, n_organoids + 1):
@@ -711,6 +877,8 @@ def collect_interface_waveforms(
                 "p_concave_inlet_bc": np.asarray(raw.get("p_concave_inlet_bc", []), dtype=float),
                 "p_concave_outlet_bc": np.asarray(raw.get("p_concave_outlet_bc", []), dtype=float),
             }
+            if canonical_order is not None:
+                results[k] = _reorder_waveform_terminals(iter_dir, k, results[k], canonical_order)
             continue
 
         paths = [
@@ -736,6 +904,8 @@ def collect_interface_waveforms(
             "p_concave_inlet_bc": np.asarray([row.get("p_concave_inlet_bc", 0.0) for row in raw], dtype=float),
             "p_concave_outlet_bc": np.asarray([row.get("p_concave_outlet_bc", 0.0) for row in raw], dtype=float),
         }
+        if canonical_order is not None:
+            results[k] = _reorder_waveform_terminals(iter_dir, k, results[k], canonical_order)
     return results
 
 
@@ -1061,6 +1231,7 @@ def main() -> None:
 
     coupling_times = coupling_times_cycle
     current_state = load_steady_interface_state(steady_run, args.n_organoids, coupling_times)
+    canonical_terminal_order = None if args.no_synthetic_vasculature else _build_canonical_terminal_order(steady_run, args.n_organoids)
     if args.no_synthetic_vasculature:
         for k in current_state:
             current_state[k]["p_inlet_bc"] = np.zeros((coupling_times.size, 0), dtype=float)
@@ -1174,7 +1345,13 @@ def main() -> None:
             comm.barrier()
 
             if rank == 0:
-                waveforms = collect_interface_waveforms(iter_dir, args.n_organoids, selected_indices, selected_times)
+                waveforms = collect_interface_waveforms(
+                    iter_dir,
+                    args.n_organoids,
+                    selected_indices,
+                    selected_times,
+                    canonical_order=canonical_terminal_order,
+                )
                 all_ok, metrics = compute_convergence(
                     waveforms,
                     current_state,
