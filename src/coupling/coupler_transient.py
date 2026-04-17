@@ -556,6 +556,7 @@ def run_darcy_time_series_batched(
             "--out-dir", str(out_dir),
             "--time-indices", *[str(int(idx)) for idx in np.asarray(selected_indices, dtype=int)],
             "--time-values", *[str(float(t)) for t in np.asarray(selected_times, dtype=float)],
+            "--linear-solver-mode", str(args.darcy_linear_solver_mode),
         ]
         if args.no_synthetic_vasculature:
             cmd.append("--skip-1d")
@@ -640,6 +641,7 @@ def run_darcy_time_series_batched_inprocess(
             out_dir=str(out_dir),
             checkpoint_indices=[int(idx) for idx in np.asarray(selected_indices, dtype=int)],
             checkpoint_times=[float(t) for t in np.asarray(selected_times, dtype=float)],
+            linear_solver_mode=str(args.darcy_linear_solver_mode),
             skip_1d=bool(args.no_synthetic_vasculature),
             leak_pressure_output_csv=str(output_csv) if args.no_synthetic_vasculature else None,
             perm_region_path=perm_region_path,
@@ -778,35 +780,87 @@ def compute_convergence(
                 "venous": q_ven_metrics,
             }
             rp = 0.0
+            q_metric_label = "concave_wall_flow"
+            p_metric_label = "concave_wall_pressure"
         else:
-            rq = 0.0
+            q_art_target = interp_series(
+                coupling_times,
+                np.asarray(current_state[k]["q_artery_leak_bc"], dtype=float),
+                data["times"],
+            )
+            q_ven_target = interp_series(
+                coupling_times,
+                np.asarray(current_state[k]["q_venous_leak_bc"], dtype=float),
+                data["times"],
+            )
+            rq = max(
+                max_rel(-np.asarray(data["q_artery_leak"], dtype=float), q_art_target),
+                max_rel(-np.asarray(data["q_venous_leak"], dtype=float), q_ven_target),
+            )
+            q_art_metrics = waveform_error_metrics(
+                -np.asarray(data["q_artery_leak"], dtype=float),
+                q_art_target,
+            )
+            q_ven_metrics = waveform_error_metrics(
+                -np.asarray(data["q_venous_leak"], dtype=float),
+                q_ven_target,
+            )
+            q_metrics = {
+                "max_scaled": float(max(q_art_metrics["max_scaled"], q_ven_metrics["max_scaled"])),
+                "l2_normalized": float(max(q_art_metrics["l2_normalized"], q_ven_metrics["l2_normalized"])),
+                "max_abs": float(max(q_art_metrics["max_abs"], q_ven_metrics["max_abs"])),
+                "artery": q_art_metrics,
+                "venous": q_ven_metrics,
+            }
             rp = 0.0
-            q_darcy_rows = []
-            q_target_rows = []
+            p_in_metrics_rows = []
+            p_out_metrics_rows = []
             for i in range(len(data["times"])):
-                q_row = np.asarray(data["q_inlet"][i], dtype=float)
-                q_target_row = np.asarray(data["q_inlet_target"][i], dtype=float)
-                q_darcy_rows.append(q_row.ravel())
-                q_target_rows.append(q_target_row.ravel())
-                rq = max(rq, max_rel(q_row, q_target_row))
+                p_in_row = np.asarray(data["p_inlet_nodes"][i], dtype=float)
+                p_in_target_row = np.asarray(data["p_inlet_target"][i], dtype=float)
+                p_out_row = np.asarray(data["p_outlet_nodes"][i], dtype=float)
+                p_out_target_row = np.asarray(data["p_outlet_target"][i], dtype=float)
+                p_in_metrics_rows.append((p_in_row, p_in_target_row))
+                p_out_metrics_rows.append((p_out_row, p_out_target_row))
                 rp = max(
                     rp,
                     max_rel(
-                        np.asarray(data["p_inlet_nodes"][i], dtype=float),
-                        np.asarray(data["p_inlet_target"][i], dtype=float),
+                        p_in_row,
+                        p_in_target_row,
                         floor=1e-12,
                     ),
                     max_rel(
-                        np.asarray(data["p_outlet_nodes"][i], dtype=float),
-                        np.asarray(data["p_outlet_target"][i], dtype=float),
+                        p_out_row,
+                        p_out_target_row,
                         floor=1e-12,
                     ),
                 )
-            q_metrics = waveform_error_metrics(
-                np.concatenate(q_darcy_rows) if q_darcy_rows else np.zeros((0,), dtype=float),
-                np.concatenate(q_target_rows) if q_target_rows else np.zeros((0,), dtype=float),
+            p_in_metrics = waveform_error_metrics(
+                np.concatenate([row[0].ravel() for row in p_in_metrics_rows]) if p_in_metrics_rows else np.zeros((0,), dtype=float),
+                np.concatenate([row[1].ravel() for row in p_in_metrics_rows]) if p_in_metrics_rows else np.zeros((0,), dtype=float),
+                floor=1e-12,
             )
+            p_out_metrics = waveform_error_metrics(
+                np.concatenate([row[0].ravel() for row in p_out_metrics_rows]) if p_out_metrics_rows else np.zeros((0,), dtype=float),
+                np.concatenate([row[1].ravel() for row in p_out_metrics_rows]) if p_out_metrics_rows else np.zeros((0,), dtype=float),
+                floor=1e-12,
+            )
+            p_metrics = {
+                "max_scaled": float(max(p_in_metrics["max_scaled"], p_out_metrics["max_scaled"])),
+                "l2_normalized": float(max(p_in_metrics["l2_normalized"], p_out_metrics["l2_normalized"])),
+                "max_abs": float(max(p_in_metrics["max_abs"], p_out_metrics["max_abs"])),
+                "inlet": p_in_metrics,
+                "outlet": p_out_metrics,
+            }
+            q_metric_label = "concave_wall_flow"
+            p_metric_label = "terminal_pressure"
         ok = bool(rq <= tol_q and rp <= tol_p)
+        if bool(data.get("skip_1d", False)):
+            p_metrics = {
+                "max_scaled": 0.0,
+                "l2_normalized": 0.0,
+                "max_abs": 0.0,
+            }
         metrics[k] = {
             "rel_q": float(rq),
             "rel_p": float(rp),
@@ -814,6 +868,9 @@ def compute_convergence(
             "q_l2_normalized": float(q_metrics["l2_normalized"]),
             "q_max_abs": float(q_metrics["max_abs"]),
             "q_metrics": q_metrics,
+            "q_metric_label": q_metric_label,
+            "p_metrics": p_metrics,
+            "p_metric_label": p_metric_label,
             "converged": ok,
         }
         all_ok = all_ok and ok
@@ -931,6 +988,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--darcy-mpi-procs", type=int, default=1,
                     help="MPI ranks for each Darcy solve (1 = serial).")
     ap.add_argument("--darcy-mpirun-cmd", default="/opt/miniconda3/envs/fenicsx-env/bin/mpiexec.hydra")
+    ap.add_argument("--darcy-linear-solver-mode", choices=["direct", "fieldsplit"], default="direct",
+                    help="Linear solver backend for batched mixed Darcy solves.")
     ap.add_argument("--darcy-time-index-stride", type=int, default=1,
                     help="Solve Darcy every Nth transient checkpoint and always include the final checkpoint.")
     ap.add_argument("--use-batched-darcy-timeseries", action="store_true",
@@ -1159,11 +1218,12 @@ def main() -> None:
                 for k in range(1, args.n_organoids + 1):
                     metric = metrics[k]
                     print(
-                        f"  organoid_{k}: rel_q={metric['rel_q']:.3e}, "
+                        f"  organoid_{k}: rel_q[{metric['q_metric_label']}]={metric['rel_q']:.3e}, "
                         f"q_max_scaled={metric['q_max_scaled']:.3e}, "
                         f"q_l2={metric['q_l2_normalized']:.3e}, "
                         f"q_max_abs={metric['q_max_abs']:.3e}, "
-                        f"rel_p={metric['rel_p']:.3e}, converged={metric['converged']}"
+                        f"rel_p[{metric['p_metric_label']}]={metric['rel_p']:.3e}, "
+                        f"converged={metric['converged']}"
                     )
 
                 if all_ok:
