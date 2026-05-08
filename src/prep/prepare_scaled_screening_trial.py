@@ -356,9 +356,10 @@ def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
         concave_profile_compartment_spacing=float(args.concave_profile_compartment_spacing),
     )
 
-    for organoid_id in range(2, int(args.n_organoids) + 1):
+    for organoid_id in range(1, int(args.n_organoids) + 1):
         dst_org = _copy_trial_organoid_inputs(trial_dir, organoid_id, prepared_root)
-        _copy_well_geometry_from_tmp_mesh(tmp_mesh_dir, dst_org / "geometry", organoid_id)
+        if organoid_id >= 2:
+            _copy_well_geometry_from_tmp_mesh(tmp_mesh_dir, dst_org / "geometry", organoid_id)
 
     np_mod = scaled_fields._import_numpy()
     h5py = scaled_fields._import_h5py()
