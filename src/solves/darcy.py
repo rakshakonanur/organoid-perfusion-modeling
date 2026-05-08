@@ -22,6 +22,23 @@ from dolfinx.io import VTKFile
 current_dir = Path("/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/solves")
 
 
+def _make_linear_problem(a, L, bcs=None, petsc_options=None, petsc_options_prefix=None):
+    kwargs = {}
+    if bcs is not None:
+        kwargs["bcs"] = bcs
+    if petsc_options is not None:
+        kwargs["petsc_options"] = petsc_options
+    if petsc_options_prefix is not None:
+        kwargs["petsc_options_prefix"] = petsc_options_prefix
+    try:
+        return LinearProblem(a, L, **kwargs)
+    except TypeError as exc:
+        if "petsc_options_prefix" not in str(exc):
+            raise
+        kwargs.pop("petsc_options_prefix", None)
+        return LinearProblem(a, L, **kwargs)
+
+
 def _mesh_cache_root() -> Path:
     for key in ("SLURM_TMPDIR", "TMPDIR", "TEMP", "TMP"):
         val = os.environ.get(key, "").strip()
@@ -185,6 +202,12 @@ class PerfusionSolver:
                  inlet_coord, outlet_coord,
                  area_inlet_file=None, area_outlet_file=None,
                  concave_bc_mode: str = "dirichlet",
+                 concave_pressure_profile: str = "constant",
+                 concave_pressure_profile_axis: str = "y",
+                 arterial_pressure_profile_low=None,
+                 arterial_pressure_profile_high=None,
+                 venous_pressure_profile_low=None,
+                 venous_pressure_profile_high=None,
                  lp_arterial: float = 0.0,
                  lp_venous: float = 0.0,
                  skip_1d: bool = False,
@@ -374,10 +397,161 @@ class PerfusionSolver:
         # BC pressures sampled on rank 0 and broadcast to all ranks.
         self.p_in_BC = float(p_in_BC)
         self.p_out_BC = float(p_out_BC)
+        self.concave_pressure_profile = str(concave_pressure_profile).strip().lower()
+        if self.concave_pressure_profile not in {"constant", "linear"}:
+            raise ValueError(
+                "concave_pressure_profile must be 'constant' or 'linear', "
+                f"got {concave_pressure_profile!r}"
+            )
+        self.concave_pressure_profile_axis = self._resolve_axis_index(
+            concave_pressure_profile_axis,
+            self.mesh.geometry.dim,
+        )
+        self.concave_pressure_profile_axis_name = "xyz"[self.concave_pressure_profile_axis]
+        self.concave_art_pressure_low = (
+            float(self.p_in_BC)
+            if arterial_pressure_profile_low is None
+            else float(arterial_pressure_profile_low)
+        )
+        self.concave_art_pressure_high = (
+            float(self.p_in_BC)
+            if arterial_pressure_profile_high is None
+            else float(arterial_pressure_profile_high)
+        )
+        self.concave_ven_pressure_low = (
+            float(self.p_out_BC)
+            if venous_pressure_profile_low is None
+            else float(venous_pressure_profile_low)
+        )
+        self.concave_ven_pressure_high = (
+            float(self.p_out_BC)
+            if venous_pressure_profile_high is None
+            else float(venous_pressure_profile_high)
+        )
+        self._concave_marker_axis_bounds = {}
 
         if self.mesh.comm.rank == 0:
             print(f"Dirichlet BC pressures: p_in = {self.p_in_BC:.3e}, "
                   f"p_out = {self.p_out_BC:.3e}")
+            if self.concave_pressure_profile == "linear":
+                print(
+                    "Concave pressure profile: "
+                    f"axis={self.concave_pressure_profile_axis_name}, "
+                    f"arterial=({self.concave_art_pressure_low:.3e}, {self.concave_art_pressure_high:.3e}), "
+                    f"venous=({self.concave_ven_pressure_low:.3e}, {self.concave_ven_pressure_high:.3e})"
+                )
+
+    @staticmethod
+    def _resolve_axis_index(axis, gdim):
+        if isinstance(axis, str):
+            token = axis.strip().lower()
+            mapping = {"x": 0, "y": 1, "z": 2}
+            if token not in mapping:
+                raise ValueError(
+                    f"Unsupported concave pressure profile axis {axis!r}; expected one of x/y/z"
+                )
+            idx = mapping[token]
+        else:
+            idx = int(axis)
+        if idx < 0 or idx >= int(gdim):
+            raise ValueError(
+                f"Concave pressure profile axis index {idx} is invalid for geometry dimension {gdim}"
+            )
+        return idx
+
+    def _marker_axis_interval(self, marker):
+        marker = int(marker)
+        cached = self._concave_marker_axis_bounds.get(marker, None)
+        if cached is not None:
+            return cached
+
+        mesh = self.mesh
+        facet_tags = self.facet_tags
+        fdim = mesh.topology.dim - 1
+        axis = int(self.concave_pressure_profile_axis)
+
+        mesh.topology.create_entities(fdim)
+        mesh.topology.create_connectivity(fdim, 0)
+        f_to_v = mesh.topology.connectivity(fdim, 0)
+
+        facets = facet_tags.find(marker)
+        if facets.size == 0:
+            found_local = 0
+            local_min = np.inf
+            local_max = -np.inf
+        else:
+            verts = []
+            for facet in facets:
+                verts.extend(int(v) for v in f_to_v.links(int(facet)))
+            verts = np.unique(np.asarray(verts, dtype=np.int32))
+            coords = mesh.geometry.x[verts, axis]
+            found_local = 1 if coords.size > 0 else 0
+            local_min = float(np.min(coords)) if coords.size > 0 else np.inf
+            local_max = float(np.max(coords)) if coords.size > 0 else -np.inf
+
+        found_any = mesh.comm.allreduce(found_local, op=MPI.SUM)
+        if found_any <= 0:
+            self._concave_marker_axis_bounds[marker] = None
+            return None
+
+        bounds = (
+            float(mesh.comm.allreduce(local_min, op=MPI.MIN)),
+            float(mesh.comm.allreduce(local_max, op=MPI.MAX)),
+        )
+        self._concave_marker_axis_bounds[marker] = bounds
+        return bounds
+
+    def _evaluate_linear_profile_on_coords(self, coords, marker, pressure_low, pressure_high, fallback_pressure):
+        pts = np.asarray(coords, dtype=float)
+        if pts.ndim == 1:
+            pts = pts.reshape(1, -1)
+        vals = np.full(pts.shape[0], float(fallback_pressure), dtype=np.float64)
+        bounds = self._marker_axis_interval(marker)
+        if bounds is None:
+            return vals
+        x_min, x_max = bounds
+        denom = float(x_max - x_min)
+        if abs(denom) <= 1e-14:
+            vals.fill(0.5 * (float(pressure_low) + float(pressure_high)))
+            return vals
+        xi = np.clip((pts[:, int(self.concave_pressure_profile_axis)] - x_min) / denom, 0.0, 1.0)
+        vals[:] = float(pressure_low) + (float(pressure_high) - float(pressure_low)) * xi
+        return vals
+
+    def _build_concave_boundary_function(self, W, marker, pressure_low, pressure_high, fallback_pressure):
+        f = fem.Function(W)
+        if self.concave_pressure_profile == "linear":
+            coords = W.tabulate_dof_coordinates()
+            values = self._evaluate_linear_profile_on_coords(
+                coords,
+                marker,
+                pressure_low,
+                pressure_high,
+                fallback_pressure,
+            )
+            f.x.array[:] = values
+        else:
+            f.x.array[:] = float(fallback_pressure)
+        f.x.scatter_forward()
+        return f
+
+    def _build_concave_boundary_expr(self, marker, pressure_low, pressure_high, fallback_pressure):
+        mesh = self.mesh
+        if self.concave_pressure_profile != "linear":
+            return fem.Constant(mesh, dfx.default_scalar_type(float(fallback_pressure)))
+
+        bounds = self._marker_axis_interval(marker)
+        if bounds is None:
+            return fem.Constant(mesh, dfx.default_scalar_type(float(fallback_pressure)))
+        x_min, x_max = bounds
+        denom = float(x_max - x_min)
+        if abs(denom) <= 1e-14:
+            mean_pressure = 0.5 * (float(pressure_low) + float(pressure_high))
+            return fem.Constant(mesh, dfx.default_scalar_type(mean_pressure))
+
+        x = ufl.SpatialCoordinate(mesh)
+        xi = (x[int(self.concave_pressure_profile_axis)] - x_min) / denom
+        return float(pressure_low) + (float(pressure_high) - float(pressure_low)) * xi
 
     def _sample_pressure_at_point(self, func, x_pt):
         """
@@ -419,8 +593,20 @@ class PerfusionSolver:
         art_dofs = fem.locate_dofs_topological(W, fdim, art_facets)
         ven_dofs = fem.locate_dofs_topological(W, fdim, ven_facets)
 
-        p_art = fem.Constant(mesh, dfx.default_scalar_type(self.p_in_BC))
-        p_ven = fem.Constant(mesh, dfx.default_scalar_type(self.p_out_BC))
+        p_art = self._build_concave_boundary_function(
+            W,
+            ART_CONCAVE,
+            self.concave_art_pressure_low,
+            self.concave_art_pressure_high,
+            self.p_in_BC,
+        )
+        p_ven = self._build_concave_boundary_function(
+            W,
+            VEN_CONCAVE,
+            self.concave_ven_pressure_low,
+            self.concave_ven_pressure_high,
+            self.p_out_BC,
+        )
 
         bc_art = fem.dirichletbc(p_art, art_dofs, W)
         bc_ven = fem.dirichletbc(p_ven, ven_dofs, W)
@@ -442,13 +628,23 @@ class PerfusionSolver:
 
         if self.lp_arterial > 0.0:
             lp_a = fem.Constant(mesh, dfx.default_scalar_type(self.lp_arterial))
-            p_a = fem.Constant(mesh, dfx.default_scalar_type(self.p_in_BC))
+            p_a = self._build_concave_boundary_expr(
+                self.arterial_concave_marker,
+                self.concave_art_pressure_low,
+                self.concave_art_pressure_high,
+                self.p_in_BC,
+            )
             a_r += lp_a * p * v * ds(int(self.arterial_concave_marker))
             L_r += lp_a * p_a * v * ds(int(self.arterial_concave_marker))
 
         if self.lp_venous > 0.0:
             lp_v = fem.Constant(mesh, dfx.default_scalar_type(self.lp_venous))
-            p_v = fem.Constant(mesh, dfx.default_scalar_type(self.p_out_BC))
+            p_v = self._build_concave_boundary_expr(
+                self.venous_concave_marker,
+                self.concave_ven_pressure_low,
+                self.concave_ven_pressure_high,
+                self.p_out_BC,
+            )
             a_r += lp_v * p * v * ds(int(self.venous_concave_marker))
             L_r += lp_v * p_v * v * ds(int(self.venous_concave_marker))
 
@@ -1069,14 +1265,15 @@ class PerfusionSolver:
         a = ufl.inner(f, v) * ufl.dx
         L = -ufl.inner(u_h, ufl.grad(v)) * ufl.dx
 
-        problem = LinearProblem(
-            a, L,
+        problem = _make_linear_problem(
+            a,
+            L,
             petsc_options_prefix="darcy_div_projection_",
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
                 "pc_factor_mat_solver_type": "mumps",
-            }
+            },
         )
         f_h = problem.solve()   # f_h ~ div(u_h)
 
@@ -1299,6 +1496,12 @@ class PerfusionSolver:
             "q_venous_leak":   float(Q_ven_leak),
             "p_concave_inlet_bc": float(self.p_in_BC),
             "p_concave_outlet_bc": float(self.p_out_BC),
+            "concave_pressure_profile": self.concave_pressure_profile,
+            "concave_pressure_profile_axis": self.concave_pressure_profile_axis_name,
+            "p_concave_inlet_bc_low": float(self.concave_art_pressure_low),
+            "p_concave_inlet_bc_high": float(self.concave_art_pressure_high),
+            "p_concave_outlet_bc_low": float(self.concave_ven_pressure_low),
+            "p_concave_outlet_bc_high": float(self.concave_ven_pressure_high),
             "skip_1d": bool(self.skip_1d),
 
             # coords for mapping back to 1D (now in branchingData order if provided)
@@ -1626,14 +1829,16 @@ class PerfusionSolver:
         if self.concave_bc_mode == "dirichlet":
             bcs = self._build_wall_dirichlet_bcs(W) + bcs
 
-        problem = LinearProblem(
-            a, L, bcs=bcs,
+        problem = _make_linear_problem(
+            a,
+            L,
+            bcs=bcs,
             petsc_options_prefix="darcy_pressure_solve_primary_",
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
                 "pc_factor_mat_solver_type": "mumps"
-            }
+            },
         )
 
         p_h = problem.solve()
@@ -1667,14 +1872,16 @@ class PerfusionSolver:
         # bcs = self._build_terminal_bcs(W)
         a_form = fem.form(a)
         L_form = fem.form(L)
-        problem = LinearProblem(
-            a, L, bcs=bcs,
+        problem = _make_linear_problem(
+            a,
+            L,
+            bcs=bcs,
             petsc_options_prefix="darcy_pressure_solve_secondary_",
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
                 "pc_factor_mat_solver_type": "mumps"
-            }
+            },
         )
 
         p_h = problem.solve()
@@ -1848,6 +2055,18 @@ if __name__ == "__main__":
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.175, 0.9, 0.55])
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet",
                     help="Boundary model on concave arterial/venous faces.")
+    ap.add_argument("--concave-pressure-profile", choices=["constant", "linear"], default="constant",
+                    help="Pressure profile on concave arterial/venous faces.")
+    ap.add_argument("--concave-pressure-profile-axis", choices=["x", "y", "z"], default="y",
+                    help="Axis used for linear concave pressure profiles.")
+    ap.add_argument("--arterial-pressure-profile-low", type=float, default=None,
+                    help="Arterial concave pressure at the low-coordinate end of the profile axis.")
+    ap.add_argument("--arterial-pressure-profile-high", type=float, default=None,
+                    help="Arterial concave pressure at the high-coordinate end of the profile axis.")
+    ap.add_argument("--venous-pressure-profile-low", type=float, default=None,
+                    help="Venous concave pressure at the low-coordinate end of the profile axis.")
+    ap.add_argument("--venous-pressure-profile-high", type=float, default=None,
+                    help="Venous concave pressure at the high-coordinate end of the profile axis.")
     ap.add_argument("--lp-arterial", type=float, default=0.0,
                     help="Robin transfer coefficient on arterial concave face (used when --concave-bc-mode robin).")
     ap.add_argument("--lp-venous", type=float, default=0.0,
@@ -1880,6 +2099,12 @@ if __name__ == "__main__":
         area_inlet_file=args.area_inlet_file if args.area_inlet_file else None,
         area_outlet_file=args.area_outlet_file if args.area_outlet_file else None,
         concave_bc_mode=args.concave_bc_mode,
+        concave_pressure_profile=args.concave_pressure_profile,
+        concave_pressure_profile_axis=args.concave_pressure_profile_axis,
+        arterial_pressure_profile_low=args.arterial_pressure_profile_low,
+        arterial_pressure_profile_high=args.arterial_pressure_profile_high,
+        venous_pressure_profile_low=args.venous_pressure_profile_low,
+        venous_pressure_profile_high=args.venous_pressure_profile_high,
         lp_arterial=args.lp_arterial,
         lp_venous=args.lp_venous,
         skip_1d=args.skip_1d,

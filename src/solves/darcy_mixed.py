@@ -358,9 +358,25 @@ class PerfusionSolver(CGPerfusionSolver):
 
         bcs = []
         if art_dofs.size > 0:
-            bcs.append(fem.dirichletbc(dfx.default_scalar_type(self.p_in_BC), art_dofs, M.sub(0)))
+            p_art = self._build_concave_boundary_function(
+                P,
+                ART_CONCAVE,
+                self.concave_art_pressure_low,
+                self.concave_art_pressure_high,
+                self.p_in_BC,
+            )
+            art_map = fem.locate_dofs_topological((M.sub(0), P), fdim, art_facets)
+            bcs.append(fem.dirichletbc(p_art, art_map, M.sub(0)))
         if ven_dofs.size > 0:
-            bcs.append(fem.dirichletbc(dfx.default_scalar_type(self.p_out_BC), ven_dofs, M.sub(0)))
+            p_ven = self._build_concave_boundary_function(
+                P,
+                VEN_CONCAVE,
+                self.concave_ven_pressure_low,
+                self.concave_ven_pressure_high,
+                self.p_out_BC,
+            )
+            ven_map = fem.locate_dofs_topological((M.sub(0), P), fdim, ven_facets)
+            bcs.append(fem.dirichletbc(p_ven, ven_map, M.sub(0)))
         return bcs
 
     def _collect_boundary_markers(self):
@@ -546,19 +562,39 @@ class PerfusionSolver(CGPerfusionSolver):
                 Lp += -pbc * ufl.dot(w, n) * ds(int(m))
 
         if self.concave_bc_mode == "dirichlet":
-            p_art = fem.Constant(mesh, dfx.default_scalar_type(self.p_in_BC))
-            p_ven = fem.Constant(mesh, dfx.default_scalar_type(self.p_out_BC))
+            p_art = self._build_concave_boundary_expr(
+                self.arterial_concave_marker,
+                self.concave_art_pressure_low,
+                self.concave_art_pressure_high,
+                self.p_in_BC,
+            )
+            p_ven = self._build_concave_boundary_expr(
+                self.venous_concave_marker,
+                self.concave_ven_pressure_low,
+                self.concave_ven_pressure_high,
+                self.p_out_BC,
+            )
             Lp += -p_art * ufl.dot(w, n) * ds(int(self.arterial_concave_marker))
             Lp += -p_ven * ufl.dot(w, n) * ds(int(self.venous_concave_marker))
         elif self.concave_bc_mode == "robin":
             if self.lp_arterial > 0.0:
                 lp_a = fem.Constant(mesh, dfx.default_scalar_type(self.lp_arterial))
-                p_a = fem.Constant(mesh, dfx.default_scalar_type(self.p_in_BC))
+                p_a = self._build_concave_boundary_expr(
+                    self.arterial_concave_marker,
+                    self.concave_art_pressure_low,
+                    self.concave_art_pressure_high,
+                    self.p_in_BC,
+                )
                 ap += -(1.0 / lp_a) * ufl.dot(u, n) * ufl.dot(w, n) * ds(int(self.arterial_concave_marker))
                 Lp += -p_a * ufl.dot(w, n) * ds(int(self.arterial_concave_marker))
             if self.lp_venous > 0.0:
                 lp_v = fem.Constant(mesh, dfx.default_scalar_type(self.lp_venous))
-                p_v = fem.Constant(mesh, dfx.default_scalar_type(self.p_out_BC))
+                p_v = self._build_concave_boundary_expr(
+                    self.venous_concave_marker,
+                    self.concave_ven_pressure_low,
+                    self.concave_ven_pressure_high,
+                    self.p_out_BC,
+                )
                 ap += -(1.0 / lp_v) * ufl.dot(u, n) * ufl.dot(w, n) * ds(int(self.venous_concave_marker))
                 Lp += -p_v * ufl.dot(w, n) * ds(int(self.venous_concave_marker))
 
@@ -1279,6 +1315,18 @@ if __name__ == "__main__":
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.175, 0.9, 0.55])
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet",
                     help="Boundary model on concave arterial/venous faces.")
+    ap.add_argument("--concave-pressure-profile", choices=["constant", "linear"], default="constant",
+                    help="Pressure profile on concave arterial/venous faces.")
+    ap.add_argument("--concave-pressure-profile-axis", choices=["x", "y", "z"], default="y",
+                    help="Axis used for linear concave pressure profiles.")
+    ap.add_argument("--arterial-pressure-profile-low", type=float, default=None,
+                    help="Arterial concave pressure at the low-coordinate end of the profile axis.")
+    ap.add_argument("--arterial-pressure-profile-high", type=float, default=None,
+                    help="Arterial concave pressure at the high-coordinate end of the profile axis.")
+    ap.add_argument("--venous-pressure-profile-low", type=float, default=None,
+                    help="Venous concave pressure at the low-coordinate end of the profile axis.")
+    ap.add_argument("--venous-pressure-profile-high", type=float, default=None,
+                    help="Venous concave pressure at the high-coordinate end of the profile axis.")
     ap.add_argument("--lp-arterial", type=float, default=0.0,
                     help="Robin transfer coefficient on arterial concave face (used when --concave-bc-mode robin).")
     ap.add_argument("--lp-venous", type=float, default=0.0,
@@ -1325,6 +1373,12 @@ if __name__ == "__main__":
         area_inlet_file=args.area_inlet_file if args.area_inlet_file else None,
         area_outlet_file=args.area_outlet_file if args.area_outlet_file else None,
         concave_bc_mode=args.concave_bc_mode,
+        concave_pressure_profile=args.concave_pressure_profile,
+        concave_pressure_profile_axis=args.concave_pressure_profile_axis,
+        arterial_pressure_profile_low=args.arterial_pressure_profile_low,
+        arterial_pressure_profile_high=args.arterial_pressure_profile_high,
+        venous_pressure_profile_low=args.venous_pressure_profile_low,
+        venous_pressure_profile_high=args.venous_pressure_profile_high,
         lp_arterial=args.lp_arterial,
         lp_venous=args.lp_venous,
         skip_1d=args.skip_1d,

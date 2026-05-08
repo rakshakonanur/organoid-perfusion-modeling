@@ -494,6 +494,54 @@ def resolve_leak_pressures_for_darcy(
     return p_art, p_ven
 
 
+def build_first_organoid_linear_profile_from_leaks(
+    primary_output_csv: Path,
+    face_length: float,
+    compartment_spacing: float,
+    fallback_output_csv: Optional[Path] = None,
+) -> Optional[dict]:
+    if float(compartment_spacing) == 0.0:
+        return None
+
+    p_art_1, p_ven_1 = resolve_leak_pressures_for_darcy(
+        primary_output_csv,
+        1,
+        fallback_output_csv=fallback_output_csv,
+    )
+    p_art_2, p_ven_2 = resolve_leak_pressures_for_darcy(
+        primary_output_csv,
+        2,
+        fallback_output_csv=fallback_output_csv,
+    )
+    if any(v is None for v in (p_art_1, p_art_2, p_ven_1, p_ven_2)):
+        return None
+
+    ratio = float(face_length) / float(compartment_spacing)
+    art_drop_12 = float(p_art_2) - float(p_art_1)
+    ven_drop_12 = float(p_ven_2) - float(p_ven_1)
+
+    # For organoid_1 there is no upstream venous well, so extrapolate one
+    # compartment upstream using the same 1->2 venous pressure drop.
+    p_ven_0 = float(p_ven_1) - ven_drop_12
+
+    return {
+        "profile_mode": "linear",
+        "profile_axis": "y",
+        # The solver applies "low/high" at min/max of the global profile axis.
+        # For these faces that geometric direction is reversed relative to the
+        # original left-to-right assumption, so swap the endpoints here.
+        "arterial_low": float(p_art_1) + art_drop_12 * ratio,
+        "arterial_high": float(p_art_1) - art_drop_12 * ratio,
+        "venous_low": float(p_ven_1) + (float(p_ven_1) - p_ven_0) * ratio,
+        "venous_high": float(p_ven_1) - (float(p_ven_1) - p_ven_0) * ratio,
+        "arterial_center": float(p_art_1),
+        "venous_center": float(p_ven_1),
+        "arterial_drop_12": art_drop_12,
+        "venous_drop_12": ven_drop_12,
+        "venous_virtual_previous": p_ven_0,
+    }
+
+
 def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndarray, coords_outlet: np.ndarray, dy_step: float) -> None:
     repo_src = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_src / "geometry"))
@@ -576,6 +624,21 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
     if getattr(args, "trial_dir", ""):
         trial_output_csv = Path(args.trial_dir).expanduser().resolve() / "output.csv"
 
+    first_organoid_profile = None
+    if args.no_synthetic_vasculature and getattr(args, "first_organoid_linear_profile", False):
+        first_organoid_profile = build_first_organoid_linear_profile_from_leaks(
+            output_csv,
+            face_length=float(args.concave_profile_face_length),
+            compartment_spacing=float(args.concave_profile_compartment_spacing),
+            fallback_output_csv=trial_output_csv,
+        )
+        if first_organoid_profile is None and args.n_organoids >= 2 and MPI.COMM_WORLD.rank == 0:
+            print(
+                "[warn] Could not build first-organoid linear concave pressure profile from leak pressures; "
+                "falling back to constant concave pressures.",
+                flush=True,
+            )
+
     for k in range(1, args.n_organoids + 1):
         org = run_dir / f"organoid_{k}"
         geom = org / "geometry"
@@ -624,6 +687,15 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
             "--fallback-outlet-pressure", str(fallback_outlet_pressure),
             "--out-dir", str(org),
         ]
+        if first_organoid_profile is not None and k == 1:
+            darcy_args.extend([
+                "--concave-pressure-profile", str(first_organoid_profile["profile_mode"]),
+                "--concave-pressure-profile-axis", str(first_organoid_profile["profile_axis"]),
+                "--arterial-pressure-profile-low", str(first_organoid_profile["arterial_low"]),
+                "--arterial-pressure-profile-high", str(first_organoid_profile["arterial_high"]),
+                "--venous-pressure-profile-low", str(first_organoid_profile["venous_low"]),
+                "--venous-pressure-profile-high", str(first_organoid_profile["venous_high"]),
+            ])
         if darcy_script.stem in {"darcy_p1_lm_interior", "darcy_mixed"} and perm_region_path:
             darcy_args.extend([
                 "--perm-region-path", perm_region_path,
@@ -755,6 +827,12 @@ def parse_args() -> argparse.Namespace:
                     help="MPI ranks for Darcy solves (1 = serial).")
     ap.add_argument("--darcy-mpirun-cmd", default="/opt/miniconda3/envs/fenicsx-env/bin/mpiexec.hydra",
                     help="MPI launcher command for Darcy when --darcy-mpi-procs > 1.")
+    ap.add_argument("--first-organoid-linear-profile", action="store_true",
+                    help="For organoid_1 in --no-synthetic-vasculature mode, use organoid_2 leak pressures to build linear concave arterial/venous pressure profiles.")
+    ap.add_argument("--concave-profile-face-length", type=float, default=0.4,
+                    help="Half-span/length factor L1 used to scale the concave-face pressure profile from neighboring leak pressures.")
+    ap.add_argument("--concave-profile-compartment-spacing", type=float, default=0.6,
+                    help="Compartment spacing L2 used to scale the concave-face pressure profile from neighboring leak pressures.")
 
     ap.add_argument("--dy-step", type=float, default=0.6)
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-.28, 0.9, .5375])

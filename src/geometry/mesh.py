@@ -746,7 +746,23 @@ def import_branched_mesh(
     geo_to_mesh_gmsh(geo_file=geo_file, msh_file=msh_file)
     convert_mesh(msh_file=msh_file, xdmf_file=xdmf_file)
     _ = xdmf_to_dolfinx(xdmf_file=xdmf_file)
-    outlet_coords = generate_1d_files(xdmf_file=xdmf_file, output_dir=output_1d, file_prefix=fileprefix, inlet_coords=coords)
+    output_dir = Path(output_1d)
+    geom_csv = output_dir / "geom.csv"
+    output_csv = output_dir / "output.csv"
+    if geom_csv.exists() and output_csv.exists():
+        outlet_coords = generate_1d_files_from_csv(
+            xdmf_file=xdmf_file,
+            output_dir=output_1d,
+            file_prefix=fileprefix,
+            inlet_coords=coords,
+        )
+    else:
+        outlet_coords = generate_1d_files(
+            xdmf_file=xdmf_file,
+            output_dir=output_1d,
+            file_prefix=fileprefix,
+            inlet_coords=coords,
+        )
     return outlet_coords
 
 # ---------------------------------------------------------------------

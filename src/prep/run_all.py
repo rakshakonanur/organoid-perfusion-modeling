@@ -285,6 +285,38 @@ def _read_leak_pressures_from_output(output_csv: Path, organoid_idx: int) -> tup
     return _read_pressure_column(art_row, "pressure_out"), _read_pressure_column(ven_row, "pressure_out")
 
 
+def _build_first_organoid_linear_profile_from_leaks(
+    output_csv: Path,
+    face_length: float,
+    compartment_spacing: float,
+) -> dict | None:
+    if float(compartment_spacing) == 0.0:
+        return None
+
+    p_art_1, p_ven_1 = _read_leak_pressures_from_output(output_csv, 1)
+    p_art_2, p_ven_2 = _read_leak_pressures_from_output(output_csv, 2)
+    if any(v is None for v in (p_art_1, p_art_2, p_ven_1, p_ven_2)):
+        return None
+
+    ratio = float(face_length) / float(compartment_spacing)
+    art_drop_12 = float(p_art_2) - float(p_art_1)
+    ven_drop_12 = float(p_ven_2) - float(p_ven_1)
+    p_ven_0 = float(p_ven_1) - ven_drop_12
+
+    return {
+        "concave_pressure_profile": "linear",
+        "concave_pressure_profile_axis": "y",
+        # The solver maps "low/high" onto min/max of the chosen global axis.
+        # For these leak faces, that geometric direction is opposite the
+        # original left-to-right assumption, so the endpoint pressures are
+        # intentionally swapped here.
+        "arterial_pressure_profile_low": float(p_art_1) + art_drop_12 * ratio,
+        "arterial_pressure_profile_high": float(p_art_1) - art_drop_12 * ratio,
+        "venous_pressure_profile_low": float(p_ven_1) + (float(p_ven_1) - p_ven_0) * ratio,
+        "venous_pressure_profile_high": float(p_ven_1) - (float(p_ven_1) - p_ven_0) * ratio,
+    }
+
+
 def _resolve_perm_region_for_organoid(base: str, organoid_idx: int) -> str:
     raw = str(base).strip()
     if not raw:
@@ -334,6 +366,9 @@ def run_one(
     perm_low: float = 1.0e-8,
     perm_high: float = 1.0e-6,
     perm_transition_width: float = 0.01,
+    first_organoid_linear_profile: bool = False,
+    concave_profile_face_length: float = 0.4,
+    concave_profile_compartment_spacing: float = 0.6,
 ) -> None:
     t0 = perf_counter()
     src_org_dir = trial_dir / f"organoid_{i}"
@@ -545,6 +580,28 @@ def run_one(
             resolved_fallback_inlet_pressure = float(p_art)
         if p_ven is not None:
             resolved_fallback_outlet_pressure = float(p_ven)
+    concave_profile_kwargs: dict[str, str | float] = {}
+    if first_organoid_linear_profile and i == 1 and str(concave_bc_mode).strip().lower() == "dirichlet":
+        trial_output_csv = trial_dir / "output.csv"
+        profile = _build_first_organoid_linear_profile_from_leaks(
+            trial_output_csv,
+            face_length=float(concave_profile_face_length),
+            compartment_spacing=float(concave_profile_compartment_spacing),
+        )
+        if profile is not None:
+            concave_profile_kwargs = profile
+            print(
+                "[organoid_1] Using linear concave pressure profile from leak pressures: "
+                f"art=({profile['arterial_pressure_profile_low']:.6g}, {profile['arterial_pressure_profile_high']:.6g}), "
+                f"ven=({profile['venous_pressure_profile_low']:.6g}, {profile['venous_pressure_profile_high']:.6g})",
+                flush=True,
+            )
+        else:
+            print(
+                "[organoid_1] Could not build linear concave pressure profile from 0D leak pressures; "
+                "falling back to constant concave-face pressure BC.",
+                flush=True,
+            )
     if darcy_mpi_procs > 1:
         mpi_launcher = _resolve_mpi_launcher(darcy_mpirun_cmd)
         cmd = [
@@ -567,6 +624,18 @@ def run_one(
             "--concave-bc-mode", str(concave_bc_mode),
             "--lp-arterial", str(lp_arterial),
             "--lp-venous", str(lp_venous),
+            *(
+                [
+                    "--concave-pressure-profile", str(concave_profile_kwargs["concave_pressure_profile"]),
+                    "--concave-pressure-profile-axis", str(concave_profile_kwargs["concave_pressure_profile_axis"]),
+                    "--arterial-pressure-profile-low", str(concave_profile_kwargs["arterial_pressure_profile_low"]),
+                    "--arterial-pressure-profile-high", str(concave_profile_kwargs["arterial_pressure_profile_high"]),
+                    "--venous-pressure-profile-low", str(concave_profile_kwargs["venous_pressure_profile_low"]),
+                    "--venous-pressure-profile-high", str(concave_profile_kwargs["venous_pressure_profile_high"]),
+                ]
+                if concave_profile_kwargs
+                else []
+            ),
             *(["--skip-1d"] if no_synthetic_vasculature else []),
             "--fallback-inlet-pressure", str(resolved_fallback_inlet_pressure),
             "--fallback-outlet-pressure", str(resolved_fallback_outlet_pressure),
@@ -623,6 +692,7 @@ def run_one(
             concave_bc_mode=concave_bc_mode,
             lp_arterial=lp_arterial,
             lp_venous=lp_venous,
+            **concave_profile_kwargs,
             skip_1d=no_synthetic_vasculature,
             fallback_inlet_pressure=resolved_fallback_inlet_pressure,
             fallback_outlet_pressure=resolved_fallback_outlet_pressure,
@@ -701,6 +771,12 @@ def parse_args():
                     help="Darcy permeability inside the organoid STL region.")
     ap.add_argument("--perm-transition-width", type=float, default=0.01,
                     help="Half-width of the smooth transition shell around the organoid STL boundary.")
+    ap.add_argument("--first-organoid-linear-profile", action="store_true",
+                    help="For organoid_1, apply a linear concave-face pressure profile inferred from leak pressures in wells 1 and 2.")
+    ap.add_argument("--concave-profile-face-length", type=float, default=0.4,
+                    help="Leak face length L1 used to infer endpoint pressures for the organoid_1 linear concave profile.")
+    ap.add_argument("--concave-profile-compartment-spacing", type=float, default=0.6,
+                    help="Well-to-well spacing L2 used to infer endpoint pressures for the organoid_1 linear concave profile.")
     ap.add_argument("--dy-step", type=float, default=0.6, help="Y shift per organoid index (default: 0.6)")
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-.28, 0.9, .5375], help="Base inlet coords (x y z) for organoid 1")
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375], help="Base outlet coords (x y z) for organoid 1")
@@ -769,6 +845,9 @@ def main():
             perm_low=args.perm_low,
             perm_high=args.perm_high,
             perm_transition_width=args.perm_transition_width,
+            first_organoid_linear_profile=bool(args.first_organoid_linear_profile),
+            concave_profile_face_length=float(args.concave_profile_face_length),
+            concave_profile_compartment_spacing=float(args.concave_profile_compartment_spacing),
         )
 
 

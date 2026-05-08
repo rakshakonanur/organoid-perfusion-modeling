@@ -277,12 +277,30 @@ def _read_channel_table(channel_xlsx: Optional[Path]) -> List[Dict[str, float]]:
 
         rows = []
         for _, r in df.iterrows():
+            seg_raw = r[c_seg]
+            len_raw = r[c_len]
+            res_raw = r[c_R]
+            cap_raw = r[c_C]
+            ind_raw = r[c_L]
+
+            # Skip trailing spreadsheet rows that are blank or partially blank.
+            if pd.isna(seg_raw) and pd.isna(len_raw) and pd.isna(res_raw):
+                continue
+            if pd.isna(seg_raw):
+                continue
+            if pd.isna(len_raw) or pd.isna(res_raw):
+                continue
+
+            seg_name = str(seg_raw).strip()
+            if not seg_name or seg_name.lower() == "nan":
+                continue
+
             rows.append({
-                "Segment": str(r[c_seg]).strip(),
-                "Length": float(r[c_len]),
-                "Resistance": float(r[c_R]),
-                "Capacitance": float(r[c_C]) if not pd.isna(r[c_C]) else 0.0,
-                "Inductance": float(r[c_L]) if not pd.isna(r[c_L]) else 0.0,
+                "Segment": seg_name,
+                "Length": float(len_raw),
+                "Resistance": float(res_raw),
+                "Capacitance": float(cap_raw) if not pd.isna(cap_raw) else 0.0,
+                "Inductance": float(ind_raw) if not pd.isna(ind_raw) else 0.0,
             })
         return rows
 
@@ -658,10 +676,20 @@ def extract_zip_to_temp(zip_path: Path) -> Path:
 
 
 def _pick_solver_input(side_dir: Path) -> Path:
-    cand = side_dir / "solver_0d_new.in"
-    if cand.exists():
-        return cand
-    raise FileNotFoundError(f"Could not find solver_0d_new.in under {side_dir}")
+    candidates = [
+        side_dir / "solver_0d_new.in",
+        side_dir / "solver_0d.in",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
+
+    available = sorted(p.name for p in side_dir.iterdir()) if side_dir.exists() else []
+    raise FileNotFoundError(
+        "Could not find a 0D solver input under "
+        f"{side_dir}. Looked for: {', '.join(p.name for p in candidates)}. "
+        f"Available files: {available if available else '(directory missing or empty)'}"
+    )
 
 
 def _ensure_organoid_aliases(organoid_dir: Path, organoid_id: int) -> Dict[str, Path]:
