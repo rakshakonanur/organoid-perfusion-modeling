@@ -1653,7 +1653,16 @@ def stl_to_mesh_gmsh_with_embedded_disks(
 
 
 def read_3d_mesh_and_tags_from_msh(msh_file: str) -> Tuple[dfx.mesh.Mesh, dfx.mesh.MeshTags]:
-    mesh, _, facet_tags = gmshio.read_from_msh(str(current_dir / msh_file), MPI.COMM_WORLD, 0, gdim=3)
+    out = gmshio.read_from_msh(str(current_dir / msh_file), MPI.COMM_WORLD, 0, gdim=3)
+    if not isinstance(out, tuple):
+        raise RuntimeError(f"Unexpected gmshio.read_from_msh return type for {msh_file}: {type(out)!r}")
+    if len(out) < 3:
+        raise RuntimeError(
+            f"Unexpected gmshio.read_from_msh return length for {msh_file}: "
+            f"expected at least 3 entries, got {len(out)}"
+        )
+    mesh = out[0]
+    facet_tags = out[2]
     if facet_tags is None:
         raise RuntimeError(f"No facet tags read from {msh_file}")
     return mesh, facet_tags
