@@ -4,7 +4,7 @@
 [generate-1d-mesh] INFO - Compute centerlines: False
 [generate-1d-mesh] INFO - Density: 1.000000
 [generate-1d-mesh] INFO - Element size: 0.100000
-[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u-bend-moved-channel/ROMSimulations/rom/steady.flow
+[generate-1d-mesh] INFO - Inflow input file: /Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/simvascular/u-bend-moved-channel/ROMSimulations/rom/pulsatile.flow
 [generate-1d-mesh] INFO - Linear material parameter Er/h: 10000000.000000
 [generate-1d-mesh] INFO - Linear material parameter pressure: 0.000000
 [generate-1d-mesh] INFO - Material model: LINEAR
