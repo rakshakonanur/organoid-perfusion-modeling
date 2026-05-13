@@ -12,7 +12,7 @@ import sys
 import csv
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 
@@ -145,6 +145,366 @@ def load_json(path: Path) -> dict:
 def save_json(path: Path, obj: dict) -> None:
     with path.open("w") as f:
         json.dump(obj, f, indent=4)
+
+
+def load_scaled_screening_config(trial_dir: Optional[Path], args: argparse.Namespace) -> Optional[dict[str, Any]]:
+    mode = str(getattr(args, "scaled_screening_mode", "auto")).strip().lower()
+    if mode == "off":
+        return None
+
+    summary: dict[str, Any] = {}
+    summary_path: Optional[Path] = None
+    if trial_dir is not None:
+        candidate = trial_dir / "scaled_screening_summary.json"
+        if candidate.exists():
+            summary_path = candidate
+            summary = load_json(candidate)
+
+    if summary_path is None and mode != "on":
+        return None
+
+    reference_organoid = int(summary.get("reference_organoid", 1))
+    if reference_organoid < 1 or reference_organoid > int(args.n_organoids):
+        die(
+            f"Scaled-screening reference organoid {reference_organoid} is outside "
+            f"1..{int(args.n_organoids)}"
+        )
+    shifts: dict[int, tuple[float, float, float]] = {
+        reference_organoid: (0.0, 0.0, 0.0),
+    }
+    pressure_offset_anchor = str(getattr(args, "scaled_pressure_offset_anchor", "arterial"))
+
+    for row in summary.get("scaled_organoids", []):
+        try:
+            organoid_id = int(row.get("organoid_id"))
+        except Exception:
+            continue
+        raw_shift = row.get("shift", None)
+        if isinstance(raw_shift, list) and len(raw_shift) == 3:
+            try:
+                shifts[organoid_id] = tuple(float(v) for v in raw_shift)
+            except Exception:
+                pass
+        if "offset_anchor" in row:
+            pressure_offset_anchor = str(row.get("offset_anchor", pressure_offset_anchor))
+
+    for organoid_id in range(1, int(args.n_organoids) + 1):
+        shifts.setdefault(
+            organoid_id,
+            (0.0, -float(args.dy_step) * float(organoid_id - reference_organoid), 0.0),
+        )
+
+    return {
+        "enabled": True,
+        "summary_path": str(summary_path) if summary_path is not None else "",
+        "reference_organoid": reference_organoid,
+        "pressure_offset_anchor": str(pressure_offset_anchor).strip().lower(),
+        "shifts": shifts,
+        "assumptions": list(summary.get("assumptions", [])),
+    }
+
+
+def _import_scaled_field_helpers():
+    repo_src = Path(__file__).resolve().parents[1]
+    solves_dir = repo_src / "solves"
+    if str(solves_dir) not in sys.path:
+        sys.path.insert(0, str(solves_dir))
+    return importlib.import_module("compare_scaled_organoid_fields")
+
+
+def _scale_pressure_value(value: Any, scale_factor: float, pressure_offset: float) -> Any:
+    if isinstance(value, list):
+        arr = np.asarray(value, dtype=float)
+        return (pressure_offset + scale_factor * arr).tolist()
+    return float(pressure_offset + scale_factor * float(value))
+
+
+def _scale_nonpressure_value(value: Any, scale_factor: float) -> Any:
+    if isinstance(value, list):
+        arr = np.asarray(value, dtype=float)
+        return (scale_factor * arr).tolist()
+    return float(scale_factor * float(value))
+
+
+def _shift_coords_value(value: Any, shift: tuple[float, float, float]) -> Any:
+    arr = np.asarray(value, dtype=float)
+    return (arr + np.asarray(shift, dtype=float)).tolist()
+
+
+def _build_scaled_interface_bc(
+    ref_iface: dict[str, Any],
+    target_zero_d: dict[str, Any],
+    pressure_transform: dict[str, float],
+    scale_factor: float,
+    shift: tuple[float, float, float],
+) -> dict[str, Any]:
+    iface = json.loads(json.dumps(ref_iface))
+    pressure_offset = float(pressure_transform["pressure_offset"])
+
+    pressure_scalar_keys = {
+        "p_inlet_mean",
+        "p_outlet_mean",
+        "p_concave_inlet_bc",
+        "p_concave_outlet_bc",
+        "p_concave_inlet_bc_low",
+        "p_concave_inlet_bc_high",
+        "p_concave_outlet_bc_low",
+        "p_concave_outlet_bc_high",
+    }
+    nonpressure_scalar_keys = {
+        "q_artery_leak",
+        "q_venous_leak",
+    }
+    pressure_array_keys = {
+        "p_inlet_nodes",
+        "p_outlet_nodes",
+        "p_inlet_target",
+        "p_outlet_target",
+    }
+    nonpressure_array_keys = {
+        "q_inlet",
+        "q_outlet",
+        "q_inlet_inward",
+        "q_inlet_target",
+        "q_inlet_target_in",
+        "q_outlet_target_out",
+        "q_inlet_residual",
+        "divu_inlet",
+        "divu_outlet",
+    }
+    vector_keys = {
+        "u_inlet_nodes",
+        "u_outlet_nodes",
+    }
+    coord_keys = {
+        "coords_inlet",
+        "coords_outlet",
+    }
+
+    for key in list(iface.keys()):
+        if key in pressure_scalar_keys:
+            iface[key] = _scale_pressure_value(iface[key], scale_factor, pressure_offset)
+        elif key in nonpressure_scalar_keys:
+            iface[key] = _scale_nonpressure_value(iface[key], scale_factor)
+        elif key in pressure_array_keys:
+            iface[key] = _scale_pressure_value(iface[key], scale_factor, pressure_offset)
+        elif key in nonpressure_array_keys:
+            iface[key] = _scale_nonpressure_value(iface[key], scale_factor)
+        elif key in vector_keys:
+            iface[key] = _scale_nonpressure_value(iface[key], scale_factor)
+        elif key in coord_keys:
+            iface[key] = _shift_coords_value(iface[key], shift)
+
+    iface["p_concave_inlet_bc"] = float(pressure_transform["target_arterial_pressure"])
+    iface["p_concave_outlet_bc"] = float(pressure_transform["target_venous_pressure"])
+    ref_profile = str(ref_iface.get("concave_pressure_profile", "constant")).strip().lower()
+    iface["concave_pressure_profile"] = ref_profile if ref_profile in {"constant", "linear"} else "constant"
+    iface["concave_pressure_profile_axis"] = str(ref_iface.get("concave_pressure_profile_axis", "y"))
+    iface["scaled_concave_pressure_profile_source"] = "reference_interface_bc"
+    iface["scaled_from_reference_organoid"] = int(ref_iface.get("scaled_from_reference_organoid", 1))
+    iface["scaled_zero_d_q_artery_mean"] = float(target_zero_d["q_art_mean"])
+    iface["scaled_zero_d_q_venous_mean"] = float(target_zero_d["q_ven_mean"])
+    iface["scaled_leak_flow_source"] = "reference_darcy_scaled"
+    iface["scaled_pressure_offset_anchor"] = pressure_transform["offset_anchor"]
+    iface["scale_factor_from_reference"] = scale_factor
+    iface["pressure_offset_from_reference"] = pressure_offset
+    iface["offset_from_artery"] = float(pressure_transform["offset_from_artery"])
+    iface["offset_from_vein"] = float(pressure_transform["offset_from_vein"])
+    iface["offset_mismatch"] = float(pressure_transform["offset_mismatch"])
+    iface["arterial_channel_drop"] = float(pressure_transform["arterial_channel_drop"])
+    iface["venous_channel_drop"] = float(pressure_transform["venous_channel_drop"])
+    return iface
+
+
+def _write_scaled_organoid_outputs(
+    run_dir: Path,
+    organoid_id: int,
+    ref_iface: dict[str, Any],
+    ref_p: dict[str, Any],
+    ref_u: dict[str, Any],
+    target_zero_d: dict[str, Any],
+    pressure_transform: dict[str, float],
+    shift: tuple[float, float, float],
+    h5py: Any,
+    scaled_fields: Any,
+    reference_organoid: int,
+) -> dict[str, Any]:
+    scale_factor = float(pressure_transform["scale_factor"])
+    pressure_offset = float(pressure_transform["pressure_offset"])
+
+    out_dir = run_dir / f"organoid_{organoid_id}" / "out_darcy"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    scaled_p = pressure_offset + scale_factor * np.asarray(ref_p["values"], dtype=float)
+    scaled_u = scale_factor * np.asarray(ref_u["values"], dtype=float)
+
+    scaled_fields._write_xdmf_field(
+        out_dir / "p.xdmf",
+        np.asarray(ref_p["coords"], dtype=float) + np.asarray(shift, dtype=float),
+        ref_p["topology"],
+        scaled_p,
+        ref_p["topology_type"],
+        ref_p["attribute_type"],
+        ref_p["attribute_name"],
+        ref_p["attribute_center"],
+        h5py,
+    )
+    scaled_fields._write_xdmf_field(
+        out_dir / "u.xdmf",
+        np.asarray(ref_u["coords"], dtype=float) + np.asarray(shift, dtype=float),
+        ref_u["topology"],
+        scaled_u,
+        ref_u["topology_type"],
+        ref_u["attribute_type"],
+        ref_u["attribute_name"],
+        ref_u["attribute_center"],
+        h5py,
+    )
+
+    iface = _build_scaled_interface_bc(
+        ref_iface=ref_iface,
+        target_zero_d=target_zero_d,
+        pressure_transform=pressure_transform,
+        scale_factor=scale_factor,
+        shift=shift,
+    )
+    iface["scaled_from_reference_organoid"] = int(reference_organoid)
+    (out_dir / "interface_bc.json").write_text(json.dumps(iface, indent=2))
+    return {
+        "organoid_id": organoid_id,
+        "scale_factor": scale_factor,
+        "pressure_offset": pressure_offset,
+        "shift": list(shift),
+        "target_arterial_pressure": float(pressure_transform["target_arterial_pressure"]),
+        "target_venous_pressure": float(pressure_transform["target_venous_pressure"]),
+        "offset_anchor": pressure_transform["offset_anchor"],
+        "offset_mismatch": float(pressure_transform["offset_mismatch"]),
+    }
+
+
+def replicate_reference_organoid_outputs(
+    run_dir: Path,
+    n_organoids: int,
+    scaled_cfg: dict[str, Any],
+) -> None:
+    reference_organoid = int(scaled_cfg["reference_organoid"])
+    ref_out = run_dir / f"organoid_{reference_organoid}" / "out_darcy"
+    ref_iface_path = ref_out / "interface_bc.json"
+    ref_p_path = ref_out / "p.xdmf"
+    ref_u_path = ref_out / "u.xdmf"
+    if not ref_iface_path.exists() or not ref_p_path.exists() or not ref_u_path.exists():
+        die(
+            "Scaled-screening replication requires Darcy outputs for the reference organoid; "
+            f"missing one of {ref_iface_path}, {ref_p_path}, or {ref_u_path}"
+        )
+
+    replicated_rows: list[dict[str, Any]] = []
+    for organoid_id in range(1, int(n_organoids) + 1):
+        if organoid_id == reference_organoid:
+            continue
+        out_dir = run_dir / f"organoid_{organoid_id}" / "out_darcy"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        copy_xdmf_with_sidecars(ref_p_path, out_dir / "p.xdmf")
+        copy_xdmf_with_sidecars(ref_u_path, out_dir / "u.xdmf")
+        shutil.copy2(ref_iface_path, out_dir / "interface_bc.json")
+        replicated_rows.append(
+            {
+                "organoid_id": organoid_id,
+                "mode": "replicated_from_reference",
+                "reference_organoid": reference_organoid,
+            }
+        )
+
+    summary = {
+        "trial_dir": str(run_dir),
+        "prepared_root": str(run_dir),
+        "reference_organoid": reference_organoid,
+        "scaled_organoids": replicated_rows,
+        "assumptions": [
+            "run_0 has zero channel ramp, so repeated wells directly reuse the reference Darcy outputs.",
+            "Copied wells receive the same p.xdmf, u.xdmf, and interface_bc.json values as the reference organoid.",
+        ],
+    }
+    save_json(run_dir / "scaled_screening_summary.json", summary)
+
+
+def synthesize_scaled_screening_outputs(
+    run_dir: Path,
+    n_organoids: int,
+    scaled_cfg: dict[str, Any],
+) -> None:
+    scaled_fields = _import_scaled_field_helpers()
+    np_mod = scaled_fields._import_numpy()
+    h5py = scaled_fields._import_h5py()
+
+    reference_organoid = int(scaled_cfg["reference_organoid"])
+    grouped = scaled_fields._load_0d_groups(run_dir, np_mod)
+    zero_d = {
+        organoid_id: scaled_fields._load_0d_organoid_summary(grouped, organoid_id, np_mod)
+        for organoid_id in range(1, int(n_organoids) + 1)
+    }
+    ref_zero_d = zero_d[reference_organoid]
+
+    ref_out = run_dir / f"organoid_{reference_organoid}" / "out_darcy"
+    ref_iface_path = ref_out / "interface_bc.json"
+    ref_p_path = ref_out / "p.xdmf"
+    ref_u_path = ref_out / "u.xdmf"
+    if not ref_iface_path.exists() or not ref_p_path.exists() or not ref_u_path.exists():
+        die(
+            "Scaled-screening mode requires Darcy outputs for the reference organoid; "
+            f"missing one of {ref_iface_path}, {ref_p_path}, or {ref_u_path}"
+        )
+
+    ref_iface = json.loads(ref_iface_path.read_text())
+    ref_p = scaled_fields._load_xdmf_field(ref_p_path, np_mod, h5py)
+    ref_u = scaled_fields._load_xdmf_field(ref_u_path, np_mod, h5py)
+
+    scaling_rows: list[dict[str, Any]] = []
+    for organoid_id in range(1, int(n_organoids) + 1):
+        if organoid_id == reference_organoid:
+            continue
+        shift = tuple(
+            scaled_cfg["shifts"].get(
+                organoid_id,
+                scaled_fields._shift_for_organoid(reference_organoid, organoid_id, float(0.0)),
+            )
+        )
+        transform = scaled_fields._pressure_transform_from_0d(
+            ref_zero_d,
+            zero_d[organoid_id],
+            scaled_cfg["pressure_offset_anchor"],
+        )
+        scaling_rows.append(
+            _write_scaled_organoid_outputs(
+                run_dir=run_dir,
+                organoid_id=organoid_id,
+                ref_iface=ref_iface,
+                ref_p=ref_p,
+                ref_u=ref_u,
+                target_zero_d=zero_d[organoid_id],
+                pressure_transform=transform,
+                shift=shift,
+                h5py=h5py,
+                scaled_fields=scaled_fields,
+                reference_organoid=reference_organoid,
+            )
+        )
+
+    summary = {
+        "trial_dir": str(run_dir),
+        "prepared_root": str(run_dir),
+        "reference_organoid": reference_organoid,
+        "scaled_organoids": scaling_rows,
+        "assumptions": list(
+            scaled_cfg.get("assumptions")
+            or [
+                "The same synthetic vasculature is replicated into each organoid well.",
+                "Only the reference organoid is solved with Darcy; wells 2..N reuse the reference fields with y-translation and 0D-based scaling.",
+                "Scaled wells write p.xdmf, u.xdmf, and interface_bc.json but do not run an independent Darcy solve.",
+            ]
+        ),
+    }
+    save_json(run_dir / "scaled_screening_summary.json", summary)
 
 
 def _bc_value_len(bc: dict, key: str) -> int:
@@ -607,15 +967,20 @@ def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndar
             inlet_coords=c_out,
         )
         if inlet_generator is mesh_mod.generate_1d_files_from_csv:
-            inlet_kwargs["rewrite_branch_tags"] = False
+            inlet_kwargs["rewrite_branch_tags"] = True
         if outlet_generator is mesh_mod.generate_1d_files_from_csv:
-            outlet_kwargs["rewrite_branch_tags"] = False
+            outlet_kwargs["rewrite_branch_tags"] = True
 
         inlet_generator(**inlet_kwargs)
         outlet_generator(**outlet_kwargs)
 
 
-def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
+def run_darcy_for_all(
+    run_dir: Path,
+    args: argparse.Namespace,
+    scaled_cfg: Optional[dict[str, Any]] = None,
+    replicate_reference_outputs: bool = False,
+) -> None:
     darcy_script = Path(args.darcy_script).expanduser().resolve()
     if not darcy_script.exists():
         die(f"Missing Darcy script: {darcy_script}")
@@ -624,22 +989,31 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
     if getattr(args, "trial_dir", ""):
         trial_output_csv = Path(args.trial_dir).expanduser().resolve() / "output.csv"
 
-    first_organoid_profile = None
-    if args.no_synthetic_vasculature and getattr(args, "first_organoid_linear_profile", False):
+    reference_organoid = int(scaled_cfg["reference_organoid"]) if scaled_cfg is not None else 1
+    solve_organoid_ids = (
+        [reference_organoid]
+        if scaled_cfg is not None
+        else list(range(1, int(args.n_organoids) + 1))
+    )
+
+    concave_profiles_by_organoid: dict[int, dict[str, Any]] = {}
+    if getattr(args, "first_organoid_linear_profile", False):
         first_organoid_profile = build_first_organoid_linear_profile_from_leaks(
             output_csv,
             face_length=float(args.concave_profile_face_length),
             compartment_spacing=float(args.concave_profile_compartment_spacing),
             fallback_output_csv=trial_output_csv,
         )
-        if first_organoid_profile is None and args.n_organoids >= 2 and MPI.COMM_WORLD.rank == 0:
+        if first_organoid_profile is not None:
+            concave_profiles_by_organoid[1] = first_organoid_profile
+        elif args.n_organoids >= 2 and MPI.COMM_WORLD.rank == 0:
             print(
                 "[warn] Could not build first-organoid linear concave pressure profile from leak pressures; "
                 "falling back to constant concave pressures.",
                 flush=True,
             )
 
-    for k in range(1, args.n_organoids + 1):
+    for k in solve_organoid_ids:
         org = run_dir / f"organoid_{k}"
         geom = org / "geometry"
         c_in = read_seed_coords_from_branching(
@@ -653,16 +1027,15 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
         perm_region_path = resolve_perm_region_for_organoid(args.perm_region_root, k) if args.perm_region_root else ""
         fallback_inlet_pressure = float(args.fallback_inlet_pressure)
         fallback_outlet_pressure = float(args.fallback_outlet_pressure)
-        if args.no_synthetic_vasculature:
-            p_art, p_ven = resolve_leak_pressures_for_darcy(
-                output_csv,
-                k,
-                fallback_output_csv=trial_output_csv,
-            )
-            if p_art is not None:
-                fallback_inlet_pressure = float(p_art)
-            if p_ven is not None:
-                fallback_outlet_pressure = float(p_ven)
+        p_art, p_ven = resolve_leak_pressures_for_darcy(
+            output_csv,
+            k,
+            fallback_output_csv=trial_output_csv,
+        )
+        if p_art is not None:
+            fallback_inlet_pressure = float(p_art)
+        if p_ven is not None:
+            fallback_outlet_pressure = float(p_ven)
 
         darcy_args = [
             "--bioreactor-domain", str(geom / "bioreactor.xdmf"),
@@ -687,14 +1060,19 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
             "--fallback-outlet-pressure", str(fallback_outlet_pressure),
             "--out-dir", str(org),
         ]
-        if first_organoid_profile is not None and k == 1:
+        if p_art is not None:
+            darcy_args.extend(["--concave-inlet-pressure", str(float(p_art))])
+        if p_ven is not None:
+            darcy_args.extend(["--concave-outlet-pressure", str(float(p_ven))])
+        concave_profile = concave_profiles_by_organoid.get(int(k))
+        if concave_profile is not None:
             darcy_args.extend([
-                "--concave-pressure-profile", str(first_organoid_profile["profile_mode"]),
-                "--concave-pressure-profile-axis", str(first_organoid_profile["profile_axis"]),
-                "--arterial-pressure-profile-low", str(first_organoid_profile["arterial_low"]),
-                "--arterial-pressure-profile-high", str(first_organoid_profile["arterial_high"]),
-                "--venous-pressure-profile-low", str(first_organoid_profile["venous_low"]),
-                "--venous-pressure-profile-high", str(first_organoid_profile["venous_high"]),
+                "--concave-pressure-profile", str(concave_profile["profile_mode"]),
+                "--concave-pressure-profile-axis", str(concave_profile["profile_axis"]),
+                "--arterial-pressure-profile-low", str(concave_profile["arterial_low"]),
+                "--arterial-pressure-profile-high", str(concave_profile["arterial_high"]),
+                "--venous-pressure-profile-low", str(concave_profile["venous_low"]),
+                "--venous-pressure-profile-high", str(concave_profile["venous_high"]),
             ])
         if darcy_script.stem in {"darcy_p1_lm_interior", "darcy_mixed"} and perm_region_path:
             darcy_args.extend([
@@ -712,6 +1090,12 @@ def run_darcy_for_all(run_dir: Path, args: argparse.Namespace) -> None:
         else:
             cmd = [sys.executable, str(darcy_script), *darcy_args]
         run(cmd)
+
+    if scaled_cfg is not None:
+        if replicate_reference_outputs:
+            replicate_reference_organoid_outputs(run_dir, int(args.n_organoids), scaled_cfg)
+        else:
+            synthesize_scaled_screening_outputs(run_dir, int(args.n_organoids), scaled_cfg)
 
 
 def _max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
@@ -799,12 +1183,12 @@ def convergence_for_organoid(
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Organoid coupling driver with geometry reuse + P1-LM Darcy.")
-    ap.add_argument("--template-combined", default="../prep/prepped/trial-9/combined.in")
-    ap.add_argument("--trial-dir", default="../prep/prepped/trial-9/",
+    ap.add_argument("--template-combined", default="../prep/scaled-screening/Run2_10branches/combined.in")
+    ap.add_argument("--trial-dir", default="../prep/scaled-screening/Run2_10branches/",
                     help="Optional trial directory used to copy branchingData_{0,1}.csv into each run. Not required in --no-synthetic-vasculature mode.")
-    ap.add_argument("--seed-run0", default="../prep/coupled-no-vasc/run_0",
+    ap.add_argument("--seed-run0", default="../prep/scaled-screening/Run2_10branches",
                     help="Existing run_0 folder with 3D meshing/tagging to reuse.")
-    ap.add_argument("--coupled-root", default="../coupling-output-no-vasc",)
+    ap.add_argument("--coupled-root", default="../coupling-output",)
 
     ap.add_argument("--n-organoids", type=int, default=4)
     ap.add_argument("--n-ramp", type=int, default=10)
@@ -823,12 +1207,16 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--svzerodsolver", default="svzerodsolver")
     ap.add_argument("--run-and-split", default="../prep/run_and_split_svzerod.py")
     ap.add_argument("--darcy-script", default="../solves/darcy_mixed.py")
-    ap.add_argument("--darcy-mpi-procs", type=int, default=1,
+    ap.add_argument("--darcy-mpi-procs", type=int, default=2,
                     help="MPI ranks for Darcy solves (1 = serial).")
     ap.add_argument("--darcy-mpirun-cmd", default="/opt/miniconda3/envs/fenicsx-env/bin/mpiexec.hydra",
                     help="MPI launcher command for Darcy when --darcy-mpi-procs > 1.")
+    ap.add_argument("--scaled-screening-mode", choices=["auto", "on", "off"], default="auto",
+                    help="When enabled, solve only the reference organoid with Darcy and synthesize the remaining repeated-geometry wells using 0D-based scaling. 'auto' enables this when trial_dir contains scaled_screening_summary.json.")
+    ap.add_argument("--scaled-pressure-offset-anchor", choices=["arterial", "venous"], default="arterial",
+                    help="Fallback pressure-offset anchor for scaled-screening mode when no scaled_screening_summary.json is available.")
     ap.add_argument("--first-organoid-linear-profile", action="store_true",
-                    help="For organoid_1 in --no-synthetic-vasculature mode, use organoid_2 leak pressures to build linear concave arterial/venous pressure profiles.")
+                    help="For organoid_1, use organoid_2 leak pressures to build linear concave arterial/venous pressure profiles.")
     ap.add_argument("--concave-profile-face-length", type=float, default=0.4,
                     help="Half-span/length factor L1 used to scale the concave-face pressure profile from neighboring leak pressures.")
     ap.add_argument("--concave-profile-compartment-spacing", type=float, default=0.6,
@@ -837,7 +1225,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--dy-step", type=float, default=0.6)
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-.28, 0.9, .5375])
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375])
-    ap.add_argument("--perm-region-root", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere",
+    ap.add_argument("--perm-region-root", default=str(Path(__file__).resolve().parents[2] / "files" / "stl" / "organoid-growth-domains" / "sphere"),
                     help="Directory, STL path, or pattern for organoid permeability regions. If a directory is given, organoid-k uses organoid-k.stl. You can also use a path containing 'X' as the organoid index placeholder.")
     ap.add_argument("--perm-low", type=float, default=1.0e-9)
     ap.add_argument("--perm-high", type=float, default=2.0e-7)
@@ -874,6 +1262,13 @@ def main() -> None:
             trial_dir = candidate_trial_dir
         elif not args.no_synthetic_vasculature:
             die(f"Trial directory does not exist: {candidate_trial_dir}")
+    scaled_cfg = load_scaled_screening_config(trial_dir, args)
+    if scaled_cfg is not None:
+        print(
+            f"[info] scaled-screening mode active: solving organoid_{scaled_cfg['reference_organoid']} "
+            "with Darcy and regenerating scaled outputs for the remaining wells.",
+            flush=True,
+        )
 
     coupled_root = Path(args.coupled_root).expanduser().resolve()
     coupled_root.mkdir(parents=True, exist_ok=True)
@@ -923,7 +1318,12 @@ def main() -> None:
     )
     if not args.no_synthetic_vasculature:
         update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
-    run_darcy_for_all(run0, args)
+    run_darcy_for_all(
+        run0,
+        args,
+        scaled_cfg=scaled_cfg,
+        replicate_reference_outputs=(scaled_cfg is not None),
+    )
 
     # Coupling loop: ramp then iterate to convergence
     total_steps = int(args.n_ramp) + int(args.max_iter)
@@ -985,7 +1385,7 @@ def main() -> None:
         )
         if not args.no_synthetic_vasculature:
             update_1d_checkpoints(cur, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
-        run_darcy_for_all(cur, args)
+        run_darcy_for_all(cur, args, scaled_cfg=scaled_cfg)
 
         # convergence after ramp
         if i > args.n_ramp:

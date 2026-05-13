@@ -21,9 +21,8 @@ from scipy.spatial import cKDTree
 import darcy as darcy_cg
 from darcy import PerfusionSolver as CGPerfusionSolver, Projector
 
-current_dir = Path(
-    "/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/solves"
-)
+current_dir = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PerfusionSolver(CGPerfusionSolver):
@@ -124,12 +123,9 @@ class PerfusionSolver(CGPerfusionSolver):
 
         tdim = mesh.topology.dim
         gdim = mesh.geometry.dim
-        mesh.topology.create_connectivity(tdim, 0)
-        c2v = mesh.topology.connectivity(tdim, 0)
 
         nloc = mesh.topology.index_map(tdim).size_local
         cell_ids = np.arange(nloc, dtype=np.int32)
-        x = mesh.geometry.x
         K_local = np.full(nloc, float(K_low), dtype=np.float64)
 
         testers = []
@@ -138,8 +134,7 @@ class PerfusionSolver(CGPerfusionSolver):
                 testers.append(self._build_stl_distance_tester(Path(stl_file)))
 
             for c in cell_ids:
-                vs = c2v.links(int(c))
-                pts = x[vs, :gdim]
+                pts = self._cell_geometry_points(mesh, int(c), gdim)
                 midpoint = np.mean(pts, axis=0)
                 signed_dist = np.inf
                 for inside_fn, dist_fn, _cleanup in testers:
@@ -162,9 +157,51 @@ class PerfusionSolver(CGPerfusionSolver):
             for _inside, _dist, cleanup in testers:
                 cleanup()
 
-        Kfun.x.array[:nloc] = K_local
-        Kfun.x.scatter_forward()
+        self._assign_dg0_cell_values(Kfun, K_local)
         return Kfun
+
+    def _dg0_range(self, fun) -> tuple[float, float]:
+        local = np.asarray(fun.x.array, dtype=float)
+        if local.size:
+            local_min = float(np.min(local))
+            local_max = float(np.max(local))
+        else:
+            local_min = float("inf")
+            local_max = float("-inf")
+        global_min = float(self.mesh.comm.allreduce(local_min, op=MPI.MIN))
+        global_max = float(self.mesh.comm.allreduce(local_max, op=MPI.MAX))
+        if not np.isfinite(global_min):
+            global_min = 0.0
+        if not np.isfinite(global_max):
+            global_max = 0.0
+        return global_min, global_max
+
+    def _make_anisotropic_kx_function(self, Kfun):
+        V0 = Kfun.function_space
+        Kx_fun = fem.Function(V0)
+        perm_low = float(self.perm_low)
+        perm_high = float(self.perm_high)
+        if abs(perm_high - perm_low) > 0.0:
+            alpha = (np.asarray(Kfun.x.array, dtype=float) - perm_low) / (perm_high - perm_low)
+            alpha = np.clip(alpha, 0.0, 1.0)
+        else:
+            alpha = np.zeros_like(Kfun.x.array, dtype=float)
+        Kx_fun.x.array[:] = perm_low + alpha * (5.0 * perm_high - perm_low)
+        Kx_fun.x.scatter_forward()
+        return Kx_fun
+
+    def _write_permeability_outputs(self, out_dir: Path, Kfun, Kx_fun) -> None:
+        try:
+            Kfun.name = "K_perp"
+            Kx_fun.name = "K_x"
+        except Exception:
+            pass
+        with io.XDMFFile(self.mesh.comm, out_dir / "K_perp.xdmf", "w") as f:
+            f.write_mesh(self.mesh)
+            f.write_function(Kfun)
+        with io.XDMFFile(self.mesh.comm, out_dir / "K_x.xdmf", "w") as f:
+            f.write_mesh(self.mesh)
+            f.write_function(Kx_fun)
 
     def _build_terminal_flux_rhs_mixed(self, v):
         """
@@ -189,7 +226,8 @@ class PerfusionSolver(CGPerfusionSolver):
             Q = float(self.q_inlet[idx_in[j]]) if len(self.q_inlet) else 0.0
             scale = float(self._inlet_flux_scale_by_marker.get(int(m), 1.0))
             Q *= scale
-            A_face = float(fem.assemble_scalar(fem.form(one * ds(int(m)))))
+            A_face_local = float(fem.assemble_scalar(fem.form(one * ds(int(m)))))
+            A_face = float(mesh.comm.allreduce(A_face_local, op=MPI.SUM))
             A_ckpt = float(self.a_inlet[idx_in[j]]) if len(self.a_inlet) else 0.0
             self.inlet_marker_area_3d[j] = A_face
             self.inlet_marker_area_1d[j] = A_ckpt
@@ -207,23 +245,15 @@ class PerfusionSolver(CGPerfusionSolver):
         L_ports = 0
 
         for m, Q_in in zip(np.asarray(inlet_marks, dtype=int), np.asarray(inlet_q_in, dtype=float)):
-            _ext, int_facets = self._split_marker_facets(int(m))
-            if int_facets.size == 0:
-                continue
             area = float(mesh.comm.allreduce(fem.assemble_scalar(fem.form(one * dS(int(m)))), op=MPI.SUM))
-            if area <= 0.0:
-                continue
-            g = fem.Constant(mesh, dfx.default_scalar_type(float(Q_in) / area))
+            g_val = float(Q_in) / area if area > 0.0 else 0.0
+            g = fem.Constant(mesh, dfx.default_scalar_type(g_val))
             L_ports += g * ufl.avg(v) * dS(int(m))
 
         for m, Q_out in zip(np.asarray(outlet_marks, dtype=int), np.asarray(outlet_q_out, dtype=float)):
-            _ext, int_facets = self._split_marker_facets(int(m))
-            if int_facets.size == 0:
-                continue
             area = float(mesh.comm.allreduce(fem.assemble_scalar(fem.form(one * dS(int(m)))), op=MPI.SUM))
-            if area <= 0.0:
-                continue
-            g = fem.Constant(mesh, dfx.default_scalar_type(float(Q_out) / area))
+            g_val = float(Q_out) / area if area > 0.0 else 0.0
+            g = fem.Constant(mesh, dfx.default_scalar_type(g_val))
             L_ports += -g * ufl.avg(v) * dS(int(m))
 
         return L_ports
@@ -458,16 +488,11 @@ class PerfusionSolver(CGPerfusionSolver):
         if facets.size == 0:
             return np.zeros(gdim, dtype=float)
 
-        mesh.topology.create_entities(fdim)
-        mesh.topology.create_connectivity(fdim, 0)
-        f_to_v = mesh.topology.connectivity(fdim, 0)
-        X = mesh.geometry.x
         c_dom = self._domain_centroid()
 
         n_acc = np.zeros(gdim, dtype=float)
         for f in facets:
-            vs = f_to_v.links(int(f))
-            pts = X[vs]
+            pts = self._entity_geometry_points(mesh, fdim, int(f), gdim)
             center = pts.mean(axis=0)
             if pts.shape[0] < 3:
                 continue
@@ -557,9 +582,7 @@ class PerfusionSolver(CGPerfusionSolver):
                 continue
             pval = float(self.p_outlet[idx_out[j]])
             pbc = fem.Constant(mesh, dfx.default_scalar_type(pval))
-            ext_facets, int_facets = self._split_marker_facets(int(m))
-            if ext_facets.size > 0:
-                Lp += -pbc * ufl.dot(w, n) * ds(int(m))
+            Lp += -pbc * ufl.dot(w, n) * ds(int(m))
 
         if self.concave_bc_mode == "dirichlet":
             p_art = self._build_concave_boundary_expr(
@@ -792,12 +815,16 @@ class PerfusionSolver(CGPerfusionSolver):
                 q_vals.append(0.0)
                 continue
             n_const = fem.Constant(mesh, dfx.default_scalar_type(tuple(float(v) for v in n_port)))
-            ext_facets, int_facets = self._split_marker_facets(int(m))
-            q_expr = 0
-            if ext_facets.size > 0:
-                q_expr += ufl.dot(u_h, n_const) * ds(int(m))
-            if int_facets.size > 0:
-                q_expr += ufl.dot(ufl.avg(u_h), n_const) * dS(int(m))
+            n_ext, n_int = self._marker_global_facet_counts(int(m))
+            if n_ext <= 0 and n_int <= 0:
+                q_vals.append(0.0)
+                continue
+            q_expr = None
+            if n_ext > 0:
+                q_expr = ufl.dot(u_h, n_const) * ds(int(m))
+            if n_int > 0:
+                int_expr = ufl.dot(ufl.avg(u_h), n_const) * dS(int(m))
+                q_expr = int_expr if q_expr is None else q_expr + int_expr
             q_vals.append(float(self.mesh.comm.allreduce(fem.assemble_scalar(fem.form(q_expr)), op=MPI.SUM)))
         return np.asarray(q_vals, dtype=float)
 
@@ -810,16 +837,19 @@ class PerfusionSolver(CGPerfusionSolver):
 
         for m in inlet_marks:
             m_int = int(m)
-            ext_facets, int_facets = self._split_marker_facets(m_int)
-            form_expr = 0
-            if ext_facets.size > 0:
-                form_expr += ufl.dot(w, n) * ds(m_int)
-            if int_facets.size > 0:
+            n_ext, n_int = self._marker_global_facet_counts(m_int)
+            if n_ext <= 0 and n_int <= 0:
+                continue
+            form_expr = None
+            if n_ext > 0:
+                form_expr = ufl.dot(w, n) * ds(m_int)
+            if n_int > 0:
                 n_port = self._marker_port_normal_constant(m_int, kind="inlet")
                 if n_port is None:
-                    form_expr += ufl.dot(ufl.avg(w), n("+")) * dS(m_int)
+                    int_expr = ufl.dot(ufl.avg(w), n("+")) * dS(m_int)
                 else:
-                    form_expr += ufl.dot(ufl.avg(w), n_port) * dS(m_int)
+                    int_expr = ufl.dot(ufl.avg(w), n_port) * dS(m_int)
+                form_expr = int_expr if form_expr is None else form_expr + int_expr
 
             c = assemble_vector(fem.form(form_expr))
             c.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE)
@@ -851,6 +881,8 @@ class PerfusionSolver(CGPerfusionSolver):
         comm = mesh.comm
 
         inlet_marks, outlet_marks, _, _, idx_in_marker, idx_out_marker = self._get_terminal_marker_data()
+        inlet_marks_arr = np.asarray(inlet_marks, dtype=int)
+        outlet_marks_arr = np.asarray(outlet_marks, dtype=int)
         ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
         dS = ufl.Measure("dS", domain=mesh, subdomain_data=self.facet_tags)
         n = ufl.FacetNormal(mesh)
@@ -971,6 +1003,7 @@ class PerfusionSolver(CGPerfusionSolver):
             coords_in_final = coords_in[idx_in_branch, :]
             port_normals_in = port_normals_in_raw[idx_in_branch, :]
             ids_in = self.branch_ids_in
+            markers_in_final = inlet_marks_arr[idx_in_branch]
             p_inlet_target = p_inlet_target_marker[idx_in_branch] if len(p_inlet_target_marker) else p_inlet_target_marker
             q_inlet_target = q_inlet_target_marker[idx_in_branch] if len(q_inlet_target_marker) else q_inlet_target_marker
             q_inlet_target_in = np.abs(q_inlet_target)
@@ -983,6 +1016,7 @@ class PerfusionSolver(CGPerfusionSolver):
             coords_in_final = coords_in
             port_normals_in = port_normals_in_raw
             ids_in = None
+            markers_in_final = inlet_marks_arr
             p_inlet_target = p_inlet_target_marker
             q_inlet_target = q_inlet_target_marker
             q_inlet_target_in = np.abs(q_inlet_target)
@@ -996,6 +1030,7 @@ class PerfusionSolver(CGPerfusionSolver):
             coords_out_final = coords_out[idx_out_branch, :]
             port_normals_out = port_normals_out_raw[idx_out_branch, :]
             ids_out = self.branch_ids_out
+            markers_out_final = outlet_marks_arr[idx_out_branch]
             p_outlet_target = p_outlet_target_marker[idx_out_branch] if len(p_outlet_target_marker) else p_outlet_target_marker
             q_outlet_target = q_outlet_target_marker[idx_out_branch] if len(q_outlet_target_marker) else q_outlet_target_marker
         else:
@@ -1007,8 +1042,22 @@ class PerfusionSolver(CGPerfusionSolver):
             coords_out_final = coords_out
             port_normals_out = port_normals_out_raw
             ids_out = None
+            markers_out_final = outlet_marks_arr
             p_outlet_target = p_outlet_target_marker
             q_outlet_target = q_outlet_target_marker
+
+        expected_inlet_markers = np.arange(
+            int(self.inlet_base_marker),
+            int(self.inlet_base_marker) + int(len(self.x_inlet)),
+            dtype=int,
+        )
+        expected_outlet_markers = np.arange(
+            int(self.outlet_base_marker),
+            int(self.outlet_base_marker) + int(len(self.x_outlet)),
+            dtype=int,
+        )
+        missing_inlet_markers = sorted(set(expected_inlet_markers.tolist()) - set(inlet_marks_arr.tolist()))
+        missing_outlet_markers = sorted(set(expected_outlet_markers.tolist()) - set(outlet_marks_arr.tolist()))
 
         p_inlet_mean = float(np.mean(p_inlet)) if len(p_inlet) else float("nan")
         p_outlet_mean = float(np.mean(p_outlet)) if len(p_outlet) else float("nan")
@@ -1032,11 +1081,29 @@ class PerfusionSolver(CGPerfusionSolver):
             "q_venous_leak": float(Q_ven_leak),
             "p_concave_inlet_bc": float(self.p_in_BC),
             "p_concave_outlet_bc": float(self.p_out_BC),
+            "p_concave_inlet_bc_source": self.concave_inlet_pressure_source,
+            "p_concave_outlet_bc_source": self.concave_outlet_pressure_source,
+            "concave_pressure_profile": self.concave_pressure_profile,
+            "concave_pressure_profile_axis": self.concave_pressure_profile_axis_name,
+            "p_concave_inlet_bc_low": float(self.concave_art_pressure_low),
+            "p_concave_inlet_bc_high": float(self.concave_art_pressure_high),
+            "p_concave_outlet_bc_low": float(self.concave_ven_pressure_low),
+            "p_concave_outlet_bc_high": float(self.concave_ven_pressure_high),
             "skip_1d": bool(self.skip_1d),
             "coords_inlet": coords_in_final.tolist(),
             "coords_outlet": coords_out_final.tolist(),
             "port_normals_inlet": port_normals_in.tolist(),
             "port_normals_outlet": port_normals_out.tolist(),
+            "terminal_markers_inlet_unique": inlet_marks_arr.tolist(),
+            "terminal_markers_outlet_unique": outlet_marks_arr.tolist(),
+            "terminal_markers_inlet": np.asarray(markers_in_final, dtype=int).tolist(),
+            "terminal_markers_outlet": np.asarray(markers_out_final, dtype=int).tolist(),
+            "expected_terminal_markers_inlet": expected_inlet_markers.tolist(),
+            "expected_terminal_markers_outlet": expected_outlet_markers.tolist(),
+            "missing_terminal_markers_inlet": [int(m) for m in missing_inlet_markers],
+            "missing_terminal_markers_outlet": [int(m) for m in missing_outlet_markers],
+            "terminal_marker_to_1d_index_inlet": np.asarray(idx_in_marker, dtype=int).tolist(),
+            "terminal_marker_to_1d_index_outlet": np.asarray(idx_out_marker, dtype=int).tolist(),
             "p_inlet_target": np.asarray(p_inlet_target, dtype=float).tolist(),
             "p_outlet_target": np.asarray(p_outlet_target, dtype=float).tolist(),
             "q_inlet_target": np.asarray(q_inlet_target, dtype=float).tolist(),
@@ -1084,7 +1151,14 @@ class PerfusionSolver(CGPerfusionSolver):
                 K_high=self.perm_high,
                 transition_width=self.perm_transition_width,
             )
+            perm_mode = "stl"
         else:
+            if mesh.comm.rank == 0:
+                print(
+                    "[perm] No STL permeability region found; using fallback blob/wall permeability field. "
+                    f"Requested path: {self.perm_region_path!r}",
+                    flush=True,
+                )
             K_base = 1e-7
             K_wall = 1e-7
             K_high = 1.0e-8
@@ -1117,6 +1191,26 @@ class PerfusionSolver(CGPerfusionSolver):
             Kfun = fem.Function(K_wall_blobs.function_space)
             Kfun.x.array[:] = K_wall_blobs.x.array[:] + K_blobs.x.array[:]
             Kfun.x.scatter_forward()
+            perm_mode = "fallback_blob_wall"
+
+        Kx_fun = self._make_anisotropic_kx_function(Kfun)
+        K_perp_min, K_perp_max = self._dg0_range(Kfun)
+        Kx_min, Kx_max = self._dg0_range(Kx_fun)
+        self.permeability_metadata = {
+            "mode": perm_mode,
+            "requested_path": str(self.perm_region_path),
+            "resolved_stl_files": [str(p) for p in stl_files],
+            "stl_file_count": int(len(stl_files)),
+            "perm_low": float(self.perm_low),
+            "perm_high": float(self.perm_high),
+            "perm_transition_width": float(self.perm_transition_width),
+            "anisotropy_axis": "x",
+            "anisotropy_factor_inside_stl": 5.0,
+            "K_perp_min": K_perp_min,
+            "K_perp_max": K_perp_max,
+            "K_x_min": Kx_min,
+            "K_x_max": Kx_max,
+        }
 
         I = ufl.Identity(mesh.geometry.dim)
         e = ufl.as_vector((1.0, 0.0, 0.0))
@@ -1131,7 +1225,7 @@ class PerfusionSolver(CGPerfusionSolver):
         # Keep the background isotropic and only add x-directed anisotropy inside
         # the STL-masked region (with the same smooth transition shell as Kfun).
         K_perp = Kfun
-        Kx = perm_low + alpha * (5.0 * perm_high - perm_low)
+        Kx = Kx_fun
         K_tensor = K_perp * I + (Kx - K_perp) * ufl.outer(e, e)
 
         # keep q_src in pressure space
@@ -1192,9 +1286,18 @@ class PerfusionSolver(CGPerfusionSolver):
                 if 0 <= idx < len(self.q_outlet):
                     q_out_target_out[j] = abs(float(self.q_outlet[idx]))
 
-        inlet_ext_mask = np.array([self._split_marker_facets(int(m))[0].size > 0 for m in inlet_marks], dtype=bool)
-        inlet_int_mask = np.array([self._split_marker_facets(int(m))[1].size > 0 for m in inlet_marks], dtype=bool)
-        outlet_int_mask = np.array([self._split_marker_facets(int(m))[1].size > 0 for m in outlet_marks], dtype=bool)
+        inlet_ext_mask = np.array(
+            [self._marker_global_facet_counts(int(m))[0] > 0 for m in inlet_marks],
+            dtype=bool,
+        )
+        inlet_int_mask = np.array(
+            [self._marker_global_facet_counts(int(m))[1] > 0 for m in inlet_marks],
+            dtype=bool,
+        )
+        outlet_int_mask = np.array(
+            [self._marker_global_facet_counts(int(m))[1] > 0 for m in outlet_marks],
+            dtype=bool,
+        )
 
         inlet_marks_ext = np.asarray(inlet_marks, dtype=int)[inlet_ext_mask]
         q_target_ext = np.asarray(q_target, dtype=float)[inlet_ext_mask]
@@ -1253,6 +1356,7 @@ class PerfusionSolver(CGPerfusionSolver):
         # write outputs
         out_dir = current_dir / "out_darcy"
         out_dir.mkdir(exist_ok=True)
+        self._write_permeability_outputs(out_dir, Kfun, Kx_fun)
 
         with io.XDMFFile(mesh.comm, out_dir / "p.xdmf", "w") as f:
             f.write_mesh(mesh)
@@ -1281,6 +1385,7 @@ class PerfusionSolver(CGPerfusionSolver):
             delattr(self, "K_tensor")
 
         interface_bc = self._compute_interface_bc(p_h, u_h, q_src, Q_art_leak, Q_ven_leak)
+        interface_bc["permeability"] = dict(getattr(self, "permeability_metadata", {}))
         interface_bc.update(boundary_audit)
         interface_bc.update(self._build_mass_balance_report(interface_bc, boundary_audit, Q_tot))
 
@@ -1309,6 +1414,18 @@ if __name__ == "__main__":
     ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
     ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
     ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
+    ap.add_argument(
+        "--concave-inlet-pressure",
+        type=float,
+        default=None,
+        help="Optional explicit arterial concave-face pressure. Keeps 1D terminal loading enabled.",
+    )
+    ap.add_argument(
+        "--concave-outlet-pressure",
+        type=float,
+        default=None,
+        help="Optional explicit venous concave-face pressure. Keeps 1D terminal loading enabled.",
+    )
     ap.add_argument("--checkpoint-time-index", type=int, default=-1,
                     help="Checkpoint time index to read from 1D pressure/flow/area histories (-1 = last).")
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.175, 0.9, 0.55])
@@ -1341,7 +1458,7 @@ if __name__ == "__main__":
                     help="Accepted for interface compatibility.")
     ap.add_argument(
         "--perm-region-path",
-        default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere",
+        default=str(REPO_ROOT / "files" / "stl" / "organoid-growth-domains" / "sphere"),
         help="STL file, directory, or glob pattern describing high-permeability organoid regions.",
     )
     ap.add_argument("--perm-low", type=float, default=1.0e-8, help="Background permeability outside STL regions.")
@@ -1395,5 +1512,7 @@ if __name__ == "__main__":
         perm_transition_width=args.perm_transition_width,
         branching_in_file=args.branching_in_file if args.branching_in_file else None,
         branching_out_file=args.branching_out_file if args.branching_out_file else None,
+        concave_inlet_pressure=args.concave_inlet_pressure,
+        concave_outlet_pressure=args.concave_outlet_pressure,
     )
     solver.setup()

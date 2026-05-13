@@ -114,15 +114,34 @@ def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
     if comm.rank == 0:
         print("[mesh] BP mesh read complete", flush=True)
 
-    # Read facet tags from XDMF on the distributed mesh to avoid potential
-    # multi-rank ADIOS meshtag read hangs.
-    with io.XDMFFile(comm, facet_file, "r") as xdmf:
+    # Mesh and facet tags must come from the same distributed representation.
+    # Reading the BP mesh and then remapping XDMF meshtags can silently drop
+    # terminal markers on some MPI partitions.
+    try:
         m.topology.create_connectivity(m.topology.dim, m.topology.dim - 1)
         m.topology.create_connectivity(m.topology.dim - 1, m.topology.dim)
         m.topology.create_connectivity(m.topology.dim - 1, 0)
-        facet_tags = xdmf.read_meshtags(m, name="mesh_tags")
-    if comm.rank == 0:
-        print("[mesh] XDMF facet tags read complete", flush=True)
+        facet_tags = adios4dolfinx.read_meshtags(
+            filename=cache_bp,
+            mesh=m,
+            meshtag_name="mesh_tags",
+        )
+        if comm.rank == 0:
+            print("[mesh] BP facet tags read complete", flush=True)
+    except Exception as exc:
+        if comm.rank == 0:
+            print(
+                "[mesh] BP facet tag read failed; falling back to XDMF facet tags:",
+                repr(exc),
+                flush=True,
+            )
+        with io.XDMFFile(comm, facet_file, "r") as xdmf:
+            m.topology.create_connectivity(m.topology.dim, m.topology.dim - 1)
+            m.topology.create_connectivity(m.topology.dim - 1, m.topology.dim)
+            m.topology.create_connectivity(m.topology.dim - 1, 0)
+            facet_tags = xdmf.read_meshtags(m, name="mesh_tags")
+        if comm.rank == 0:
+            print("[mesh] XDMF facet tags read complete", flush=True)
     return m, facet_tags
 # -----------------------------------------------------
 # Pressure ADIOS importer
@@ -218,7 +237,9 @@ class PerfusionSolver:
                  inlet_flux_corr_max_iter: int = 5,
                  inlet_flux_corr_relax: float = 0.5,
                  inlet_flux_corr_tol: float = 0.05,
-                 branching_in_file=None, branching_out_file=None):
+                 branching_in_file=None, branching_out_file=None,
+                 concave_inlet_pressure=None,
+                 concave_outlet_pressure=None):
 
         # 3D perfusion domain + boundary facets
         if MPI.COMM_WORLD.rank == 0:
@@ -394,9 +415,20 @@ class PerfusionSolver:
         self.inlet_flux_corr_tol = float(max(0.0, inlet_flux_corr_tol))
         self._inlet_flux_scale_by_marker = {}
 
-        # BC pressures sampled on rank 0 and broadcast to all ranks.
+        inlet_pressure_source = "fallback_skip_1d" if self.skip_1d else "sampled_1d_seed_coordinate"
+        outlet_pressure_source = "fallback_skip_1d" if self.skip_1d else "sampled_1d_seed_coordinate"
+        if concave_inlet_pressure is not None:
+            p_in_BC = float(concave_inlet_pressure)
+            inlet_pressure_source = "explicit_concave_pressure_override"
+        if concave_outlet_pressure is not None:
+            p_out_BC = float(concave_outlet_pressure)
+            outlet_pressure_source = "explicit_concave_pressure_override"
+
+        # BC pressures sampled/overridden on rank 0 and made available on all ranks.
         self.p_in_BC = float(p_in_BC)
         self.p_out_BC = float(p_out_BC)
+        self.concave_inlet_pressure_source = inlet_pressure_source
+        self.concave_outlet_pressure_source = outlet_pressure_source
         self.concave_pressure_profile = str(concave_pressure_profile).strip().lower()
         if self.concave_pressure_profile not in {"constant", "linear"}:
             raise ValueError(
@@ -470,21 +502,17 @@ class PerfusionSolver:
         fdim = mesh.topology.dim - 1
         axis = int(self.concave_pressure_profile_axis)
 
-        mesh.topology.create_entities(fdim)
-        mesh.topology.create_connectivity(fdim, 0)
-        f_to_v = mesh.topology.connectivity(fdim, 0)
-
         facets = facet_tags.find(marker)
         if facets.size == 0:
             found_local = 0
             local_min = np.inf
             local_max = -np.inf
         else:
-            verts = []
+            axis_coords = []
             for facet in facets:
-                verts.extend(int(v) for v in f_to_v.links(int(facet)))
-            verts = np.unique(np.asarray(verts, dtype=np.int32))
-            coords = mesh.geometry.x[verts, axis]
+                pts = self._entity_geometry_points(mesh, fdim, int(facet))
+                axis_coords.extend(float(v) for v in pts[:, axis])
+            coords = np.asarray(axis_coords, dtype=np.float64)
             found_local = 1 if coords.size > 0 else 0
             local_min = float(np.min(coords)) if coords.size > 0 else np.inf
             local_max = float(np.max(coords)) if coords.size > 0 else -np.inf
@@ -831,7 +859,10 @@ class PerfusionSolver:
           inlet terminals  : [inlet_base_marker,  inlet_base_marker+1,  ...]
           outlet terminals : [outlet_base_marker, outlet_base_marker+1, ...]
         """
-        vals = np.unique(self.facet_tags.values)
+        local_vals = np.unique(np.asarray(self.facet_tags.values, dtype=np.int32))
+        gathered = self.mesh.comm.allgather(local_vals.tolist())
+        merged = sorted({int(v) for vals in gathered for v in vals})
+        vals = np.asarray(merged, dtype=np.int32)
         inlet_base  = getattr(self, "inlet_base_marker", 1)
         outlet_base = getattr(self, "outlet_base_marker", 100)
 
@@ -848,25 +879,29 @@ class PerfusionSolver:
         tdim = mesh.topology.dim
         fdim = tdim - 1
 
-        mesh.topology.create_entities(fdim)
-        mesh.topology.create_connectivity(fdim, 0)
-
-        f_to_v = mesh.topology.connectivity(fdim, 0)
-        X = mesh.geometry.x
-
         centroids = np.zeros((len(markers), 3), dtype=np.float64)
         for i, m in enumerate(markers):
             facets = self.facet_tags.find(int(m))
-            if facets.size == 0:
+            local_sum = np.zeros(3, dtype=np.float64)
+            local_count = np.array([0], dtype=np.int64)
+            for f in facets:
+                local_sum += self._entity_geometry_points(mesh, fdim, int(f)).mean(axis=0)
+                local_count[0] += 1
+            global_sum = np.zeros_like(local_sum)
+            global_count = np.zeros_like(local_count)
+            self.mesh.comm.Allreduce(local_sum, global_sum, op=MPI.SUM)
+            self.mesh.comm.Allreduce(local_count, global_count, op=MPI.SUM)
+            if int(global_count[0]) == 0:
                 centroids[i, :] = np.nan
-                continue
-            # centroid per facet then average
-            c = np.zeros((facets.size, 3), dtype=np.float64)
-            for j, f in enumerate(facets):
-                vs = f_to_v.links(int(f))
-                c[j, :] = X[vs].mean(axis=0)
-            centroids[i, :] = c.mean(axis=0)
+            else:
+                centroids[i, :] = global_sum / float(global_count[0])
         return centroids
+
+    def _marker_global_facet_counts(self, marker: int) -> tuple[int, int]:
+        ext_facets, int_facets = self._split_marker_facets(int(marker))
+        n_ext = int(self.mesh.comm.allreduce(int(ext_facets.size), op=MPI.SUM))
+        n_int = int(self.mesh.comm.allreduce(int(int_facets.size), op=MPI.SUM))
+        return n_ext, n_int
 
     def _assign_markers_to_terminals(self, marker_centroids, terminal_coords):
         """
@@ -935,7 +970,8 @@ class PerfusionSolver:
             print("Flow target for marker", m, "is", Q)
             scale = float(self._inlet_flux_scale_by_marker.get(int(m), 1.0))
             Q *= scale
-            A_face = float(fem.assemble_scalar(fem.form(one * ds(int(m)))))
+            A_face_local = float(fem.assemble_scalar(fem.form(one * ds(int(m)))))
+            A_face = float(mesh.comm.allreduce(A_face_local, op=MPI.SUM))
             A_ckpt = float(self.a_inlet[idx_in[j]]) if len(self.a_inlet) else 0.0
             self.inlet_marker_area_3d[j] = A_face
             self.inlet_marker_area_1d[j] = A_ckpt
@@ -966,7 +1002,8 @@ class PerfusionSolver:
         out = np.zeros(len(inlet_marks), dtype=float)
         for j, m in enumerate(inlet_marks):
             expr = -ufl.dot(self.K_tensor * ufl.grad(p_h), n) * ds(int(m))
-            out[j] = float(fem.assemble_scalar(fem.form(expr)))
+            local_flux = float(fem.assemble_scalar(fem.form(expr)))
+            out[j] = float(self.mesh.comm.allreduce(local_flux, op=MPI.SUM))
         return out
 
     # ========================================================
@@ -1496,6 +1533,8 @@ class PerfusionSolver:
             "q_venous_leak":   float(Q_ven_leak),
             "p_concave_inlet_bc": float(self.p_in_BC),
             "p_concave_outlet_bc": float(self.p_out_BC),
+            "p_concave_inlet_bc_source": self.concave_inlet_pressure_source,
+            "p_concave_outlet_bc_source": self.concave_outlet_pressure_source,
             "concave_pressure_profile": self.concave_pressure_profile,
             "concave_pressure_profile_axis": self.concave_pressure_profile_axis_name,
             "p_concave_inlet_bc_low": float(self.concave_art_pressure_low),
@@ -1552,6 +1591,52 @@ class PerfusionSolver:
     # -----------------------------------------------------------------------------
     # Permeability field K(x) in DG0 (same as your fixed version)
     # -----------------------------------------------------------------------------
+    @staticmethod
+    def _assign_dg0_cell_values(fun, cell_values):
+        """Assign one scalar DG0 value per owned cell using the cell-to-dof map."""
+        V0 = fun.function_space
+        mesh = V0.mesh
+        tdim = mesh.topology.dim
+        nloc = mesh.topology.index_map(tdim).size_local
+        values = np.asarray(cell_values, dtype=fun.x.array.dtype).reshape(-1)
+        if values.size != nloc:
+            raise ValueError(
+                f"Expected one DG0 value for each owned cell ({nloc}); got {values.size}."
+            )
+
+        for c, value in enumerate(values):
+            dofs = V0.dofmap.cell_dofs(c)
+            if len(dofs) != 1:
+                raise ValueError(
+                    "Expected scalar DG0 space to have exactly one dof per cell; "
+                    f"cell {c} has {len(dofs)}."
+                )
+            fun.x.array[int(dofs[0])] = value
+        fun.x.scatter_forward()
+
+    @staticmethod
+    def _cell_geometry_points(mesh_obj, cell: int, gdim: int | None = None):
+        """Return physical coordinate dofs for a cell using the geometry dofmap."""
+        if gdim is None:
+            gdim = mesh_obj.geometry.dim
+        gdofs = mesh_obj.geometry.dofmap[int(cell)]
+        return mesh_obj.geometry.x[np.asarray(gdofs, dtype=np.int32), : int(gdim)]
+
+    @staticmethod
+    def _entity_geometry_points(mesh_obj, dim: int, entity: int, gdim: int | None = None):
+        """Return physical coordinate dofs for a mesh entity using geometry mapping."""
+        if gdim is None:
+            gdim = mesh_obj.geometry.dim
+        mesh_obj.topology.create_entities(int(dim))
+        mesh_obj.topology.create_connectivity(int(dim), mesh_obj.topology.dim)
+        gdofs = dfx.mesh.entities_to_geometry(
+            mesh_obj,
+            int(dim),
+            np.asarray([int(entity)], dtype=np.int32),
+            False,
+        )[0]
+        return mesh_obj.geometry.x[np.asarray(gdofs, dtype=np.int32), : int(gdim)]
+
     def make_K_DG0(self, mesh, K_base, K_high, centers, radius, inner_frac=0.5):
         """
         Build a DG0 permeability field with smooth transition from K_high near
@@ -1564,20 +1649,15 @@ class PerfusionSolver:
         V0 = fem.functionspace(mesh, ("DG", 0))
         Kfun = fem.Function(V0)
 
-        tdim = mesh.topology.dim
-        mesh.topology.create_connectivity(tdim, 0)  # cells -> vertices
-        c2v = mesh.topology.connectivity(tdim, 0)
-
         # local cells only
+        tdim = mesh.topology.dim
         nloc = mesh.topology.index_map(tdim).size_local
         cell_ids = np.arange(nloc, dtype=np.int32)
 
         # cell midpoints
-        x = mesh.geometry.x
         mids = np.zeros((nloc, mesh.geometry.dim), dtype=np.float64)
         for c in cell_ids:
-            vs = c2v.links(c)
-            mids[c, :] = np.mean(x[vs, :], axis=0)
+            mids[c, :] = np.mean(self._cell_geometry_points(mesh, int(c)), axis=0)
 
         # base field
         alpha = np.zeros(nloc, dtype=np.float64)  # blending: 0 -> K_base, 1 -> K_high
@@ -1613,8 +1693,7 @@ class PerfusionSolver:
         # final K field
         K_local = K_base + alpha * (K_high - K_base)
 
-        Kfun.x.array[:nloc] = K_local
-        Kfun.x.scatter_forward()
+        self._assign_dg0_cell_values(Kfun, K_local)
         return Kfun
 
     from dolfinx import fem, mesh as dmesh
@@ -1666,33 +1745,23 @@ class PerfusionSolver:
         gdim = mesh.geometry.dim
         fdim = tdim - 1
 
-        # --- 1) Collect wall facet centroids ---
-        mesh.topology.create_connectivity(fdim, 0)
-        f2v = mesh.topology.connectivity(fdim, 0)
-
         mask = np.isin(facet_tags.values, wall_markers)
         wall_facets = facet_tags.indices[mask]
 
-        x = mesh.geometry.x
         wall_centers = np.zeros((len(wall_facets), gdim), dtype=np.float64)
         for i, f in enumerate(wall_facets):
-            vs = f2v.links(f)
-            wall_centers[i, :] = x[vs, :].mean(axis=0)
+            wall_centers[i, :] = self._entity_geometry_points(mesh, fdim, int(f), gdim).mean(axis=0)
 
         # Build KD-tree for distance queries
         tree = cKDTree(wall_centers)
 
         # --- 2) Cell midpoints ---
-        mesh.topology.create_connectivity(tdim, 0)
-        c2v = mesh.topology.connectivity(tdim, 0)
-
         nloc = mesh.topology.index_map(tdim).size_local
         cell_ids = np.arange(nloc, dtype=np.int32)
 
         mids = np.zeros((nloc, gdim), dtype=np.float64)
         for c in cell_ids:
-            vs = c2v.links(c)
-            mids[c, :] = x[vs, :].mean(axis=0)
+            mids[c, :] = self._cell_geometry_points(mesh, int(c), gdim).mean(axis=0)
 
         # --- 3) Distance of each cell midpoint to nearest wall facet ---
         d, _ = tree.query(mids)  # d.shape = (nloc,)
@@ -1715,8 +1784,7 @@ class PerfusionSolver:
         K_local = alpha * (K_wall - K_base)
 
         # Assign to DG0 function
-        Kfun.x.array[:nloc] = K_local 
-        Kfun.x.scatter_forward()
+        self._assign_dg0_cell_values(Kfun, K_local)
         return Kfun
 
     # ========================================================
@@ -2049,6 +2117,18 @@ if __name__ == "__main__":
     ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
     ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
     ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
+    ap.add_argument(
+        "--concave-inlet-pressure",
+        type=float,
+        default=None,
+        help="Optional explicit arterial concave-face pressure. Keeps 1D terminal loading enabled.",
+    )
+    ap.add_argument(
+        "--concave-outlet-pressure",
+        type=float,
+        default=None,
+        help="Optional explicit venous concave-face pressure. Keeps 1D terminal loading enabled.",
+    )
     ap.add_argument("--checkpoint-time-index", type=int, default=-1,
                     help="Checkpoint time index to read from 1D pressure/flow/area histories (-1 = last).")
     ap.add_argument("--coords-inlet", nargs=3, type=float, default=[-0.175, 0.9, 0.55])
@@ -2117,6 +2197,8 @@ if __name__ == "__main__":
         inlet_flux_corr_tol=args.inlet_flux_corr_tol,
         branching_in_file=args.branching_in_file if args.branching_in_file else None,
         branching_out_file=args.branching_out_file if args.branching_out_file else None,
+        concave_inlet_pressure=args.concave_inlet_pressure,
+        concave_outlet_pressure=args.concave_outlet_pressure,
     )
     solver.setup()
  

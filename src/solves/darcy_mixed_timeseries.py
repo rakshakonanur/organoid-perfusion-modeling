@@ -701,9 +701,18 @@ class MixedTimeSeriesRunner:
         _debug_stage("finished mixed matrix assembly", comm=mesh.comm)
         self.bc_dofs = solver._collect_bc_dofs(self.bcs)
 
-        self.inlet_ext_mask = np.array([solver._split_marker_facets(int(m))[0].size > 0 for m in inlet_marks], dtype=bool)
-        self.inlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in inlet_marks], dtype=bool)
-        self.outlet_int_mask = np.array([solver._split_marker_facets(int(m))[1].size > 0 for m in outlet_marks], dtype=bool)
+        self.inlet_ext_mask = np.array(
+            [solver._marker_global_facet_counts(int(m))[0] > 0 for m in inlet_marks],
+            dtype=bool,
+        )
+        self.inlet_int_mask = np.array(
+            [solver._marker_global_facet_counts(int(m))[1] > 0 for m in inlet_marks],
+            dtype=bool,
+        )
+        self.outlet_int_mask = np.array(
+            [solver._marker_global_facet_counts(int(m))[1] > 0 for m in outlet_marks],
+            dtype=bool,
+        )
         self.inlet_marks_ext = np.asarray(inlet_marks, dtype=int)[self.inlet_ext_mask]
         self.inlet_marks_int = np.asarray(inlet_marks, dtype=int)[self.inlet_int_mask]
         self.outlet_marks_int = np.asarray(outlet_marks, dtype=int)[self.outlet_int_mask]
