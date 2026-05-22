@@ -190,6 +190,48 @@ class PerfusionSolver(CGPerfusionSolver):
         Kx_fun.x.scatter_forward()
         return Kx_fun
 
+    def _compute_pressure_reference(self, p_h, Kfun) -> tuple[float, str]:
+        """
+        Return a bulk tissue pressure reference for resistance outlet BCs.
+
+        When an STL permeability mask is available, use the same smooth
+        high-permeability indicator as the permeability field. Otherwise fall
+        back to the whole-domain pressure average.
+        """
+        mesh = self.mesh
+        dx = ufl.dx(mesh)
+        one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
+        perm_low = float(self.perm_low)
+        perm_high = float(self.perm_high)
+
+        use_stl_weight = (
+            abs(perm_high - perm_low) > 0.0
+            and int(getattr(self, "permeability_metadata", {}).get("stl_file_count", 0)) > 0
+        )
+        if use_stl_weight:
+            weight = (Kfun - perm_low) / (perm_high - perm_low)
+            weight = ufl.max_value(0.0, ufl.min_value(1.0, weight))
+            mode = "stl_weighted_mean"
+        else:
+            weight = one
+            mode = "domain_mean"
+
+        numerator = fem.assemble_scalar(fem.form(p_h * weight * dx))
+        denominator = fem.assemble_scalar(fem.form(weight * dx))
+        numerator = mesh.comm.allreduce(float(numerator), op=MPI.SUM)
+        denominator = mesh.comm.allreduce(float(denominator), op=MPI.SUM)
+
+        if denominator <= 0.0 or not np.isfinite(denominator):
+            numerator = fem.assemble_scalar(fem.form(p_h * one * dx))
+            denominator = fem.assemble_scalar(fem.form(one * dx))
+            numerator = mesh.comm.allreduce(float(numerator), op=MPI.SUM)
+            denominator = mesh.comm.allreduce(float(denominator), op=MPI.SUM)
+            mode = "domain_mean_fallback"
+
+        if denominator <= 0.0 or not np.isfinite(denominator):
+            return 0.0, "zero_fallback"
+        return float(numerator / denominator), mode
+
     def _write_permeability_outputs(self, out_dir: Path, Kfun, Kx_fun) -> None:
         try:
             Kfun.name = "K_perp"
@@ -875,6 +917,335 @@ class PerfusionSolver(CGPerfusionSolver):
             return arr
         return arr[ids]
 
+    def _build_terminal_reversal_diagnostics(self, p_h, interface_bc, Q_art_leak, Q_ven_leak):
+        """
+        Classify terminal backflow as source-driven or likely coupling-induced.
+
+        The test is intentionally conservative:
+        - arterial pressure overshoots are allowed only when the inlet terminal is
+          connected, through p > parent pressure, to another active high-pressure
+          source and an uphill path exists from the terminal to that source.
+        - venous pressure undershoots use the mirrored p < parent pressure test
+          and require a downhill path to another active low-pressure sink.
+
+        Raw Darcy pressures are preserved; capped pressures are returned in
+        p_*_nodes_coupled for the 0D update.
+        """
+        mesh = self.mesh
+        comm = mesh.comm
+        tdim = mesh.topology.dim
+        fdim = tdim - 1
+
+        p_in = np.asarray(interface_bc.get("p_inlet_nodes", []), dtype=float)
+        p_out = np.asarray(interface_bc.get("p_outlet_nodes", []), dtype=float)
+        p_in_parent = np.asarray(
+            interface_bc.get("p_inlet_parent_0d", interface_bc.get("p_inlet_target", [])),
+            dtype=float,
+        )
+        p_out_parent = np.asarray(
+            interface_bc.get("p_outlet_parent_0d", interface_bc.get("p_outlet_target", [])),
+            dtype=float,
+        )
+        q_in_port = np.asarray(interface_bc.get("q_inlet_port_in", []), dtype=float)
+        q_out_port = np.asarray(interface_bc.get("q_outlet_port_out", []), dtype=float)
+        inlet_markers = np.asarray(interface_bc.get("terminal_markers_inlet", []), dtype=int)
+        outlet_markers = np.asarray(interface_bc.get("terminal_markers_outlet", []), dtype=int)
+
+        p_in_coupled = p_in.copy()
+        p_out_coupled = p_out.copy()
+        empty = {
+            "pressure_reversal_model": "connected_source_path",
+            "pressure_reversal_pressure_tolerance": 0.0,
+            "pressure_reversal_flow_tolerance": 0.0,
+            "arterial_reversal_diagnostics": [],
+            "venous_reversal_diagnostics": [],
+            "p_inlet_nodes_coupled": p_in_coupled.tolist(),
+            "p_outlet_nodes_coupled": p_out_coupled.tolist(),
+        }
+        if p_in.size == 0 and p_out.size == 0:
+            return empty
+
+        pressure_scale_vals = [
+            *np.abs(p_in).tolist(),
+            *np.abs(p_out).tolist(),
+            *np.abs(p_in_parent).tolist(),
+            *np.abs(p_out_parent).tolist(),
+            abs(float(self.p_in_BC)),
+            abs(float(self.p_out_BC)),
+        ]
+        pressure_scale = max([v for v in pressure_scale_vals if np.isfinite(v)] or [1.0])
+        pressure_tol = max(1.0e-10, 1.0e-6 * pressure_scale)
+        flow_scale = max(
+            [
+                *np.abs(q_in_port).tolist(),
+                *np.abs(q_out_port).tolist(),
+                abs(float(Q_art_leak)),
+                abs(float(Q_ven_leak)),
+                1.0e-20,
+            ]
+        )
+        flow_tol = max(1.0e-20, 1.0e-8 * flow_scale)
+        grad_tol = pressure_tol
+
+        imap = mesh.topology.index_map(tdim)
+        n_owned = int(imap.size_local)
+        offset = comm.exscan(n_owned)
+        if offset is None:
+            offset = 0
+
+        local_centroids = np.zeros((n_owned, 3), dtype=float)
+        local_pressures = np.zeros(n_owned, dtype=float)
+        for c in range(n_owned):
+            pts = self._cell_geometry_points(mesh, c, gdim=mesh.geometry.dim)
+            if pts.size:
+                local_centroids[c, : mesh.geometry.dim] = np.mean(pts[:, : mesh.geometry.dim], axis=0)
+            dofs = p_h.function_space.dofmap.cell_dofs(c)
+            local_pressures[c] = float(p_h.x.array[int(dofs[0])]) if len(dofs) else 0.0
+
+        mesh.topology.create_connectivity(fdim, tdim)
+        f2c = mesh.topology.connectivity(fdim, tdim)
+
+        marker_to_cells: dict[int, set[int]] = {}
+
+        def _add_marker_cells(marker: int) -> None:
+            if int(marker) in marker_to_cells:
+                return
+            ext_facets, int_facets = self._split_marker_facets(int(marker))
+            cells: set[int] = set()
+            for facet in np.concatenate((ext_facets, int_facets)).astype(np.int32):
+                for cell in f2c.links(int(facet)):
+                    ci = int(cell)
+                    if 0 <= ci < n_owned:
+                        cells.add(int(offset) + ci)
+            marker_to_cells[int(marker)] = cells
+
+        for marker in inlet_markers.tolist() + outlet_markers.tolist():
+            _add_marker_cells(int(marker))
+        _add_marker_cells(int(self.arterial_concave_marker))
+        _add_marker_cells(int(self.venous_concave_marker))
+
+        gathered = comm.gather(
+            {
+                "offset": int(offset),
+                "centroids": local_centroids,
+                "pressures": local_pressures,
+                "marker_to_cells": {int(k): sorted(v) for k, v in marker_to_cells.items()},
+            },
+            root=0,
+        )
+
+        updates = None
+        if comm.rank == 0:
+            centroids = np.vstack([g["centroids"] for g in gathered if len(g["centroids"])])
+            pressures = np.concatenate([g["pressures"] for g in gathered if len(g["pressures"])])
+            global_marker_cells: dict[int, set[int]] = {}
+            for g in gathered:
+                for marker, cells in g["marker_to_cells"].items():
+                    global_marker_cells.setdefault(int(marker), set()).update(int(c) for c in cells)
+
+            n_cells = len(pressures)
+            if n_cells > 1:
+                tree = cKDTree(centroids)
+                nn_d, _ = tree.query(centroids, k=min(2, n_cells))
+                h = float(np.median(nn_d[:, 1])) if nn_d.ndim == 2 else float(np.median(nn_d))
+                radius = max(1.0e-12, 1.75 * h)
+                neighbors = tree.query_ball_point(centroids, r=radius)
+            else:
+                neighbors = [[] for _ in range(n_cells)]
+
+            def _source_connected_path(
+                start_cells: set[int],
+                source_cells: set[int],
+                mask: np.ndarray,
+                direction: str,
+            ) -> tuple[bool, int, int, float]:
+                starts = [c for c in start_cells if 0 <= c < n_cells and mask[c]]
+                goals = {c for c in source_cells if 0 <= c < n_cells and mask[c]}
+                if not starts or not goals:
+                    return False, -1, -1, float("nan")
+                visited = set(starts)
+                parent = {c: -1 for c in starts}
+                queue = list(starts)
+                hit = -1
+                while queue:
+                    cur = queue.pop(0)
+                    if cur in goals:
+                        hit = cur
+                        break
+                    p_cur = float(pressures[cur])
+                    for nb in neighbors[cur]:
+                        nb = int(nb)
+                        if nb in visited or not mask[nb]:
+                            continue
+                        p_nb = float(pressures[nb])
+                        if direction == "up" and p_nb < p_cur - grad_tol:
+                            continue
+                        if direction == "down" and p_nb > p_cur + grad_tol:
+                            continue
+                        visited.add(nb)
+                        parent[nb] = cur
+                        queue.append(nb)
+                if hit < 0:
+                    return False, -1, -1, float("nan")
+                length = 0
+                cur = hit
+                while parent.get(cur, -1) >= 0:
+                    length += 1
+                    cur = parent[cur]
+                return True, hit, length, float(pressures[hit])
+
+            arterial_diags = []
+            venous_diags = []
+
+            for i, marker in enumerate(inlet_markers.tolist()):
+                parent_p = float(p_in_parent[i]) if i < len(p_in_parent) else float("nan")
+                raw_p = float(p_in[i]) if i < len(p_in) else float("nan")
+                q_val = float(q_in_port[i]) if i < len(q_in_port) else float("nan")
+                reversed_flow = bool(np.isfinite(q_val) and q_val < -flow_tol)
+                over_parent = bool(np.isfinite(raw_p) and np.isfinite(parent_p) and raw_p > parent_p + pressure_tol)
+                allowed = False
+                source_kind = ""
+                source_index = -1
+                source_marker = -1
+                path_len = -1
+                source_cell_pressure = float("nan")
+                if over_parent and n_cells:
+                    mask = pressures > parent_p + pressure_tol
+                    start_cells = global_marker_cells.get(int(marker), set())
+                    candidates = []
+                    for j, src_marker in enumerate(inlet_markers.tolist()):
+                        if j == i:
+                            continue
+                        src_parent = float(p_in_parent[j]) if j < len(p_in_parent) else float("nan")
+                        src_q = float(q_in_port[j]) if j < len(q_in_port) else float("nan")
+                        if np.isfinite(src_parent) and src_parent > parent_p + pressure_tol and src_q > flow_tol:
+                            candidates.append(("arterial_terminal", j, int(src_marker), global_marker_cells.get(int(src_marker), set())))
+                    concave_source_pressure = max(
+                        float(self.p_in_BC),
+                        float(self.concave_art_pressure_low),
+                        float(self.concave_art_pressure_high),
+                    )
+                    if concave_source_pressure > parent_p + pressure_tol and -float(Q_art_leak) > flow_tol:
+                        candidates.append((
+                            "arterial_concave_face",
+                            -1,
+                            int(self.arterial_concave_marker),
+                            global_marker_cells.get(int(self.arterial_concave_marker), set()),
+                        ))
+                    for kind, j, src_marker, cells in candidates:
+                        ok, hit, plen, hit_p = _source_connected_path(start_cells, cells, mask, "up")
+                        if ok:
+                            allowed = True
+                            source_kind = kind
+                            source_index = int(j)
+                            source_marker = int(src_marker)
+                            path_len = int(plen)
+                            source_cell_pressure = float(hit_p)
+                            break
+                clipped = bool(over_parent and not allowed)
+                if clipped and i < len(p_in_coupled):
+                    p_in_coupled[i] = parent_p
+                arterial_diags.append({
+                    "index": int(i),
+                    "marker": int(marker),
+                    "raw_pressure": raw_p,
+                    "parent_pressure": parent_p,
+                    "coupled_pressure": float(p_in_coupled[i]) if i < len(p_in_coupled) else raw_p,
+                    "port_flux_into_tissue": q_val,
+                    "reversed_flow": reversed_flow,
+                    "pressure_exceeds_parent": over_parent,
+                    "reversal_allowed": bool(allowed),
+                    "pressure_clipped": clipped,
+                    "source_kind": source_kind,
+                    "source_index": int(source_index),
+                    "source_marker": int(source_marker),
+                    "monotone_path_cell_count": int(path_len),
+                    "source_path_cell_pressure": source_cell_pressure,
+                })
+
+            for i, marker in enumerate(outlet_markers.tolist()):
+                parent_p = float(p_out_parent[i]) if i < len(p_out_parent) else float("nan")
+                raw_p = float(p_out[i]) if i < len(p_out) else float("nan")
+                q_val = float(q_out_port[i]) if i < len(q_out_port) else float("nan")
+                reversed_flow = bool(np.isfinite(q_val) and q_val < -flow_tol)
+                under_parent = bool(np.isfinite(raw_p) and np.isfinite(parent_p) and raw_p < parent_p - pressure_tol)
+                allowed = False
+                sink_kind = ""
+                sink_index = -1
+                sink_marker = -1
+                path_len = -1
+                sink_cell_pressure = float("nan")
+                if under_parent and n_cells:
+                    mask = pressures < parent_p - pressure_tol
+                    start_cells = global_marker_cells.get(int(marker), set())
+                    candidates = []
+                    for j, sink_marker_j in enumerate(outlet_markers.tolist()):
+                        if j == i:
+                            continue
+                        sink_parent = float(p_out_parent[j]) if j < len(p_out_parent) else float("nan")
+                        sink_q = float(q_out_port[j]) if j < len(q_out_port) else float("nan")
+                        if np.isfinite(sink_parent) and sink_parent < parent_p - pressure_tol and sink_q > flow_tol:
+                            candidates.append(("venous_terminal", j, int(sink_marker_j), global_marker_cells.get(int(sink_marker_j), set())))
+                    concave_sink_pressure = min(
+                        float(self.p_out_BC),
+                        float(self.concave_ven_pressure_low),
+                        float(self.concave_ven_pressure_high),
+                    )
+                    if concave_sink_pressure < parent_p - pressure_tol and float(Q_ven_leak) > flow_tol:
+                        candidates.append((
+                            "venous_concave_face",
+                            -1,
+                            int(self.venous_concave_marker),
+                            global_marker_cells.get(int(self.venous_concave_marker), set()),
+                        ))
+                    for kind, j, snk_marker, cells in candidates:
+                        ok, hit, plen, hit_p = _source_connected_path(start_cells, cells, mask, "down")
+                        if ok:
+                            allowed = True
+                            sink_kind = kind
+                            sink_index = int(j)
+                            sink_marker = int(snk_marker)
+                            path_len = int(plen)
+                            sink_cell_pressure = float(hit_p)
+                            break
+                clipped = False
+                venous_diags.append({
+                    "index": int(i),
+                    "marker": int(marker),
+                    "raw_pressure": raw_p,
+                    "parent_pressure": parent_p,
+                    "coupled_pressure": float(p_out_coupled[i]) if i < len(p_out_coupled) else raw_p,
+                    "port_flux_out_of_tissue": q_val,
+                    "reversed_flow": reversed_flow,
+                    "pressure_below_parent": under_parent,
+                    "reversal_allowed": bool(allowed),
+                    "pressure_clipped": clipped,
+                    "sink_kind": sink_kind,
+                    "sink_index": int(sink_index),
+                    "sink_marker": int(sink_marker),
+                    "monotone_path_cell_count": int(path_len),
+                    "sink_path_cell_pressure": sink_cell_pressure,
+                })
+
+            updates = {
+                "pressure_reversal_model": "connected_source_path",
+                "pressure_reversal_pressure_tolerance": float(pressure_tol),
+                "pressure_reversal_flow_tolerance": float(flow_tol),
+                "p_inlet_nodes_raw": p_in.tolist(),
+                "p_outlet_nodes_raw": p_out.tolist(),
+                "p_inlet_nodes_coupled": p_in_coupled.tolist(),
+                "p_outlet_nodes_coupled": p_out_coupled.tolist(),
+                "arterial_reversal_diagnostics": arterial_diags,
+                "venous_reversal_diagnostics": venous_diags,
+                "arterial_reversal_clip_count": int(sum(1 for row in arterial_diags if row["pressure_clipped"])),
+                "venous_reversal_clip_count": int(sum(1 for row in venous_diags if row["pressure_clipped"])),
+                "arterial_reversal_allowed_count": int(sum(1 for row in arterial_diags if row["reversal_allowed"])),
+                "venous_reversal_allowed_count": int(sum(1 for row in venous_diags if row["reversal_allowed"])),
+            }
+
+        updates = comm.bcast(updates, root=0)
+        return updates if updates is not None else empty
+
     def _compute_interface_bc(self, p_h, u_h, q_src, Q_art_leak, Q_ven_leak):
         mesh = self.mesh
         gdim = mesh.geometry.dim
@@ -985,8 +1356,13 @@ class PerfusionSolver(CGPerfusionSolver):
 
         p_inlet_target_marker = self._safe_reindex(self.p_inlet, idx_in_marker)
         p_outlet_target_marker = self._safe_reindex(self.p_outlet, idx_out_marker)
+        p_inlet_parent_marker = self._safe_reindex(self.p_inlet_parent, idx_in_marker)
+        p_outlet_parent_marker = self._safe_reindex(self.p_outlet_parent, idx_out_marker)
         q_inlet_target_marker = self._safe_reindex(self.q_inlet, idx_in_marker)
-        q_outlet_target_marker = np.abs(self._safe_reindex(self.q_outlet, idx_out_marker))
+        # Outlet trees are oriented from the venous/channel root toward the
+        # embedded terminal. Physical venous drainage is therefore the negative
+        # of the sampled 0D branch flow.
+        q_outlet_target_marker = -self._safe_reindex(self.q_outlet, idx_out_marker)
 
         idx_in_branch = idx_out_branch = None
         if self.branch_coords_in is not None and len(self.branch_coords_in) > 0:
@@ -1005,6 +1381,14 @@ class PerfusionSolver(CGPerfusionSolver):
             ids_in = self.branch_ids_in
             markers_in_final = inlet_marks_arr[idx_in_branch]
             p_inlet_target = p_inlet_target_marker[idx_in_branch] if len(p_inlet_target_marker) else p_inlet_target_marker
+            if (
+                str(getattr(self, "p_inlet_parent_source", "")).startswith("0d_output_csv")
+                and self.branch_ids_in is not None
+                and len(self.p_inlet_parent) == len(self.branch_ids_in)
+            ):
+                p_inlet_parent = np.asarray(self.p_inlet_parent, dtype=float)
+            else:
+                p_inlet_parent = p_inlet_parent_marker[idx_in_branch] if len(p_inlet_parent_marker) else p_inlet_parent_marker
             q_inlet_target = q_inlet_target_marker[idx_in_branch] if len(q_inlet_target_marker) else q_inlet_target_marker
             q_inlet_target_in = np.abs(q_inlet_target)
         else:
@@ -1018,6 +1402,7 @@ class PerfusionSolver(CGPerfusionSolver):
             ids_in = None
             markers_in_final = inlet_marks_arr
             p_inlet_target = p_inlet_target_marker
+            p_inlet_parent = p_inlet_parent_marker
             q_inlet_target = q_inlet_target_marker
             q_inlet_target_in = np.abs(q_inlet_target)
 
@@ -1032,6 +1417,14 @@ class PerfusionSolver(CGPerfusionSolver):
             ids_out = self.branch_ids_out
             markers_out_final = outlet_marks_arr[idx_out_branch]
             p_outlet_target = p_outlet_target_marker[idx_out_branch] if len(p_outlet_target_marker) else p_outlet_target_marker
+            if (
+                str(getattr(self, "p_outlet_parent_source", "")).startswith("0d_output_csv")
+                and self.branch_ids_out is not None
+                and len(self.p_outlet_parent) == len(self.branch_ids_out)
+            ):
+                p_outlet_parent = np.asarray(self.p_outlet_parent, dtype=float)
+            else:
+                p_outlet_parent = p_outlet_parent_marker[idx_out_branch] if len(p_outlet_parent_marker) else p_outlet_parent_marker
             q_outlet_target = q_outlet_target_marker[idx_out_branch] if len(q_outlet_target_marker) else q_outlet_target_marker
         else:
             p_outlet = p_outlet_raw
@@ -1044,6 +1437,7 @@ class PerfusionSolver(CGPerfusionSolver):
             ids_out = None
             markers_out_final = outlet_marks_arr
             p_outlet_target = p_outlet_target_marker
+            p_outlet_parent = p_outlet_parent_marker
             q_outlet_target = q_outlet_target_marker
 
         expected_inlet_markers = np.arange(
@@ -1106,6 +1500,10 @@ class PerfusionSolver(CGPerfusionSolver):
             "terminal_marker_to_1d_index_outlet": np.asarray(idx_out_marker, dtype=int).tolist(),
             "p_inlet_target": np.asarray(p_inlet_target, dtype=float).tolist(),
             "p_outlet_target": np.asarray(p_outlet_target, dtype=float).tolist(),
+            "p_inlet_parent_0d": np.asarray(p_inlet_parent, dtype=float).tolist(),
+            "p_outlet_parent_0d": np.asarray(p_outlet_parent, dtype=float).tolist(),
+            "p_inlet_parent_0d_source": str(getattr(self, "p_inlet_parent_source", "terminal_pressure_fallback")),
+            "p_outlet_parent_0d_source": str(getattr(self, "p_outlet_parent_source", "terminal_pressure_fallback")),
             "q_inlet_target": np.asarray(q_inlet_target, dtype=float).tolist(),
             "q_inlet_target_in": np.asarray(q_inlet_target_in, dtype=float).tolist(),
             "q_outlet_target_out": np.asarray(q_outlet_target, dtype=float).tolist(),
@@ -1116,6 +1514,14 @@ class PerfusionSolver(CGPerfusionSolver):
             interface_bc["branch_ids_inlet"] = np.asarray(ids_in).tolist()
         if ids_out is not None:
             interface_bc["branch_ids_outlet"] = np.asarray(ids_out).tolist()
+        interface_bc.update(
+            self._build_terminal_reversal_diagnostics(
+                p_h,
+                interface_bc,
+                Q_art_leak,
+                Q_ven_leak,
+            )
+        )
         return interface_bc
 
     def setup(self):
@@ -1385,6 +1791,11 @@ class PerfusionSolver(CGPerfusionSolver):
             delattr(self, "K_tensor")
 
         interface_bc = self._compute_interface_bc(p_h, u_h, q_src, Q_art_leak, Q_ven_leak)
+        p_ref, p_ref_model = self._compute_pressure_reference(p_h, Kfun)
+        interface_bc["p_reference_model"] = p_ref_model
+        interface_bc["p_tissue_reference_pressure"] = float(p_ref)
+        interface_bc["p_inlet_reference"] = [float(p_ref)] * len(interface_bc.get("p_inlet_nodes", []))
+        interface_bc["p_outlet_reference"] = [float(p_ref)] * len(interface_bc.get("p_outlet_nodes", []))
         interface_bc["permeability"] = dict(getattr(self, "permeability_metadata", {}))
         interface_bc.update(boundary_audit)
         interface_bc.update(self._build_mass_balance_report(interface_bc, boundary_audit, Q_tot))
@@ -1411,6 +1822,8 @@ if __name__ == "__main__":
     ap.add_argument("--area-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/area_checkpoint_outlet.bp")
     ap.add_argument("--branching-in-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_0.csv")
     ap.add_argument("--branching-out-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_1.csv")
+    ap.add_argument("--inlet-output-csv", default="", help="0D inlet-tree output.csv used to read terminal parent pressures.")
+    ap.add_argument("--outlet-output-csv", default="", help="0D outlet-tree output.csv used to read terminal parent pressures.")
     ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
     ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
     ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
@@ -1512,6 +1925,8 @@ if __name__ == "__main__":
         perm_transition_width=args.perm_transition_width,
         branching_in_file=args.branching_in_file if args.branching_in_file else None,
         branching_out_file=args.branching_out_file if args.branching_out_file else None,
+        inlet_output_csv=args.inlet_output_csv if args.inlet_output_csv else None,
+        outlet_output_csv=args.outlet_output_csv if args.outlet_output_csv else None,
         concave_inlet_pressure=args.concave_inlet_pressure,
         concave_outlet_pressure=args.concave_outlet_pressure,
     )

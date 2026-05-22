@@ -1,4 +1,5 @@
 import argparse
+import csv
 import hashlib
 import os
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -238,6 +239,7 @@ class PerfusionSolver:
                  inlet_flux_corr_relax: float = 0.5,
                  inlet_flux_corr_tol: float = 0.05,
                  branching_in_file=None, branching_out_file=None,
+                 inlet_output_csv=None, outlet_output_csv=None,
                  concave_inlet_pressure=None,
                  concave_outlet_pressure=None):
 
@@ -400,6 +402,29 @@ class PerfusionSolver:
                 self.branch_ids_out,
                 self.branch_normals_out,
             ) = self._load_terminal_branch_metadata(branching_out_file)
+
+        self.p_inlet_parent = np.asarray(self.p_inlet, dtype=float).copy()
+        self.p_outlet_parent = np.asarray(self.p_outlet, dtype=float).copy()
+        self.p_inlet_parent_source = "terminal_pressure_fallback"
+        self.p_outlet_parent_source = "terminal_pressure_fallback"
+        if inlet_output_csv is not None and self.branch_ids_in is not None and len(self.branch_ids_in):
+            parent = self._load_terminal_parent_pressures_from_0d_csv(
+                inlet_output_csv,
+                self.branch_ids_in,
+                checkpoint_time_index=self.checkpoint_time_index,
+            )
+            if parent is not None:
+                self.p_inlet_parent = parent
+                self.p_inlet_parent_source = "0d_output_csv_pressure_in"
+        if outlet_output_csv is not None and self.branch_ids_out is not None and len(self.branch_ids_out):
+            parent = self._load_terminal_parent_pressures_from_0d_csv(
+                outlet_output_csv,
+                self.branch_ids_out,
+                checkpoint_time_index=self.checkpoint_time_index,
+            )
+            if parent is not None:
+                self.p_outlet_parent = parent
+                self.p_outlet_parent_source = "0d_output_csv_pressure_in"
 
         # store user-input coordinates for channel inlet/outlet (3D)
         self.inlet_coord  = np.asarray(inlet_coord,  dtype=float)
@@ -756,12 +781,79 @@ class PerfusionSolver:
                 branch_id_col = cand
                 break
 
+        terminal_rows = np.flatnonzero(np.asarray(mask_terminal, dtype=bool))
+        ids = terminal_rows.astype(int)
         if branch_id_col is not None:
-            ids = df.loc[mask_terminal, branch_id_col].to_numpy()
-        else:
-            ids = np.arange(coords.shape[0], dtype=int)
+            raw_ids = pd.to_numeric(df.loc[mask_terminal, branch_id_col], errors="coerce").to_numpy()
+            if raw_ids.size == ids.size and np.all(np.isfinite(raw_ids)):
+                ids = raw_ids.astype(int)
 
         return coords, ids, normals
+
+    @staticmethod
+    def _parse_0d_branch_segment_name(name: str):
+        import re
+
+        text = str(name).strip()
+        patterns = [
+            r"branch\s+(-?\d+)_seg(-?\d+)",
+            r"branch_(-?\d+)_seg_?(-?\d+)",
+            r".*branch\s*[_ ](-?\d+).*seg\s*[_ ]?(-?\d+)",
+        ]
+        for pat in patterns:
+            m = re.match(pat, text)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+        return None
+
+    def _load_terminal_parent_pressures_from_0d_csv(
+        self,
+        csv_path,
+        branch_ids,
+        checkpoint_time_index: int = -1,
+    ):
+        path = Path(csv_path).expanduser()
+        if not path.exists():
+            return None
+
+        rows_by_branch: dict[int, list[tuple[float, float]]] = {}
+        try:
+            with path.open("r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    parsed = self._parse_0d_branch_segment_name(row.get("name", ""))
+                    if parsed is None:
+                        continue
+                    branch, segment = parsed
+                    if int(segment) != 0:
+                        continue
+                    try:
+                        time = float(row.get("time", 0.0))
+                        pressure = float(row["pressure_in"])
+                    except Exception:
+                        continue
+                    rows_by_branch.setdefault(int(branch), []).append((time, pressure))
+        except Exception:
+            return None
+
+        if not rows_by_branch:
+            return None
+
+        out = []
+        for raw_id in np.asarray(branch_ids):
+            try:
+                branch_id = int(raw_id)
+            except Exception:
+                return None
+            rows = sorted(rows_by_branch.get(branch_id, []), key=lambda item: item[0])
+            if not rows:
+                return None
+            idx = int(checkpoint_time_index)
+            if idx < 0:
+                idx = len(rows) + idx
+            idx = min(max(idx, 0), len(rows) - 1)
+            out.append(float(rows[idx][1]))
+        return np.asarray(out, dtype=float)
 
     def _load_terminal_branch_coords(self, csv_path):
         coords, ids, _normals = self._load_terminal_branch_metadata(csv_path)
@@ -2114,6 +2206,8 @@ if __name__ == "__main__":
     ap.add_argument("--area-outlet-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry/area_checkpoint_outlet.bp")
     ap.add_argument("--branching-in-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_0.csv")
     ap.add_argument("--branching-out-file", default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation/Forest_Output/0D_Output/022526/Run8_10branches/branchingData_1.csv")
+    ap.add_argument("--inlet-output-csv", default="", help="0D inlet-tree output.csv used to read terminal parent pressures.")
+    ap.add_argument("--outlet-output-csv", default="", help="0D outlet-tree output.csv used to read terminal parent pressures.")
     ap.add_argument("--skip-1d", action="store_true", help="Skip inlet/outlet 1D tree loading and use fallback concave pressures.")
     ap.add_argument("--fallback-inlet-pressure", type=float, default=0.0)
     ap.add_argument("--fallback-outlet-pressure", type=float, default=0.0)
@@ -2197,6 +2291,8 @@ if __name__ == "__main__":
         inlet_flux_corr_tol=args.inlet_flux_corr_tol,
         branching_in_file=args.branching_in_file if args.branching_in_file else None,
         branching_out_file=args.branching_out_file if args.branching_out_file else None,
+        inlet_output_csv=args.inlet_output_csv if args.inlet_output_csv else None,
+        outlet_output_csv=args.outlet_output_csv if args.outlet_output_csv else None,
         concave_inlet_pressure=args.concave_inlet_pressure,
         concave_outlet_pressure=args.concave_outlet_pressure,
     )
