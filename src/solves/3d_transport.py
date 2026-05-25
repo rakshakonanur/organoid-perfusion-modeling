@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import hashlib
+import glob
 import xml.etree.ElementTree as ET
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 import adios4dolfinx
@@ -127,12 +128,88 @@ def import_flow_data(mesh_obj, bp_file: str):
     return out
 
 
+def _remove_xdmf_with_sidecar(xdmf_path: str | Path) -> None:
+    """
+    Remove an XDMF file and its conventional HDF5 sidecar before writing.
+
+    DOLFINx writes time-series XDMF metadata and HDF5 datasets as a pair. If a
+    previous run is interrupted or rerun with different time steps, stale HDF5
+    datasets can remain while the XDMF points at a different set of paths. Some
+    ParaView builds crash instead of reporting those missing datasets.
+    """
+    path = Path(xdmf_path)
+    for candidate in (path, path.with_suffix(".h5")):
+        try:
+            if candidate.exists():
+                candidate.unlink()
+        except IsADirectoryError:
+            pass
+
+
+def _vtk_output_path(path: str | Path) -> Path:
+    """Use a ParaView-friendly PVD path next to a requested output path."""
+    p = Path(path)
+    return p if p.suffix.lower() == ".pvd" else p.with_suffix(".pvd")
+
+
+def _final_xdmf_output_path(path: str | Path) -> Path:
+    """Avoid confusing a final-only XDMF with the live time-series path."""
+    p = Path(path)
+    stem = p.stem
+    if stem.endswith("_final"):
+        return p.with_suffix(".xdmf")
+    return p.with_name(f"{stem}_final.xdmf")
+
+
+def _remove_vtk_series(pvd_path: str | Path) -> None:
+    """
+    Remove a PVD file and the VTU files usually created beside it.
+
+    DOLFINx/VTK writes a PVD index plus one VTU file per saved timestep. Stale
+    VTU files are less dangerous than stale XDMF/HDF5 data, but removing them
+    keeps reruns deterministic and avoids ParaView reading old snapshots.
+    """
+    path = Path(pvd_path)
+    candidates = [path]
+    candidates.extend(path.parent.glob(f"{path.stem}*.vtu"))
+    candidates.extend(path.parent.glob(f"{path.stem}*.pvtu"))
+    candidates.extend(path.parent.glob(f"{path.stem}_*.vtu"))
+    candidates.extend(path.parent.glob(f"{path.stem}_*.pvtu"))
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                candidate.unlink()
+        except IsADirectoryError:
+            pass
+
+
 ################################################################################
 # Transport solver
 ################################################################################
 
 
 class TransportSolver:
+    # Magliaro et al., Scientific Reports 2019, converted to cgs.
+    # Paper units:
+    #   D_org = 1.07e-9 m^2/s, D_M = 1.0e-9 m^2/s, D_water = 3.0e-9 m^2/s
+    #   C_in = 0.2 mol/m^3, C_crit = 0.04 mol/m^3, k_m = 0.201 mol/m^3
+    #   rho = 2.52e14 cells/m^3, OCR = 2.75e-17 mol/(cell s)
+    # cgs conversions used here:
+    #   m^2/s -> cm^2/s: multiply by 1e4
+    #   mol/m^3 -> mol/cm^3: divide by 1e6
+    #   cells/m^3 -> cells/cm^3: divide by 1e6
+    PAPER_D_ORG_CM2_PER_S = 1.07e-5
+    PAPER_D_GEL_CM2_PER_S = 1.0e-5
+    PAPER_D_WATER_CM2_PER_S = 3.0e-5
+    PAPER_C_IN_MOL_PER_CM3 = 2.0e-7
+    PAPER_C_CRIT_MOL_PER_CM3 = 4.0e-8
+    PAPER_KM_MOL_PER_CM3 = 2.01e-7
+    PAPER_RHO_CELLS_PER_CM3 = 2.52e8
+    PAPER_SINGLE_CELL_OCR_MOL_PER_CELL_S = 2.75e-17
+    PAPER_VMAX_MOL_PER_CM3_S = (
+        PAPER_RHO_CELLS_PER_CM3 * PAPER_SINGLE_CELL_OCR_MOL_PER_CELL_S
+    )
+
     def __init__(
         self,
         bioreactor_domain,
@@ -147,9 +224,20 @@ class TransportSolver:
         skip_1d=False,
         T=10.0,
         dt=1.0,
-        D_value=1e-3,
-        c_in_value=1.0,
+        D_value=None,
+        c_in_value=None,
         out_file="transport_c.xdmf",
+        diffusion_region_path="",
+        D_organoid=None,
+        D_background=None,
+        D_water=None,
+        enable_mm_consumption=True,
+        mm_km=None,
+        mm_vmax=None,
+        critical_oxygen_concentration=None,
+        critical_output_file="",
+        critical_summary_file="",
+        output_format="vtk",
     ):
         # 3D tissue mesh + facet tags from the same geometry pipeline as Darcy.
         self.mesh, self.facet_tags = import_3d_mesh_with_facets(
@@ -211,10 +299,222 @@ class TransportSolver:
 
         self.T = float(T)
         self.dt = float(dt)
-        self.D_value = float(D_value)
-        self.c_in_value = float(c_in_value)
+        self.D_value = float(
+            self.PAPER_D_ORG_CM2_PER_S if D_value is None else D_value
+        )
+        self.c_in_value = float(
+            self.PAPER_C_IN_MOL_PER_CM3 if c_in_value is None else c_in_value
+        )
         self.out_file = str(out_file)
         self.interface_bc_file = str(interface_bc_file)
+        self.diffusion_region_path = str(diffusion_region_path).strip()
+        self.D_organoid = float(
+            self.D_value if D_organoid is None and D_value is not None else
+            self.PAPER_D_ORG_CM2_PER_S if D_organoid is None else D_organoid
+        )
+        self.D_background = float(
+            self.PAPER_D_GEL_CM2_PER_S if D_background is None else D_background
+        )
+        self.D_water = float(
+            self.PAPER_D_WATER_CM2_PER_S if D_water is None else D_water
+        )
+        self.enable_mm_consumption = bool(enable_mm_consumption)
+        self.mm_km = float(self.PAPER_KM_MOL_PER_CM3 if mm_km is None else mm_km)
+        self.mm_vmax = float(
+            self.PAPER_VMAX_MOL_PER_CM3_S if mm_vmax is None else mm_vmax
+        )
+        self.critical_oxygen_concentration = float(
+            self.PAPER_C_CRIT_MOL_PER_CM3
+            if critical_oxygen_concentration is None
+            else critical_oxygen_concentration
+        )
+        self.critical_output_file = str(critical_output_file).strip()
+        self.critical_summary_file = str(critical_summary_file).strip()
+        self.output_format = str(output_format or "vtk").strip().lower()
+        if self.output_format not in {"vtk", "xdmf", "both"}:
+            raise ValueError(
+                "--output-format must be one of 'vtk', 'xdmf', or 'both'; "
+                f"got {self.output_format!r}."
+            )
+
+    ###########################################################################
+    # Organoid mask + cgs oxygen constants
+    ###########################################################################
+    @staticmethod
+    def _assign_dg0_cell_values(fun, cell_values):
+        V0 = fun.function_space
+        mesh = V0.mesh
+        tdim = mesh.topology.dim
+        nloc = mesh.topology.index_map(tdim).size_local
+        values = np.asarray(cell_values, dtype=fun.x.array.dtype).reshape(-1)
+        if values.size != nloc:
+            raise ValueError(
+                f"Expected one DG0 value for each owned cell ({nloc}); got {values.size}."
+            )
+        for c, value in enumerate(values):
+            dofs = V0.dofmap.cell_dofs(c)
+            if len(dofs) != 1:
+                raise ValueError(
+                    "Expected scalar DG0 space to have exactly one dof per cell; "
+                    f"cell {c} has {len(dofs)}."
+                )
+            fun.x.array[int(dofs[0])] = value
+        fun.x.scatter_forward()
+
+    @staticmethod
+    def _cell_geometry_points(mesh_obj, cell: int, gdim: int | None = None):
+        if gdim is None:
+            gdim = mesh_obj.geometry.dim
+        gdofs = mesh_obj.geometry.dofmap[int(cell)]
+        return mesh_obj.geometry.x[np.asarray(gdofs, dtype=np.int32), : int(gdim)]
+
+    @staticmethod
+    def _resolve_region_stls(path_str: str):
+        raw = str(path_str).strip()
+        if not raw:
+            return []
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            return sorted(path.glob("*.stl"))
+        if path.is_file():
+            return [path]
+        return [Path(p) for p in sorted(glob.glob(str(path))) if Path(p).suffix.lower() == ".stl"]
+
+    @staticmethod
+    def _build_stl_tester(stl_file: Path, tol: float = 1e-9):
+        reader = vtk.vtkSTLReader()
+        reader.SetFileName(str(stl_file))
+        reader.Update()
+        surface = reader.GetOutput()
+        if surface is None or surface.GetNumberOfPoints() == 0:
+            raise ValueError(f"Failed to read STL surface from {stl_file}")
+
+        enclosed = vtk.vtkSelectEnclosedPoints()
+        enclosed.SetTolerance(float(tol))
+        enclosed.Initialize(surface)
+        distance = vtk.vtkImplicitPolyDataDistance()
+        distance.SetInput(surface)
+
+        def inside(point: np.ndarray) -> bool:
+            p = np.asarray(point, dtype=float).reshape(3,)
+            return bool(enclosed.IsInsideSurface(float(p[0]), float(p[1]), float(p[2])))
+
+        def signed_distance(point: np.ndarray) -> float:
+            p = np.asarray(point, dtype=float).reshape(3,)
+            return float(distance.EvaluateFunction((float(p[0]), float(p[1]), float(p[2]))))
+
+        def cleanup() -> None:
+            try:
+                enclosed.Complete()
+            except Exception:
+                pass
+
+        return inside, signed_distance, cleanup
+
+    @staticmethod
+    def _smooth_transition_alpha(signed_distance: float, width: float) -> float:
+        if width <= 0.0:
+            return 1.0 if signed_distance <= 0.0 else 0.0
+        if signed_distance <= -width:
+            return 1.0
+        if signed_distance >= width:
+            return 0.0
+        t = (signed_distance + width) / (2.0 * width)
+        smooth = 3.0 * t * t - 2.0 * t * t * t
+        return float(1.0 - smooth)
+
+    def _build_organoid_indicator_and_diffusion(self, W):
+        mesh = self.mesh
+        chi = fem.Function(W)
+        D_field = fem.Function(W)
+
+        stl_files = self._resolve_region_stls(self.diffusion_region_path)
+        nloc = mesh.topology.index_map(mesh.topology.dim).size_local
+        alpha_local = np.zeros(nloc, dtype=np.float64)
+
+        if not stl_files:
+            # Without an STL mask, treat the whole domain as organoid tissue so
+            # the consumption model is active and the legacy uniform-D behavior
+            # remains close to the old solver.
+            alpha_local[:] = 1.0
+            mode = "uniform_organoid_no_stl"
+        else:
+            mode = "stl_organoid_mask"
+            testers = []
+            try:
+                testers = [self._build_stl_tester(Path(p)) for p in stl_files]
+                for cell in range(nloc):
+                    pts = self._cell_geometry_points(mesh, int(cell), mesh.geometry.dim)
+                    midpoint = np.mean(pts, axis=0)
+                    signed_dist = np.inf
+                    for inside_fn, dist_fn, _cleanup in testers:
+                        d_mid = dist_fn(midpoint)
+                        if inside_fn(midpoint):
+                            signed_dist = min(signed_dist, d_mid)
+                            continue
+                        d_vertices = [dist_fn(p) for p in pts]
+                        vertex_inside = [inside_fn(p) for p in pts]
+                        if any(vertex_inside):
+                            signed_dist = min(signed_dist, min(d_vertices))
+                        else:
+                            signed_dist = min(
+                                signed_dist,
+                                min(abs(d_mid), *(abs(dv) for dv in d_vertices)),
+                            )
+                    alpha_local[cell] = self._smooth_transition_alpha(
+                        float(signed_dist),
+                        0.0,
+                    )
+            finally:
+                for _inside, _dist, cleanup in testers:
+                    cleanup()
+
+        D_local = (
+            float(self.D_background)
+            + alpha_local * (float(self.D_organoid) - float(self.D_background))
+        )
+        self._assign_dg0_cell_values(chi, alpha_local)
+        self._assign_dg0_cell_values(D_field, D_local)
+
+        local_org_vol = fem.assemble_scalar(fem.form(chi * ufl.dx(mesh)))
+        org_vol = mesh.comm.allreduce(float(local_org_vol), op=MPI.SUM)
+        if mesh.comm.rank == 0:
+            print(
+                "[transport] oxygen constants in cgs: "
+                f"D_org={self.D_organoid:.6e} cm^2/s, "
+                f"D_background={self.D_background:.6e} cm^2/s, "
+                f"D_water={self.D_water:.6e} cm^2/s, "
+                f"C_in={self.c_in_value:.6e} mol/cm^3, "
+                f"Ccrit={self.critical_oxygen_concentration:.6e} mol/cm^3, "
+                f"km={self.mm_km:.6e} mol/cm^3, "
+                f"Vmax={self.mm_vmax:.6e} mol/(cm^3 s)",
+                flush=True,
+            )
+            print(
+                f"[transport] oxygen region mode={mode}, stl_count={len(stl_files)}, "
+                f"organoid_volume={org_vol:.6e} cm^3",
+                flush=True,
+            )
+
+        self.transport_metadata = {
+            "units": "cgs",
+            "concentration_units": "mol/cm^3",
+            "diffusion_units": "cm^2/s",
+            "time_units": "s",
+            "region_mode": mode,
+            "diffusion_region_path": str(self.diffusion_region_path),
+            "resolved_stl_files": [str(p) for p in stl_files],
+            "D_organoid_cm2_per_s": float(self.D_organoid),
+            "D_background_cm2_per_s": float(self.D_background),
+            "D_water_cm2_per_s": float(self.D_water),
+            "c_in_mol_per_cm3": float(self.c_in_value),
+            "critical_oxygen_mol_per_cm3": float(self.critical_oxygen_concentration),
+            "michaelis_menten_km_mol_per_cm3": float(self.mm_km),
+            "michaelis_menten_vmax_mol_per_cm3_s": float(self.mm_vmax),
+            "michaelis_menten_enabled": bool(self.enable_mm_consumption),
+            "organoid_volume_cm3": float(org_vol),
+        }
+        return chi, D_field
 
     ###########################################################################
     # Velocity import
@@ -592,13 +892,12 @@ class TransportSolver:
 
     def _inlet_concentration(self, t: float) -> float:
         """
-        Time-dependent inlet concentration. Replace this with the desired profile.
+        Time-dependent inlet concentration.
+
+        The oxygen supply is kept on for the full simulated duration. This
+        replaces the old finite pulse behavior used for passive tracer tests.
         """
-        t_on = 0.0
-        t_off = 1000.0
-        if t_on <= t <= t_off:
-            return self.c_in_value
-        return 0.0
+        return self.c_in_value
 
     ###########################################################################
     # Terminal data from 1D checkpoints
@@ -1034,6 +1333,73 @@ class TransportSolver:
             np.asarray(outflow_rates, dtype=float),
         )
 
+    def _update_mm_consumption_rate(self, rate_fun, c_old, organoid_indicator):
+        """
+        Semi-implicit Michaelis-Menten sink coefficient.
+
+        The reaction is Vmax * chi * C / (km + C). To keep the transport solve
+        linear, the denominator is lagged with the previous concentration:
+        beta^n = Vmax * chi / (km + max(C^n, 0)), sink ~= beta^n C^{n+1}.
+        """
+        if not self.enable_mm_consumption:
+            rate_fun.x.array[:] = 0.0
+            rate_fun.x.scatter_forward()
+            return
+
+        c_prev = np.maximum(np.asarray(c_old.x.array, dtype=float), 0.0)
+        chi = np.asarray(organoid_indicator.x.array, dtype=float)
+        denom = float(self.mm_km) + c_prev
+        denom = np.maximum(denom, np.finfo(float).tiny)
+        rate_fun.x.array[:] = float(self.mm_vmax) * chi / denom
+        rate_fun.x.scatter_forward()
+
+    def _compute_consumption_rate(self, c_h, organoid_indicator, dx):
+        if not self.enable_mm_consumption:
+            return 0.0
+        km = fem.Constant(self.mesh, dfx.default_scalar_type(self.mm_km))
+        vmax = fem.Constant(self.mesh, dfx.default_scalar_type(self.mm_vmax))
+        c_pos = ufl.max_value(c_h, 0.0)
+        rate_expr = organoid_indicator * vmax * c_pos / (km + c_pos)
+        return self._global_scalar(rate_expr * dx)
+
+    def _critical_oxygen_stats(self, c_h, organoid_indicator, critical_mask, dx):
+        crit = float(self.critical_oxygen_concentration)
+        c_vals = np.asarray(c_h.x.array, dtype=float)
+        below = (c_vals < crit).astype(np.float64)
+        critical_mask.x.array[:] = below
+        critical_mask.x.scatter_forward()
+
+        one = fem.Constant(self.mesh, dfx.default_scalar_type(1.0))
+        below_vol = self._global_scalar(critical_mask * dx)
+        total_vol = self._global_scalar(one * dx)
+        organoid_vol = self._global_scalar(organoid_indicator * dx)
+        organoid_below_vol = self._global_scalar(critical_mask * organoid_indicator * dx)
+
+        local_min = float(np.min(c_vals)) if c_vals.size else float("inf")
+        local_max = float(np.max(c_vals)) if c_vals.size else float("-inf")
+        c_min = float(self.mesh.comm.allreduce(local_min, op=MPI.MIN))
+        c_max = float(self.mesh.comm.allreduce(local_max, op=MPI.MAX))
+        if not np.isfinite(c_min):
+            c_min = 0.0
+        if not np.isfinite(c_max):
+            c_max = 0.0
+
+        return {
+            "critical_oxygen_mol_per_cm3": crit,
+            "min_concentration_mol_per_cm3": float(c_min),
+            "max_concentration_mol_per_cm3": float(c_max),
+            "below_critical_volume_cm3": float(below_vol),
+            "domain_volume_cm3": float(total_vol),
+            "below_critical_volume_fraction": float(below_vol / total_vol)
+            if total_vol > 0.0
+            else 0.0,
+            "organoid_below_critical_volume_cm3": float(organoid_below_vol),
+            "organoid_volume_cm3": float(organoid_vol),
+            "organoid_below_critical_volume_fraction": float(organoid_below_vol / organoid_vol)
+            if organoid_vol > 0.0
+            else 0.0,
+        }
+
     ###########################################################################
     # Solve advection-diffusion
     ###########################################################################
@@ -1046,16 +1412,20 @@ class TransportSolver:
         W = fem.functionspace(mesh, DG)
 
         c_in = fem.Constant(mesh, dfx.default_scalar_type(self.c_in_value))
-        D = fem.Constant(mesh, dfx.default_scalar_type(self.D_value))
         delta_t = fem.Constant(mesh, dfx.default_scalar_type(self.dt))
+        organoid_indicator, D = self._build_organoid_indicator_and_diffusion(W)
+        mm_rate = fem.Function(W)
 
         c = ufl.TrialFunction(W)
         w = ufl.TestFunction(W)
 
         c_old = fem.Function(W)
         c_h = fem.Function(W)
+        critical_mask = fem.Function(W)
         c_out = fem.Function(fem.functionspace(mesh, P1))
+        critical_out = fem.Function(fem.functionspace(mesh, P1))
         c_old.x.array[:] = 0.0
+        self._update_mm_consumption_rate(mm_rate, c_old, organoid_indicator)
 
         dx = ufl.Measure("dx", domain=domain)
         ds_tagged = ufl.Measure("ds", domain=domain, subdomain_data=self.facet_tags)
@@ -1065,6 +1435,7 @@ class TransportSolver:
         a_time = (c * w / delta_t) * dx
         a_advect = -ufl.dot(c * self.velocity, ufl.grad(w)) * dx
         a_diffuse = ufl.dot(D * ufl.grad(c), ufl.grad(w)) * dx
+        a_consumption = mm_rate * c * w * dx
         a_exchange, L_exchange = self._build_terminal_exchange_forms(
             c, w, c_in, ds_tagged, dS_tagged
         )
@@ -1072,7 +1443,7 @@ class TransportSolver:
             c, w, c_in, ds_tagged, n
         )
 
-        a = a_time + a_advect + a_diffuse + a_exchange + a_concave
+        a = a_time + a_advect + a_diffuse + a_consumption + a_exchange + a_concave
         L = (c_old / delta_t) * w * dx + L_exchange + L_concave
 
         # Upwind advection flux on all interior facets.
@@ -1101,19 +1472,74 @@ class TransportSolver:
         solver.getPC().setType("lu")
         solver.getPC().setFactorSolverType("mumps")
 
-        out = io.XDMFFile(mesh.comm, self.out_file, "w")
-        out.write_mesh(mesh)
+        requested_out_path = Path(self.out_file)
+        requested_critical_path = Path(
+            self.critical_output_file
+            if self.critical_output_file
+            else str(requested_out_path.with_name(f"{requested_out_path.stem}_below_critical.xdmf"))
+        )
+        write_vtk = self.output_format in {"vtk", "both"}
+        write_xdmf = self.output_format in {"xdmf", "both"}
+        vtk_output_path = _vtk_output_path(requested_out_path)
+        vtk_critical_output_path = _vtk_output_path(requested_critical_path)
+        xdmf_final_output_path = _final_xdmf_output_path(requested_out_path)
+        xdmf_critical_final_output_path = _final_xdmf_output_path(requested_critical_path)
+
+        if mesh.comm.rank == 0:
+            # If the requested path was previously used for a temporal XDMF
+            # run, remove it even when the new default output is VTK. Otherwise
+            # a stale crashing .xdmf/.h5 pair can remain next to the good .pvd.
+            if requested_out_path.suffix.lower() == ".xdmf":
+                _remove_xdmf_with_sidecar(requested_out_path)
+            if requested_critical_path.suffix.lower() == ".xdmf":
+                _remove_xdmf_with_sidecar(requested_critical_path)
+            if write_vtk:
+                _remove_vtk_series(vtk_output_path)
+                _remove_vtk_series(vtk_critical_output_path)
+            if write_xdmf:
+                _remove_xdmf_with_sidecar(xdmf_final_output_path)
+                _remove_xdmf_with_sidecar(xdmf_critical_final_output_path)
+        mesh.comm.barrier()
+
+        c_out.name = "oxygen_concentration"
+        critical_out.name = "below_critical_oxygen"
+
+        vtk_out = None
+        vtk_critical_out = None
+        if write_vtk:
+            vtk_out = io.VTKFile(mesh.comm, str(vtk_output_path), "w")
+            vtk_critical_out = io.VTKFile(mesh.comm, str(vtk_critical_output_path), "w")
+            if mesh.comm.rank == 0:
+                print(
+                    f"[transport] Writing ParaView time series: {vtk_output_path} "
+                    f"and {vtk_critical_output_path}",
+                    flush=True,
+                )
+        if write_xdmf and mesh.comm.rank == 0:
+            print(
+                "[transport] XDMF output is written as final-only snapshots to avoid "
+                "ParaView/HDF5 time-series crashes: "
+                f"{xdmf_final_output_path} and {xdmf_critical_final_output_path}",
+                flush=True,
+            )
 
         t = 0.0
         nt = int(np.round(self.T / self.dt))
         injected_cumulative = 0.0
         removed_cumulative = 0.0
+        consumed_cumulative = 0.0
+        critical_rows = []
 
         for step in range(nt):
             t += self.dt
             c_in.value = dfx.default_scalar_type(self._inlet_concentration(t))
+            self._update_mm_consumption_rate(mm_rate, c_old, organoid_indicator)
 
             if self._update_velocity_for_time(t):
+                A = assemble_matrix(a_form)
+                A.assemble()
+                solver.setOperators(A)
+            elif self.enable_mm_consumption:
                 A = assemble_matrix(a_form)
                 A.assemble()
                 solver.setOperators(A)
@@ -1129,7 +1555,17 @@ class TransportSolver:
             c_old.x.array[:] = c_h.x.array
 
             c_out.interpolate(c_h)
-            out.write_function(c_out, t)
+            critical_stats = self._critical_oxygen_stats(
+                c_h,
+                organoid_indicator,
+                critical_mask,
+                dx,
+            )
+            critical_out.interpolate(critical_mask)
+            if vtk_out is not None:
+                vtk_out.write_function(c_out, t)
+            if vtk_critical_out is not None:
+                vtk_critical_out.write_function(critical_out, t)
 
             inlet_rates, outlet_rates = self._compute_exchange_rates(
                 c_h, c_in, ds_tagged, dS_tagged
@@ -1137,6 +1573,7 @@ class TransportSolver:
             concave_in_rates, concave_out_rates = self._compute_concave_exchange_rates(
                 c_h, c_in, ds_tagged, n
             )
+            consumption_rate = self._compute_consumption_rate(c_h, organoid_indicator, dx)
             inlet_total = float(np.sum(inlet_rates) + np.sum(concave_in_rates))
             outlet_total = float(np.sum(outlet_rates) + np.sum(concave_out_rates))
             terminal_in_total = float(np.sum(inlet_rates))
@@ -1145,17 +1582,69 @@ class TransportSolver:
             concave_out_total = float(np.sum(concave_out_rates))
             injected_cumulative += inlet_total * self.dt
             removed_cumulative += outlet_total * self.dt
+            consumed_cumulative += consumption_rate * self.dt
+            row = {
+                "step": int(step + 1),
+                "time_s": float(t),
+                "inlet_concentration_mol_per_cm3": float(c_in.value),
+                "injection_rate_mol_per_s": float(inlet_total),
+                "outflow_rate_mol_per_s": float(outlet_total),
+                "consumption_rate_mol_per_s": float(consumption_rate),
+                "injected_cumulative_mol": float(injected_cumulative),
+                "removed_cumulative_mol": float(removed_cumulative),
+                "consumed_cumulative_mol": float(consumed_cumulative),
+                **critical_stats,
+            }
+            critical_rows.append(row)
 
             if mesh.comm.rank == 0:
                 print(
-                    f"Step {step + 1}/{nt}   t={t:.3f}   c_in={float(c_in.value):.3f}   "
+                    f"Step {step + 1}/{nt}   t={t:.3f}   c_in={float(c_in.value):.6e}   "
                     f"inj_rate={inlet_total:.6e}   out_rate={outlet_total:.6e}   "
+                    f"consume_rate={consumption_rate:.6e}   "
                     f"term_in={terminal_in_total:.6e}   term_out={terminal_out_total:.6e}   "
                     f"wall_in={concave_in_total:.6e}   wall_out={concave_out_total:.6e}   "
-                    f"inj_cum={injected_cumulative:.6e}   out_cum={removed_cumulative:.6e}"
+                    f"inj_cum={injected_cumulative:.6e}   out_cum={removed_cumulative:.6e}   "
+                    f"cons_cum={consumed_cumulative:.6e}   "
+                    f"org_below_crit={critical_stats['organoid_below_critical_volume_fraction']:.3e}"
                 )
 
-        out.close()
+        if vtk_out is not None:
+            vtk_out.close()
+        if vtk_critical_out is not None:
+            vtk_critical_out.close()
+
+        if write_xdmf:
+            # Write only the final state to XDMF/HDF5. Temporal XDMF from DOLFINx
+            # can leave the XML index ahead of the HDF5 sidecar while a run is
+            # active, and some ParaView builds crash on those incomplete pairs.
+            xdmf_out = io.XDMFFile(mesh.comm, str(xdmf_final_output_path), "w")
+            xdmf_out.write_mesh(mesh)
+            xdmf_out.write_function(c_out, float(t))
+            xdmf_out.close()
+
+            xdmf_critical_out = io.XDMFFile(mesh.comm, str(xdmf_critical_final_output_path), "w")
+            xdmf_critical_out.write_mesh(mesh)
+            xdmf_critical_out.write_function(critical_out, float(t))
+            xdmf_critical_out.close()
+
+        summary_path = (
+            Path(self.critical_summary_file)
+            if self.critical_summary_file
+            else Path(self.out_file).with_name(f"{Path(self.out_file).stem}_oxygen_summary.json")
+        )
+        if mesh.comm.rank == 0:
+            payload = {
+                "metadata": dict(getattr(self, "transport_metadata", {})),
+                "final": critical_rows[-1] if critical_rows else {},
+                "time_series": critical_rows,
+                "output_format": self.output_format,
+                "oxygen_pvd": str(vtk_output_path) if write_vtk else "",
+                "critical_mask_pvd": str(vtk_critical_output_path) if write_vtk else "",
+                "oxygen_final_xdmf": str(xdmf_final_output_path) if write_xdmf else "",
+                "critical_mask_final_xdmf": str(xdmf_critical_final_output_path) if write_xdmf else "",
+            }
+            summary_path.write_text(json.dumps(payload, indent=2))
 
 
 ################################################################################
@@ -1193,6 +1682,29 @@ def _resolve_output_path(path_str: str, organoid_id: int, batch_mode: bool) -> s
     return f"{s}_organoid_{int(organoid_id)}"
 
 
+def _resolve_region_path(path_str: str, organoid_id: int) -> str:
+    """
+    Resolve an organoid-specific STL path.
+
+    Mirrors the Darcy permeability-region convention: a directory maps to
+    organoid-<id>.stl when present, while explicit paths may use either
+    "{organoid}", "X", or an existing organoid_<n> token.
+    """
+    raw = str(path_str).strip()
+    if not raw:
+        return ""
+    if "{organoid}" in raw:
+        return raw.format(organoid=int(organoid_id))
+    if "X" in raw:
+        return raw.replace("X", str(int(organoid_id)))
+    p = Path(raw).expanduser()
+    if p.is_dir():
+        candidate = p / f"organoid-{int(organoid_id)}.stl"
+        if candidate.exists():
+            return str(candidate)
+    return _resolve_organoid_path(raw, organoid_id)
+
+
 def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> TransportSolver:
     if organoid_id is None:
         return TransportSolver(
@@ -1211,6 +1723,17 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
             D_value=args.D_value,
             c_in_value=args.c_in_value,
             out_file=args.out_file,
+            diffusion_region_path=args.diffusion_region_path,
+            D_organoid=args.D_organoid,
+            D_background=args.D_background,
+            D_water=args.D_water,
+            enable_mm_consumption=not args.no_mm_consumption,
+            mm_km=args.mm_km,
+            mm_vmax=args.mm_vmax,
+            critical_oxygen_concentration=args.critical_oxygen_concentration,
+            critical_output_file=args.critical_output_file,
+            critical_summary_file=args.critical_summary_file,
+            output_format=args.output_format,
         )
 
     return TransportSolver(
@@ -1229,6 +1752,23 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
         D_value=args.D_value,
         c_in_value=args.c_in_value,
         out_file=_resolve_output_path(args.out_file, organoid_id, batch_mode),
+        diffusion_region_path=_resolve_region_path(args.diffusion_region_path, organoid_id)
+        if args.diffusion_region_path
+        else "",
+        D_organoid=args.D_organoid,
+        D_background=args.D_background,
+        D_water=args.D_water,
+        enable_mm_consumption=not args.no_mm_consumption,
+        mm_km=args.mm_km,
+        mm_vmax=args.mm_vmax,
+        critical_oxygen_concentration=args.critical_oxygen_concentration,
+        critical_output_file=_resolve_output_path(args.critical_output_file, organoid_id, batch_mode)
+        if args.critical_output_file
+        else "",
+        critical_summary_file=_resolve_output_path(args.critical_summary_file, organoid_id, batch_mode)
+        if args.critical_summary_file
+        else "",
+        output_format=args.output_format,
     )
 
 
@@ -1288,9 +1828,93 @@ if __name__ == "__main__":
         help="Disable synthetic terminal exchange and run transport using only concave-wall exchange.",
     )
     ap.add_argument("--T", type=float, default=10000.0)
-    ap.add_argument("--dt", type=float, default=10.0)
-    ap.add_argument("--D-value", type=float, default=1e-8)
-    ap.add_argument("--c-in-value", type=float, default=10000.0)
+    ap.add_argument("--dt", type=float, default=100.0)
+    ap.add_argument(
+        "--D-value",
+        type=float,
+        default=None,
+        help=(
+            "Legacy uniform diffusion value in cm^2/s. The oxygen model now "
+            "uses --D-organoid/--D-background instead; omit for paper cgs defaults."
+        ),
+    )
+    ap.add_argument(
+        "--c-in-value",
+        type=float,
+        default=None,
+        help="Inlet oxygen concentration in mol/cm^3. Paper value: 2.0e-7.",
+    )
+    ap.add_argument(
+        "--diffusion-region-path",
+        default="",
+        help=(
+            "STL file, directory, glob, or path with an organoid_<n> token. "
+            "The STL marks the consuming organoid region."
+        ),
+    )
+    ap.add_argument(
+        "--D-organoid",
+        type=float,
+        default=None,
+        help="Oxygen diffusion in organoid tissue in cm^2/s. Paper value: 1.07e-5.",
+    )
+    ap.add_argument(
+        "--D-background",
+        type=float,
+        default=None,
+        help="Oxygen diffusion outside the organoid/STL mask in cm^2/s. Paper Matrigel value: 1.0e-5.",
+    )
+    ap.add_argument(
+        "--D-water",
+        type=float,
+        default=None,
+        help="Oxygen diffusion in water/medium in cm^2/s, recorded in metadata. Paper value: 3.0e-5.",
+    )
+    ap.add_argument(
+        "--no-mm-consumption",
+        action="store_true",
+        help="Disable Michaelis-Menten oxygen consumption.",
+    )
+    ap.add_argument(
+        "--mm-km",
+        type=float,
+        default=None,
+        help="Michaelis-Menten k_m in mol/cm^3. Paper value: 2.01e-7.",
+    )
+    ap.add_argument(
+        "--mm-vmax",
+        type=float,
+        default=None,
+        help=(
+            "Volumetric maximal oxygen consumption in mol/(cm^3 s). "
+            "Paper-derived value: 2.52e8 cells/cm^3 * 2.75e-17 mol/(cell s) = 6.93e-9."
+        ),
+    )
+    ap.add_argument(
+        "--critical-oxygen-concentration",
+        type=float,
+        default=None,
+        help="Critical oxygen concentration in mol/cm^3. Paper value: 4.0e-8.",
+    )
+    ap.add_argument(
+        "--critical-output-file",
+        default="",
+        help="Optional XDMF output path for the below-critical oxygen mask.",
+    )
+    ap.add_argument(
+        "--critical-summary-file",
+        default="",
+        help="Optional JSON path for critical-oxygen volume/time-series summary.",
+    )
+    ap.add_argument(
+        "--output-format",
+        choices=["vtk", "xdmf", "both"],
+        default="vtk",
+        help=(
+            "Visualization format. 'vtk' writes ParaView-safe .pvd/.vtu time "
+            "series. 'xdmf' writes final-only XDMF snapshots. 'both' writes both."
+        ),
+    )
     ap.add_argument("--out-file", default="transport_c_no_vasc.xdmf")
     ap.add_argument(
         "--organoid-ids",
