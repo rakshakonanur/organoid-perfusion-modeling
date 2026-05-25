@@ -1329,6 +1329,7 @@ def score_resistance_0d_trial(
     inverse_flow_pressure_weight_cap: float = 10.0,
     implied_alignment_weight: float = 2.0,
     jump_weight: float = 0.05,
+    max_pressure_error_weight: float = 2.0,
     stubborn_max_error_weight: float = 2.0,
     flow_guard_reject: bool = False,
     flow_guard_drive_tol: float = 1.0,
@@ -1450,7 +1451,9 @@ def score_resistance_0d_trial(
             "score": float("inf"),
             "median_error_percent": float("inf"),
             "p90_error_percent": float("inf"),
+            "p95_error_percent": float("inf"),
             "max_error_percent": float("inf"),
+            "outlier_error_score": float("inf"),
             "active_median_error_percent": float("inf"),
             "jump_median_percent": float("inf"),
             "jump_p90_percent": float("inf"),
@@ -1495,7 +1498,9 @@ def score_resistance_0d_trial(
     )
     median_err = float(np.nanmedian(errors_arr))
     p90_err = float(np.nanpercentile(errors_arr, 90.0))
+    p95_err = float(np.nanpercentile(errors_arr, 95.0))
     max_err = float(np.nanmax(errors_arr))
+    outlier_error_score = max_err + 0.5 * p95_err
     stubborn_arr = np.array(stubborn_errors if stubborn_errors else [0.0], dtype=float)
     stubborn_max_err = float(np.nanmax(stubborn_arr))
     stubborn_p90_err = float(np.nanpercentile(stubborn_arr, 90.0))
@@ -1625,6 +1630,7 @@ def score_resistance_0d_trial(
         max(float(pressure_weight), 0.0) * pressure_score
         + max(float(implied_alignment_weight), 0.0) * implied_interface_score
         + max(float(jump_weight), 0.0) * jump_score
+        + max(float(max_pressure_error_weight), 0.0) * outlier_error_score
         + max(float(stubborn_max_error_weight), 0.0) * stubborn_error_score
         + max(float(flow_guard_weight), 0.0) * flow_guard_score
     )
@@ -1637,7 +1643,9 @@ def score_resistance_0d_trial(
         "score": float(score),
         "median_error_percent": median_err,
         "p90_error_percent": p90_err,
+        "p95_error_percent": p95_err,
         "max_error_percent": max_err,
+        "outlier_error_score": float(outlier_error_score),
         "active_median_error_percent": active_median,
         "stubborn_max_error_percent": float(stubborn_max_err),
         "stubborn_p90_error_percent": float(stubborn_p90_err),
@@ -1708,7 +1716,9 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "median_error_percent",
         "active_median_error_percent",
         "p90_error_percent",
+        "p95_error_percent",
         "max_error_percent",
+        "outlier_error_score",
         "stubborn_max_error_percent",
         "stubborn_p90_error_percent",
         "stubborn_error_score",
@@ -1788,9 +1798,6 @@ def apply_organoid_resistance_from_json(
     terminal_response_correction_error_scale: float = 0.10,
     terminal_response_correction_error_gamma: float = 1.0,
     terminal_response_correction_effective_gain_cap: float = 3.0,
-    stubborn_continuity_override: bool = True,
-    stubborn_continuity_override_relaxation: float = 0.10,
-    stubborn_continuity_override_rel_error_tol: float = 0.025,
     stubborn_terminal_response_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
     allow_missing_terminal_bcs: bool = False,
 ) -> list[dict[str, Any]]:
@@ -1856,9 +1863,6 @@ def apply_organoid_resistance_from_json(
         response_error_scale = max(float(terminal_response_correction_error_scale), response_rel_error_tol)
         response_error_gamma = max(float(terminal_response_correction_error_gamma), 0.0)
         response_effective_gain_cap = max(float(terminal_response_correction_effective_gain_cap), 0.0)
-        stubborn_override_enabled = bool(stubborn_continuity_override)
-        stubborn_override_relax = min(max(float(stubborn_continuity_override_relaxation), 0.0), 1.0)
-        stubborn_override_tol = max(float(stubborn_continuity_override_rel_error_tol), 0.0)
 
         def _effective_pd_relaxation(q_denominator: float) -> tuple[float, float]:
             if pd_relax_base <= 0.0 or inv_pd_fraction <= 0.0:
@@ -2167,9 +2171,6 @@ def apply_organoid_resistance_from_json(
             response_severity = 0.0
             response_effective_gain = 0.0
             response_gain = response_gain_base + max(float(stubborn_gain), 0.0)
-            stubborn_override_active = False
-            stubborn_override_target = float("nan")
-            stubborn_override_error_rel = float("nan")
             if np.isfinite(response_error_rel) and response_error_rel > response_rel_error_tol:
                 severity_den = max(
                     response_error_scale - response_rel_error_tol,
@@ -2209,56 +2210,11 @@ def apply_organoid_resistance_from_json(
                 pd_target = response_target - r_next * q_for_r
                 pd_target_reason = f"{pd_target_reason}_response_correction"
                 response_active = True
-            if (
-                not response_active
-                and stubborn_override_enabled
-                and stubborn_gain > 0.0
-                and pd_mode != "0d"
-                and np.isfinite(r_next)
-                and np.isfinite(q_for_r)
-                and np.isfinite(p_darcy)
-                and np.isfinite(p_0d)
-                and np.isfinite(response_error_rel)
-                and response_error_rel >= stubborn_override_tol
-                and pd_target_reason in {
-                    "drive_limited_hold",
-                    "parent_flow_suppression",
-                    "resistance_implied_interface",
-                    "pressure_alignment",
-                    "pressure_handoff",
-                }
-            ):
-                # The regular response correction only acts for a subset of
-                # target reasons. A stubborn terminal can otherwise remain
-                # internally consistent as Pd+RQ ~= P_0D while the actual
-                # coupling condition P_0D ~= P_interface stalls. Move the
-                # implied terminal pressure a small fraction toward Darcy.
-                implied_current = (
-                    old_pd + r_next * q_for_r
-                    if np.isfinite(old_pd)
-                    else p_0d
-                )
-                if not np.isfinite(implied_current):
-                    implied_current = p_0d
-                stubborn_override_target = (
-                    (1.0 - stubborn_override_relax) * implied_current
-                    + stubborn_override_relax * p_darcy
-                )
-                stubborn_override_error_rel = abs(implied_current - p_darcy) / max(abs(p_darcy), 1.0)
-                pd_target = stubborn_override_target - r_next * q_for_r
-                pd_target_reason = f"{pd_target_reason}_stubborn_continuity_override"
-                response_target = stubborn_override_target
-                response_active = True
-                stubborn_override_active = True
             if np.isfinite(old_pd):
                 w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
-                if stubborn_override_active:
-                    w_pd = 1.0
                 pd_next = (1.0 - w_pd) * old_pd + w_pd * pd_target
             else:
                 w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
-                if stubborn_override_active:
-                    w_pd = 1.0
                 pd_next = pd_target
             pd_floor_applied = False
             if side == "outlet" and venous_pd_floor is not None:
@@ -2348,10 +2304,10 @@ def apply_organoid_resistance_from_json(
                 "terminal_response_correction_active": bool(response_active),
                 "terminal_response_correction_target": float(response_target),
                 "terminal_response_correction_error_rel": float(response_error_rel),
-                "stubborn_continuity_override_active": bool(stubborn_override_active),
-                "stubborn_continuity_override_relaxation": float(stubborn_override_relax),
-                "stubborn_continuity_override_target": float(stubborn_override_target),
-                "stubborn_continuity_override_error_rel": float(stubborn_override_error_rel),
+                "stubborn_continuity_override_active": False,
+                "stubborn_continuity_override_relaxation": float("nan"),
+                "stubborn_continuity_override_target": float("nan"),
+                "stubborn_continuity_override_error_rel": float("nan"),
                 "stubborn_terminal": bool(stubborn_gain > 0.0),
                 "stubborn_terminal_gain": float(stubborn_gain),
                 "stubborn_terminal_error_rel": float(stubborn_error_rel),
@@ -3435,16 +3391,12 @@ def parse_args() -> argparse.Namespace:
                     help="Number of previous coupling intervals used to estimate recent stubborn-terminal improvement.")
     ap.add_argument("--stubborn-terminal-extra-gain", type=float, default=100.0,
                     help="Extra response-correction gain added only to stubborn terminals.")
-    ap.add_argument("--stubborn-continuity-override", action=argparse.BooleanOptionalAction, default=True,
-                    help="For stubborn terminals, directly move the implied terminal pressure toward the Darcy interface even when normal drive-limiting logic would hold the update.")
-    ap.add_argument("--stubborn-continuity-override-relaxation", type=float, default=0.10,
-                    help="Fractional implied-pressure move toward P_interface for the stubborn continuity override.")
-    ap.add_argument("--stubborn-continuity-override-rel-error-tol", type=float, default=0.025,
-                    help="Minimum |P_interface-P_0D|/max(|P_interface|,1) before the stubborn continuity override may activate.")
     ap.add_argument("--inner-implied-alignment-weight", type=float, default=2.0,
                     help="Weight for candidate-proposed auxiliary P_implied versus Darcy interface alignment in the inner 0D score.")
     ap.add_argument("--inner-jump-weight", type=float, default=0.05,
                     help="Weight for the temporary resistance pressure-jump penalty in the candidate score.")
+    ap.add_argument("--inner-max-pressure-error-weight", type=float, default=2.0,
+                    help="Weight for the global worst-terminal post-trial 0D pressure error in the inner candidate score.")
     ap.add_argument("--inner-stubborn-max-error-weight", type=float, default=2.0,
                     help="Weight for the max post-trial 0D pressure error among currently stubborn terminals in the inner candidate score.")
     ap.add_argument("--inner-flow-guard-reject", action=argparse.BooleanOptionalAction, default=False,
@@ -3760,15 +3712,6 @@ def main() -> None:
                         terminal_response_correction_effective_gain_cap=float(
                             args.terminal_response_correction_effective_gain_cap
                         ),
-                        stubborn_continuity_override=bool(
-                            args.stubborn_continuity_override
-                        ),
-                        stubborn_continuity_override_relaxation=float(
-                            args.stubborn_continuity_override_relaxation
-                        ),
-                        stubborn_continuity_override_rel_error_tol=float(
-                            args.stubborn_continuity_override_rel_error_tol
-                        ),
                         stubborn_terminal_response_map=stubborn_terminal_response_map,
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
                     )
@@ -3954,9 +3897,6 @@ def main() -> None:
                     ),
                     "stubborn_terminal_history_window": int(args.stubborn_terminal_history_window),
                     "stubborn_terminal_extra_gain": float(args.stubborn_terminal_extra_gain),
-                    "stubborn_continuity_override": bool(args.stubborn_continuity_override),
-                    "stubborn_continuity_override_relaxation": float(args.stubborn_continuity_override_relaxation),
-                    "stubborn_continuity_override_rel_error_tol": float(args.stubborn_continuity_override_rel_error_tol),
                     "stubborn_terminal_count": int(len(stubborn_terminal_response_map)),
                     "stubborn_terminals": [
                         {
@@ -3969,6 +3909,7 @@ def main() -> None:
                     ],
                     "implied_alignment_weight": float(args.inner_implied_alignment_weight),
                     "jump_weight": float(args.inner_jump_weight),
+                    "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                     "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
                     "flow_guard_reject": bool(args.inner_flow_guard_reject),
                     "candidate_count": int(len(candidate_specs)),
@@ -4019,6 +3960,7 @@ def main() -> None:
                             inverse_flow_pressure_weight_cap=float(args.inner_inverse_flow_pressure_weight_cap),
                             implied_alignment_weight=float(args.inner_implied_alignment_weight),
                             jump_weight=float(args.inner_jump_weight),
+                            max_pressure_error_weight=float(args.inner_max_pressure_error_weight),
                             stubborn_max_error_weight=float(args.inner_stubborn_max_error_weight),
                             flow_guard_reject=bool(args.inner_flow_guard_reject),
                             flow_guard_drive_tol=float(args.terminal_pressure_alignment_jump_tol),
@@ -4042,7 +3984,9 @@ def main() -> None:
                             "flow_guard_score": float("inf"),
                             "median_error_percent": float("inf"),
                             "p90_error_percent": float("inf"),
+                            "p95_error_percent": float("inf"),
                             "max_error_percent": float("inf"),
+                            "outlier_error_score": float("inf"),
                             "active_median_error_percent": float("inf"),
                             "stubborn_max_error_percent": float("inf"),
                             "stubborn_p90_error_percent": float("inf"),
@@ -4157,12 +4101,10 @@ def main() -> None:
                             ),
                             "stubborn_terminal_history_window": int(args.stubborn_terminal_history_window),
                             "stubborn_terminal_extra_gain": float(args.stubborn_terminal_extra_gain),
-                            "stubborn_continuity_override": bool(args.stubborn_continuity_override),
-                            "stubborn_continuity_override_relaxation": float(args.stubborn_continuity_override_relaxation),
-                            "stubborn_continuity_override_rel_error_tol": float(args.stubborn_continuity_override_rel_error_tol),
                             "stubborn_terminal_count": int(len(stubborn_terminal_response_map)),
                             "implied_alignment_weight": float(args.inner_implied_alignment_weight),
                             "jump_weight": float(args.inner_jump_weight),
+                            "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                             "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
                             "flow_guard_reject": bool(args.inner_flow_guard_reject),
                             "candidate_count": 0,
