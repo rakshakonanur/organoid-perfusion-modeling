@@ -3726,6 +3726,7 @@ def main() -> None:
     zero_all_interface_bcs(deck0, args.n_organoids)
     save_json(combined0, deck0)
     ensure_organoid_dirs(run0, args.n_organoids)
+    sync_plot_templates(seed_run0, run0, args.n_organoids)
 
     run([
         sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
@@ -3751,6 +3752,7 @@ def main() -> None:
     )
     if not args.no_synthetic_vasculature:
         update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
+        validate_darcy_geometry_inputs(run0, args.n_organoids, no_synthetic_vasculature=False)
     run_darcy_for_all(
         run0,
         args,
@@ -3941,6 +3943,7 @@ def main() -> None:
             return candidate, rows
 
         ensure_organoid_dirs(cur, args.n_organoids)
+        sync_plot_templates(seed_run0, cur, args.n_organoids)
 
         deck: dict
         inner_tries = max(1, int(args.inner_0d_max_tries))
@@ -4442,6 +4445,7 @@ def main() -> None:
         )
         if not args.no_synthetic_vasculature:
             update_1d_checkpoints(cur, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
+            validate_darcy_geometry_inputs(cur, args.n_organoids, no_synthetic_vasculature=False)
         run_darcy_for_all(cur, args, scaled_cfg=scaled_cfg)
         update_convergence_plots(args, coupled_root, i)
 
