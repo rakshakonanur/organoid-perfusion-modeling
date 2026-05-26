@@ -2427,6 +2427,22 @@ def copy_seed_geometry(
 ) -> None:
     tmp_mesh = seed_run0 / "_tmp_mesh"
 
+    required_geometry_files = [
+        "bioreactor.xdmf",
+        "mesh_tags.xdmf",
+        "tagged_branches_inlet.bp",
+        "tagged_branches_outlet.bp",
+    ]
+    if not no_synthetic_vasculature:
+        required_geometry_files.extend([
+            "pressure_checkpoint_inlet.bp",
+            "pressure_checkpoint_outlet.bp",
+            "flow_checkpoint_inlet.bp",
+            "flow_checkpoint_outlet.bp",
+            "area_checkpoint_inlet.bp",
+            "area_checkpoint_outlet.bp",
+        ])
+
     def _copy_tmp_mesh_well(tmp_dir: Path, dst_geom: Path, k: int) -> None:
         # Reuse run_all.py geometry copier to stay aligned with pipeline behavior.
         repo_src = Path(__file__).resolve().parents[1]
@@ -2450,25 +2466,28 @@ def copy_seed_geometry(
         if src_out.exists():
             copy_xdmf_with_sidecars(src_out, dst_geom / "branched_network_outlet.xdmf")
 
+    def _validate_geometry_inputs(dst_geom: Path, k: int) -> None:
+        missing = [name for name in required_geometry_files if not (dst_geom / name).exists()]
+        if missing:
+            die(
+                "Geometry preparation failed for "
+                f"organoid_{k}; missing required Darcy inputs in {dst_geom}: "
+                + ", ".join(missing)
+            )
+
     for k in range(1, n_organoids + 1):
         src = seed_run0 / f"organoid_{k}" / "geometry"
         dst = run_dir / f"organoid_{k}" / "geometry"
         dst.parent.mkdir(parents=True, exist_ok=True)
-        required_geometry_files = [
-            "bioreactor.xdmf",
-            "mesh_tags.xdmf",
-            "tagged_branches_inlet.bp",
-            "tagged_branches_outlet.bp",
-        ]
-        if not no_synthetic_vasculature:
-            required_geometry_files.extend([
-                "pressure_checkpoint_inlet.bp",
-                "pressure_checkpoint_outlet.bp",
-                "flow_checkpoint_inlet.bp",
-                "flow_checkpoint_outlet.bp",
-                "area_checkpoint_inlet.bp",
-                "area_checkpoint_outlet.bp",
-            ])
+
+        # Prefer _tmp_mesh because it stores well-specific geometry/checkpoints
+        # and run_all.py knows how to remap them to the canonical Darcy names.
+        # This avoids reusing stale/incomplete run_0 geometry directories.
+        if tmp_mesh.exists():
+            _copy_tmp_mesh_well(tmp_mesh, dst, k)
+            _validate_geometry_inputs(dst, k)
+            continue
+
         src_has_required_geometry = src.exists() and all(
             (src / name).exists() for name in required_geometry_files
         )
@@ -2485,17 +2504,13 @@ def copy_seed_geometry(
                 )
             )
         )
-        # Geometry is static across coupling iterations, so avoid copying the
-        # large XDMF/HDF5/BP files into every run. A symlink is enough because
-        # downstream steps only read geometry files. Some seed folders do not
-        # contain canonical branched-network XDMFs or 1D checkpoints, in which
-        # case the _tmp_mesh copier must materialize those files.
+        # Geometry is static across coupling iterations. If _tmp_mesh is not
+        # available, a complete seed geometry directory can still be reused.
         if src_has_required_geometry and src_has_branched_networks:
             link_or_copy_tree(src, dst)
-        elif tmp_mesh.exists():
-            _copy_tmp_mesh_well(tmp_mesh, dst, k)
         else:
             die(f"Missing seed geometry for organoid_{k}: {src} and no fallback {tmp_mesh}")
+        _validate_geometry_inputs(dst, k)
 
 
 def ensure_organoid_dirs(run_dir: Path, n_organoids: int) -> None:
