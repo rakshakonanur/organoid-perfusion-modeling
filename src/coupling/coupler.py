@@ -463,13 +463,18 @@ def replicate_reference_organoid_outputs(
     run_dir: Path,
     n_organoids: int,
     scaled_cfg: dict[str, Any],
+    copy_field_outputs: bool = True,
 ) -> None:
     reference_organoid = int(scaled_cfg["reference_organoid"])
     ref_out = run_dir / f"organoid_{reference_organoid}" / "out_darcy"
     ref_iface_path = ref_out / "interface_bc.json"
     ref_p_path = ref_out / "p.xdmf"
     ref_u_path = ref_out / "u.xdmf"
-    if not ref_iface_path.exists() or not ref_p_path.exists() or not ref_u_path.exists():
+    missing_reference = not ref_iface_path.exists() or (
+        bool(copy_field_outputs)
+        and (not ref_p_path.exists() or not ref_u_path.exists())
+    )
+    if missing_reference:
         die(
             "Scaled-screening replication requires Darcy outputs for the reference organoid; "
             f"missing one of {ref_iface_path}, {ref_p_path}, or {ref_u_path}"
@@ -481,14 +486,16 @@ def replicate_reference_organoid_outputs(
             continue
         out_dir = run_dir / f"organoid_{organoid_id}" / "out_darcy"
         out_dir.mkdir(parents=True, exist_ok=True)
-        copy_xdmf_with_sidecars(ref_p_path, out_dir / "p.xdmf")
-        copy_xdmf_with_sidecars(ref_u_path, out_dir / "u.xdmf")
+        if copy_field_outputs:
+            copy_xdmf_with_sidecars(ref_p_path, out_dir / "p.xdmf")
+            copy_xdmf_with_sidecars(ref_u_path, out_dir / "u.xdmf")
         shutil.copy2(ref_iface_path, out_dir / "interface_bc.json")
         replicated_rows.append(
             {
                 "organoid_id": organoid_id,
                 "mode": "replicated_from_reference",
                 "reference_organoid": reference_organoid,
+                "field_outputs_copied": bool(copy_field_outputs),
             }
         )
 
@@ -499,7 +506,11 @@ def replicate_reference_organoid_outputs(
         "scaled_organoids": replicated_rows,
         "assumptions": [
             "run_0 has zero channel ramp, so repeated wells directly reuse the reference Darcy outputs.",
-            "Copied wells receive the same p.xdmf, u.xdmf, and interface_bc.json values as the reference organoid.",
+            (
+                "Copied wells receive the same p.xdmf, u.xdmf, and interface_bc.json values as the reference organoid."
+                if copy_field_outputs
+                else "Copied wells receive interface_bc.json only; p.xdmf/u.xdmf are intentionally omitted in minimal output mode."
+            ),
         ],
     }
     save_json(run_dir / "scaled_screening_summary.json", summary)
