@@ -1132,15 +1132,15 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Transient quasi-static coupling driver restarting from a converged steady-state run."
     )
-    ap.add_argument("--steady-run", default=str(repo_src / "coupling-output-no-vasc" / "run_20"),
+    ap.add_argument("--steady-run", default=str(repo_src / "coupling-output" / "run_20"),
                     help="Converged steady-state run to restart from.")
     ap.add_argument("--transient-root", default=str(repo_src / "coupling-output-transient"),
                     help="Output root for transient outer coupling iterations.")
     ap.add_argument("--n-organoids", type=int, default=4,
                     help="Number of organoids. If 0, detect from --steady-run.")
-    ap.add_argument("--max-iter", type=int, default=10)
-    ap.add_argument("--tol-q", type=float, default=1e-3)
-    ap.add_argument("--tol-p", type=float, default=1e-3)
+    ap.add_argument("--max-iter", type=int, default=5)
+    ap.add_argument("--tol-q", type=float, default=1e-2)
+    ap.add_argument("--tol-p", type=float, default=1e-2)
     ap.add_argument("--relaxation", type=float, default=0.3)
     ap.add_argument("--number-of-cardiac-cycles", type=int, default=3)
     ap.add_argument("--number-of-time-pts-per-cardiac-cycle", type=int, default=31)
@@ -1153,11 +1153,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--channel-outlet-bc", default="OUT3")
     ap.add_argument(
         "--inflow-waveform",
-        default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/sv-3d-projection/pulsatile.flow",
+        default="../../files/sv-3d-projection/pulsatile.flow",
     )
     ap.add_argument(
         "--outlet-pressure-waveform",
-        default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/sv-3d-projection/pressure.flow",
+        default="../../files/sv-3d-projection/pressure.flow",
     )
 
     ap.add_argument("--svzerodsolver", default="svzerodsolver")
@@ -1173,7 +1173,7 @@ def parse_args() -> argparse.Namespace:
                     help="Solve Darcy every Nth transient checkpoint and always include the final checkpoint.")
     ap.add_argument("--use-batched-darcy-timeseries", action="store_true",
                     help="Run one mixed-Darcy process per organoid across all selected times and write interface_bc_timeseries.json.")
-    ap.add_argument("--darcy-field-output-every", type=int, default=1,
+    ap.add_argument("--darcy-field-output-every", type=int, default=0,
                     help="Write p.xdmf/u.xdmf time series every N transient coupling iterations (0 disables field output).")
 
     ap.add_argument("--dy-step", type=float, default=0.6)
@@ -1181,7 +1181,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375])
     ap.add_argument(
         "--perm-region-root",
-        default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere",
+        default="../../files/stl/organoid-growth-domains/sphere",
     )
     ap.add_argument("--perm-low", type=float, default=1.0e-9)
     ap.add_argument("--perm-high", type=float, default=2.0e-7)

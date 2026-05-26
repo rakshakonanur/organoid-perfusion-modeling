@@ -3604,10 +3604,10 @@ def convergence_for_organoid(
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Organoid coupling driver with geometry reuse + P1-LM Darcy.")
-    ap.add_argument("--template-combined", default="../prep/scaled-screening/Run2_10branches/combined.in")
-    ap.add_argument("--trial-dir", default="../prep/scaled-screening/Run2_10branches/",
+    ap.add_argument("--template-combined", default="../prep/scaled-screening/Run3_10branches/combined.in")
+    ap.add_argument("--trial-dir", default="../prep/scaled-screening/Run3_10branches/",
                     help="Optional trial directory used to copy branchingData_{0,1}.csv into each run. Not required in --no-synthetic-vasculature mode.")
-    ap.add_argument("--seed-run0", default="../prep/scaled-screening/Run2_10branches",
+    ap.add_argument("--seed-run0", default="../prep/scaled-screening/Run3_10branches",
                     help="Existing run_0 folder with 3D meshing/tagging to reuse.")
     ap.add_argument("--coupled-root", default="../coupling-output",)
 
@@ -3796,11 +3796,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375])
     ap.add_argument("--perm-region-root", default=str(Path(__file__).resolve().parents[2] / "files" / "stl" / "organoid-growth-domains" / "sphere"),
                     help="Directory, STL path, or pattern for organoid permeability regions. If a directory is given, organoid-k uses organoid-k.stl. You can also use a path containing 'X' as the organoid index placeholder.")
-    # ap.add_argument("--perm-low", type=float, default=5.0e-11)
-    # ap.add_argument("--perm-high", type=float, default=1.0e-8)
+    ap.add_argument("--perm-low", type=float, default=5.0e-11)
+    ap.add_argument("--perm-high", type=float, default=1.0e-8)
 
-    ap.add_argument("--perm-low", type=float, default=1.0e-9)
-    ap.add_argument("--perm-high", type=float, default=2.0e-7)
+    # ap.add_argument("--perm-low", type=float, default=1.0e-9)
+    # ap.add_argument("--perm-high", type=float, default=2.0e-7)
     ap.add_argument("--perm-transition-width", type=float, default=0.01)
 
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet")
@@ -3851,65 +3851,65 @@ def main() -> None:
         )
 
     coupled_root = Path(args.coupled_root).expanduser().resolve()
-    coupled_root.mkdir(parents=True, exist_ok=True)
+    # coupled_root.mkdir(parents=True, exist_ok=True)
 
-    # Build run_0
-    run0 = coupled_root / "run_0"
-    if run0.exists() and args.overwrite:
-        shutil.rmtree(run0)
-    run0.mkdir(parents=True, exist_ok=True)
-    combined0 = run0 / "combined.in"
-    shutil.copy2(template, combined0)
-    deck0 = load_json(combined0)
-    apply_channel_ramp(
-        deck0,
-        args.channel_inlet_bc,
-        Q0=float(args.channel_inlet_Q0),
-        scale=0.0,
-        outlet_name=args.channel_outlet_bc if args.use_outlet_pressure_ramp else None,
-        outlet_P0=float(args.channel_outlet_P0),
-    )
-    zero_all_interface_bcs(deck0, args.n_organoids)
-    save_json(combined0, deck0)
-    ensure_organoid_dirs(run0, args.n_organoids)
-    sync_plot_templates(seed_run0, run0, args.n_organoids)
+    # # Build run_0
+    # run0 = coupled_root / "run_0"
+    # if run0.exists() and args.overwrite:
+    #     shutil.rmtree(run0)
+    # run0.mkdir(parents=True, exist_ok=True)
+    # combined0 = run0 / "combined.in"
+    # shutil.copy2(template, combined0)
+    # deck0 = load_json(combined0)
+    # apply_channel_ramp(
+    #     deck0,
+    #     args.channel_inlet_bc,
+    #     Q0=float(args.channel_inlet_Q0),
+    #     scale=0.0,
+    #     outlet_name=args.channel_outlet_bc if args.use_outlet_pressure_ramp else None,
+    #     outlet_P0=float(args.channel_outlet_P0),
+    # )
+    # zero_all_interface_bcs(deck0, args.n_organoids)
+    # save_json(combined0, deck0)
+    # ensure_organoid_dirs(run0, args.n_organoids)
+    # sync_plot_templates(seed_run0, run0, args.n_organoids)
 
-    run([
-        sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
-        "--exe", args.svzerodsolver,
-        "--input", str(combined0),
-        "--outdir", str(run0),
-        "--output", "output.csv",
-        "--organoid-root", str(run0),
-        "--no-plot",
-    ] + (["--debug"] if args.debug else []))
+    # run([
+    #     sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
+    #     "--exe", args.svzerodsolver,
+    #     "--input", str(combined0),
+    #     "--outdir", str(run0),
+    #     "--output", "output.csv",
+    #     "--organoid-root", str(run0),
+    #     "--no-plot",
+    # ] + (["--debug"] if args.debug else []))
 
-    copy_seed_geometry(
-        seed_run0,
-        run0,
-        args.n_organoids,
-        no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
-    )
-    copy_branching_files(
-        trial_dir,
-        run0,
-        args.n_organoids,
-        allow_missing=bool(args.no_synthetic_vasculature),
-    )
-    if not args.no_synthetic_vasculature:
-        update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
-        validate_darcy_geometry_inputs(run0, args.n_organoids, no_synthetic_vasculature=False)
-    run_darcy_for_all(
-        run0,
-        args,
-        scaled_cfg=scaled_cfg,
-        replicate_reference_outputs=(scaled_cfg is not None),
-    )
-    write_post_darcy_terminal_convergence(
-        run0,
-        int(args.n_organoids),
-        write_cumulative=bool(args.terminal_pd_convergence_csv),
-    )
+    # copy_seed_geometry(
+    #     seed_run0,
+    #     run0,
+    #     args.n_organoids,
+    #     no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
+    # )
+    # copy_branching_files(
+    #     trial_dir,
+    #     run0,
+    #     args.n_organoids,
+    #     allow_missing=bool(args.no_synthetic_vasculature),
+    # )
+    # if not args.no_synthetic_vasculature:
+    #     update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
+    #     validate_darcy_geometry_inputs(run0, args.n_organoids, no_synthetic_vasculature=False)
+    # run_darcy_for_all(
+    #     run0,
+    #     args,
+    #     scaled_cfg=scaled_cfg,
+    #     replicate_reference_outputs=(scaled_cfg is not None),
+    # )
+    # write_post_darcy_terminal_convergence(
+    #     run0,
+    #     int(args.n_organoids),
+    #     write_cumulative=bool(args.terminal_pd_convergence_csv),
+    # )
 
     # Coupling loop: ramp then iterate to convergence
     total_steps = int(args.n_ramp) + int(args.max_iter)
