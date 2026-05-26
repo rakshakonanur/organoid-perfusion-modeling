@@ -1592,7 +1592,7 @@ def score_resistance_0d_trial(
         med = float(np.nanmedian(arr))
         p90 = float(np.nanpercentile(arr, 90.0))
         maxv = float(np.nanmax(arr))
-        return med + 0.5 * p90 + 0.1 * maxv, med, p90
+        return med + p90 + 2.0 * maxv, med, p90
 
     arterial_implied_score, arterial_implied_median, arterial_implied_p90 = _side_implied_score("arterial")
     venous_implied_score, venous_implied_median, venous_implied_p90 = _side_implied_score("venous")
@@ -1623,14 +1623,16 @@ def score_resistance_0d_trial(
     finite_pressure_scores = [
         value for value in (arterial_pressure_score, venous_pressure_score) if np.isfinite(value)
     ]
+    direct_pressure_score = median_err + p90_err + 2.0 * max_err
     if finite_pressure_scores:
         # Candidate selection should be driven by the true post-trial 0D
         # terminal pressure, not by the artificial resistance-implied pressure.
         # Worst-side weighting keeps a small subset of venous branches from
         # being hidden by many already-good arterial terminals.
-        unweighted_pressure_score = max(finite_pressure_scores) + 0.25 * float(np.mean(finite_pressure_scores))
+        worst_side_score = max(finite_pressure_scores) + 0.25 * float(np.mean(finite_pressure_scores))
+        unweighted_pressure_score = direct_pressure_score + 0.25 * worst_side_score
     else:
-        unweighted_pressure_score = median_err + 0.25 * p90_err + 0.05 * max_err
+        unweighted_pressure_score = direct_pressure_score
 
     def _inverse_flow_weighted_pressure_score(side: str | None = None) -> float:
         samples = [
@@ -1857,6 +1859,7 @@ def apply_organoid_resistance_from_json(
     continuity_resistance_decay: float = 0.8,
     pressure_alignment_jump_tol: float | None = None,
     active_terminal_side: str | None = "both",
+    permanent_resistance_controls: bool = True,
     pressure_handoff_enabled: bool = True,
     pressure_handoff_rel_tol: float = 0.10,
     pressure_handoff_abs_tol: float = 5.0,
@@ -2143,12 +2146,12 @@ def apply_organoid_resistance_from_json(
             pd_alignment_value = old_pd if np.isfinite(old_pd) else p_d_for_r
             pd_interface_gap = abs(pd_alignment_value - p_darcy) if np.isfinite(pd_alignment_value) else float("inf")
             continuity_decay_active = False
-            if pd_interface_gap <= continuity_tol:
-                # Once the resistance outlet pressure is already close to the
-                # Darcy interface pressure, treat the added resistance as a
-                # temporary continuation aid and explicitly decay it toward
-                # zero. This lets the final state recover pressure continuity
-                # instead of preserving a permanent pressure jump.
+            if (not bool(permanent_resistance_controls)) and pd_interface_gap <= continuity_tol:
+                # Optional legacy continuation mode: decay the auxiliary
+                # resistance when Pd is close to the Darcy interface. In the
+                # default control formulation, R and Pd are permanent numerical
+                # controls, so pressure continuity is measured with P_0D
+                # against P_interface and this decay is intentionally disabled.
                 decay = min(max(float(continuity_resistance_decay), 0.0), 1.0)
                 if np.isfinite(old_r) and old_r > 0.0:
                     r_raw = max(old_r * decay, np.finfo(float).tiny)
@@ -2325,7 +2328,8 @@ def apply_organoid_resistance_from_json(
             )
             handoff_abs_tol = max(float(pressure_handoff_abs_tol), 0.0)
             pressure_handoff_active = (
-                bool(pressure_handoff_enabled)
+                (not bool(permanent_resistance_controls))
+                and bool(pressure_handoff_enabled)
                 and np.isfinite(pressure_handoff_rel_gap)
                 and np.isfinite(pd_interface_rel_gap)
                 and np.isfinite(implied_interface_rel_gap)
@@ -3513,16 +3517,18 @@ def parse_args() -> argparse.Namespace:
                     help="Absolute pressure deadband for parent-flow suppression in resistance mode.")
     ap.add_argument("--terminal-continuity-pressure-tol", type=float, default=5.0,
                     help="When |Pd-P_interface| is below this tolerance, decay terminal resistance toward zero to recover pressure continuity.")
-    ap.add_argument("--terminal-continuity-resistance-decay", type=float, default=0.95,
-                    help="Target multiplicative decay for terminal resistance once Pd is aligned with the Darcy interface pressure.")
+    ap.add_argument("--terminal-continuity-resistance-decay", type=float, default=1.0,
+                    help="Legacy continuation aid: target multiplicative decay for terminal resistance once Pd is aligned with the Darcy interface pressure. Ignored by default when --permanent-resistance-controls is active.")
     ap.add_argument("--terminal-pressure-alignment-jump-tol", type=float, default=1.0,
                     help="When |Pi-Pd| is below this absolute tolerance, treat resistance continuation as complete and update Pd toward the Darcy interface instead of using parent-flow suppression.")
     ap.add_argument("--terminal-side-update-mode", choices=["alternate", "both"], default="both",
                     help="In resistance mode, update both terminal sides every iteration or alternate arterial/venous updates to reduce fixed-point ping-pong.")
     ap.add_argument("--terminal-alternate-first-side", choices=["arterial", "venous"], default="arterial",
                     help="First active terminal side after the resistance calibration run when --terminal-side-update-mode=alternate.")
-    ap.add_argument("--terminal-pressure-handoff", action=argparse.BooleanOptionalAction, default=True,
-                    help="Switch an active terminal from RESISTANCE to PRESSURE once Pi=Pd+RQ and Pd agree within the handoff tolerance.")
+    ap.add_argument("--permanent-resistance-controls", action=argparse.BooleanOptionalAction, default=True,
+                    help="Treat R and Pd as permanent numerical coupling controls. Convergence is P_0D versus P_Darcy; resistance decay and pressure handoff are disabled unless this is turned off.")
+    ap.add_argument("--terminal-pressure-handoff", action=argparse.BooleanOptionalAction, default=False,
+                    help="Legacy option: switch an active terminal from RESISTANCE to PRESSURE once Pi=Pd+RQ and Pd agree within the handoff tolerance. Ignored while --permanent-resistance-controls is active.")
     ap.add_argument("--terminal-pressure-handoff-rel-tol", type=float, default=0.025,
                     help="Relative tolerance for pressure handoff, using |Pi-Pd|/max(|Pi|,|Pd|,1). Default 0.05 = 5%%.")
     ap.add_argument("--terminal-pressure-handoff-abs-tol", type=float, default=2.0,
@@ -3549,7 +3555,7 @@ def parse_args() -> argparse.Namespace:
             "Disable for lean long runs; per-run terminal_resistance_bc_summary.csv is still written."
         ),
     )
-    ap.add_argument("--inner-resistance-decay-candidates", default="1.0,0.85,0.70",
+    ap.add_argument("--inner-resistance-decay-candidates", default="1.0",
                     help="Comma-separated continuity resistance decay candidates for the inner 0D search.")
     ap.add_argument("--inner-resistance-relaxation-multipliers", default="0.5,1.0,2.0,4.0",
                     help="Comma-separated multipliers applied to --terminal-resistance-relaxation in the inner 0D search. These directly vary R_next, so candidates remain distinct even before pressure handoff/continuity decay activate.")
@@ -3601,9 +3607,9 @@ def parse_args() -> argparse.Namespace:
                     help="Number of previous coupling intervals used to estimate recent stubborn-terminal improvement.")
     ap.add_argument("--stubborn-terminal-extra-gain", type=float, default=100.0,
                     help="Extra response-correction gain added only to stubborn terminals.")
-    ap.add_argument("--inner-implied-alignment-weight", type=float, default=2.0,
+    ap.add_argument("--inner-implied-alignment-weight", type=float, default=0.0,
                     help="Weight for candidate-proposed auxiliary P_implied versus Darcy interface alignment in the inner 0D score.")
-    ap.add_argument("--inner-jump-weight", type=float, default=0.05,
+    ap.add_argument("--inner-jump-weight", type=float, default=0.0,
                     help="Weight for the temporary resistance pressure-jump penalty in the candidate score.")
     ap.add_argument("--inner-max-pressure-error-weight", type=float, default=2.0,
                     help="Weight for the global worst-terminal post-trial 0D pressure error in the inner candidate score.")
@@ -3891,6 +3897,7 @@ def main() -> None:
                         ),
                         pressure_alignment_jump_tol=float(args.terminal_pressure_alignment_jump_tol),
                         active_terminal_side=active_terminal_side,
+                        permanent_resistance_controls=bool(args.permanent_resistance_controls),
                         pressure_handoff_enabled=bool(
                             args.terminal_pressure_handoff
                             if pressure_handoff_enabled is None
@@ -3993,12 +4000,21 @@ def main() -> None:
                         pd_relaxation_candidates.append(0.9)
                     decay_candidates = [1.0, 0.85, 0.7]
                     response_correction_gains = [0.0, 1.0]
+                if bool(args.permanent_resistance_controls):
+                    # In control mode, R/Pd are allowed to remain as numerical
+                    # coupling controls. Do not spend candidates on decaying R
+                    # or switching to pressure BCs; select only by how well the
+                    # cheap 0D trial matches the last Darcy terminal pressures.
+                    decay_candidates = [1.0]
+                    pressure_handoff_active_for_search = False
+                else:
+                    pressure_handoff_active_for_search = bool(args.terminal_pressure_handoff)
                 handoff_tol_candidates = (
                     _parse_float_list(
                         args.inner_pressure_handoff_tol_candidates,
                         [float(args.terminal_pressure_handoff_rel_tol)],
                     )
-                    if bool(args.terminal_pressure_handoff)
+                    if pressure_handoff_active_for_search
                     else [float(args.terminal_pressure_handoff_rel_tol)]
                 )
                 candidate_specs: list[dict[str, Any]] = []
@@ -4016,7 +4032,7 @@ def main() -> None:
                                         ),
                                         "pd_relaxation": min(max(float(pd_candidate), 0.0), 1.0),
                                         "continuity_resistance_decay": min(max(float(decay_candidate), 0.0), 1.0),
-                                        "pressure_handoff_enabled": bool(args.terminal_pressure_handoff),
+                                        "pressure_handoff_enabled": bool(pressure_handoff_active_for_search),
                                         "pressure_handoff_rel_tol": max(float(handoff_tol), 0.0),
                                         "terminal_response_correction_gain": max(float(response_gain), 0.0),
                                         "terminal_response_correction_guarded_reasons": bool(
@@ -4037,7 +4053,7 @@ def main() -> None:
                                     if key not in seen_specs:
                                         candidate_specs.append(spec)
                                         seen_specs.add(key)
-                if bool(args.terminal_pressure_handoff):
+                if pressure_handoff_active_for_search:
                     no_handoff_specs: list[dict[str, Any]] = []
                     for relax_mult in relaxation_multipliers:
                         for pd_candidate in pd_relaxation_candidates:
@@ -4079,6 +4095,7 @@ def main() -> None:
                     "inner_resistance_search_profile": str(args.inner_resistance_search_profile),
                     "base_terminal_resistance_relaxation": float(args.terminal_resistance_relaxation),
                     "terminal_pressure_handoff_abs_tol": float(args.terminal_pressure_handoff_abs_tol),
+                    "permanent_resistance_controls": bool(args.permanent_resistance_controls),
                     "raw_inner_resistance_relaxation_multipliers": str(args.inner_resistance_relaxation_multipliers),
                     "raw_inner_pd_relaxation_candidates": str(args.inner_pd_relaxation_candidates),
                     "raw_inner_terminal_response_correction_gains": str(
@@ -4267,6 +4284,7 @@ def main() -> None:
                         f"{best[3]['candidate']} with score={best[0]:.3e}, "
                         f"median={best[3]['median_error_percent']:.3e}%, "
                         f"p90={best[3]['p90_error_percent']:.3e}%, "
+                        f"max={best[3].get('max_error_percent', float('nan')):.3e}%, "
                         f"jump_median={best[3].get('jump_median_percent', float('nan')):.3e}%, "
                         f"flow_guard={best[3].get('flow_guard_score', float('nan')):.3e}",
                         flush=True,
@@ -4292,6 +4310,7 @@ def main() -> None:
                             "base_terminal_resistance_relaxation": float(args.terminal_resistance_relaxation),
                             "base_terminal_pd_relaxation": float(args.terminal_pd_relaxation),
                             "terminal_pressure_handoff_abs_tol": float(args.terminal_pressure_handoff_abs_tol),
+                            "permanent_resistance_controls": bool(args.permanent_resistance_controls),
                             "raw_inner_resistance_relaxation_multipliers": str(
                                 args.inner_resistance_relaxation_multipliers
                             ),
