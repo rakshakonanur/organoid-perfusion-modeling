@@ -2454,10 +2454,25 @@ def copy_seed_geometry(
         src = seed_run0 / f"organoid_{k}" / "geometry"
         dst = run_dir / f"organoid_{k}" / "geometry"
         dst.parent.mkdir(parents=True, exist_ok=True)
+        src_has_branched_networks = (
+            no_synthetic_vasculature
+            or (
+                (
+                    (src / "branched_network_inlet.xdmf").exists()
+                    or (src / f"branched_network_inlet_well{k}.xdmf").exists()
+                )
+                and (
+                    (src / "branched_network_outlet.xdmf").exists()
+                    or (src / f"branched_network_outlet_well{k}.xdmf").exists()
+                )
+            )
+        )
         # Geometry is static across coupling iterations, so avoid copying the
         # large XDMF/HDF5/BP files into every run. A symlink is enough because
-        # downstream steps only read geometry files.
-        if src.exists():
+        # downstream steps only read geometry files. Some seed folders do not
+        # contain canonical branched-network XDMFs, in which case the _tmp_mesh
+        # copier must materialize those files for the 1D checkpoint generator.
+        if src.exists() and src_has_branched_networks:
             link_or_copy_tree(src, dst)
         elif tmp_mesh.exists():
             _copy_tmp_mesh_well(tmp_mesh, dst, k)
