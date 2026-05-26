@@ -65,7 +65,7 @@ def _mean_abs(values: list[float]) -> float:
 def _rel_percent(a: float, b: float, floor: float = 1.0) -> float:
     if not (math.isfinite(a) and math.isfinite(b)):
         return float("nan")
-    return 100.0 * abs(a - b) / max(abs(a), abs(b), floor)
+    return 100.0 * abs(a - b) / max(min(abs(a), abs(b)), floor)
 
 
 def _selected_inner_summary(run_dir: Path) -> dict[str, str]:

@@ -1102,10 +1102,11 @@ def _safe_float(value: Any) -> float:
     return out if np.isfinite(out) else float("nan")
 
 
-def _symmetric_rel_error(a: float, b: float, floor: float = 1.0) -> float:
+def _pressure_continuity_rel_error(a: float, b: float, floor: float = 1.0) -> float:
     if not (np.isfinite(a) and np.isfinite(b)):
         return float("nan")
-    return float(abs(a - b) / max(abs(a), abs(b), float(floor)))
+    denominator = max(min(abs(a), abs(b)), float(floor))
+    return float(abs(a - b) / denominator)
 
 
 def _parse_float_list(value: Any, default: list[float]) -> list[float]:
@@ -1224,7 +1225,7 @@ def write_terminal_resistance_summary(
         for row in rows:
             if row.get("terminal_pressure_error_rel", "") == "":
                 row = dict(row)
-                row["terminal_pressure_error_rel"] = _symmetric_rel_error(
+                row["terminal_pressure_error_rel"] = _pressure_continuity_rel_error(
                     _safe_float(row.get("P_0D")),
                     _safe_float(row.get("P_interface")),
                     floor=1.0,
@@ -1246,7 +1247,7 @@ def write_terminal_resistance_summary(
             for row in cumulative_rows:
                 if row.get("terminal_pressure_error_rel", "") == "":
                     row = dict(row)
-                    row["terminal_pressure_error_rel"] = _symmetric_rel_error(
+                    row["terminal_pressure_error_rel"] = _pressure_continuity_rel_error(
                         _safe_float(row.get("P_0D")),
                         _safe_float(row.get("P_interface")),
                         floor=1.0,
@@ -1257,7 +1258,7 @@ def write_terminal_resistance_summary(
 def _terminal_pressure_error_rel_from_row(row: dict[str, Any]) -> float:
     p0 = _safe_float(row.get("P_0D"))
     pi = _safe_float(row.get("P_interface"))
-    return _symmetric_rel_error(p0, pi, floor=1.0)
+    return _pressure_continuity_rel_error(p0, pi, floor=1.0)
 
 
 def read_terminal_resistance_summary(path: Path) -> list[dict[str, Any]]:
@@ -2836,13 +2837,13 @@ def _max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
     return float(np.max(np.abs(aa - bb) / den))
 
 
-def _max_symmetric_rel(a: np.ndarray, b: np.ndarray, floor: float = 1.0) -> float:
+def _max_pressure_continuity_rel(a: np.ndarray, b: np.ndarray, floor: float = 1.0) -> float:
     if a.size == 0 or b.size == 0:
         return 0.0
     n = min(a.size, b.size)
     aa = a[:n]
     bb = b[:n]
-    den = np.maximum(np.maximum(np.abs(aa), np.abs(bb)), float(floor))
+    den = np.maximum(np.minimum(np.abs(aa), np.abs(bb)), float(floor))
     return float(np.max(np.abs(aa - bb) / den))
 
 
@@ -3296,7 +3297,7 @@ def convergence_for_organoid(
             [prev.get("p_concave_inlet_bc", 0.0), prev.get("p_concave_outlet_bc", 0.0)],
             dtype=float,
         )
-        rp = _max_symmetric_rel(p, p_t, floor=1.0)
+        rp = _max_pressure_continuity_rel(p, p_t, floor=1.0)
         return (rp <= tol_p), float("nan"), rp
 
     p_in = np.asarray(iface.get("p_inlet_nodes_raw", iface.get("p_inlet_nodes", [])), dtype=float)
@@ -3315,7 +3316,10 @@ def convergence_for_organoid(
     if p_in.size == 0 and p_out.size == 0:
         return False, float("inf"), float("inf")
 
-    rp = max(_max_symmetric_rel(p_in, p_in_t, floor=1.0), _max_symmetric_rel(p_out, p_out_t, floor=1.0))
+    rp = max(
+        _max_pressure_continuity_rel(p_in, p_in_t, floor=1.0),
+        _max_pressure_continuity_rel(p_out, p_out_t, floor=1.0),
+    )
     return (rp <= tol_p), float("nan"), rp
 
 
@@ -3336,7 +3340,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--tol-q", type=float, default=1e-3,
                     help="Legacy flow tolerance retained for compatibility; steady resistance-mode convergence now uses terminal pressure continuity only.")
     ap.add_argument("--tol-p", type=float, default=1e-3,
-                    help="Tolerance for max |P_0D-P_Darcy|/max(|P_0D|,|P_Darcy|,1) across terminals.")
+                    help="Tolerance for max |P_0D-P_Darcy|/max(min(|P_0D|,|P_Darcy|),1) across terminals.")
     ap.add_argument("--relaxation", type=float, default=1.0)
     ap.add_argument("--terminal-support-flow-factor", type=float, default=10.0,
                     help="Treat terminal flow as unsupported when |Q_0D| exceeds this multiple of |Q_Darcy_port|.")
