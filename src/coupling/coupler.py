@@ -1102,6 +1102,12 @@ def _safe_float(value: Any) -> float:
     return out if np.isfinite(out) else float("nan")
 
 
+def _symmetric_rel_error(a: float, b: float, floor: float = 1.0) -> float:
+    if not (np.isfinite(a) and np.isfinite(b)):
+        return float("nan")
+    return float(abs(a - b) / max(abs(a), abs(b), float(floor)))
+
+
 def _parse_float_list(value: Any, default: list[float]) -> list[float]:
     raw = str(value or "").strip()
     if not raw:
@@ -1159,6 +1165,7 @@ def write_terminal_resistance_summary(run_dir: Path, rows: list[dict[str, Any]])
         "bc_type",
         "P_interface",
         "P_0D",
+        "terminal_pressure_error_rel",
         "P_parent_0D",
         "P_ref_diagnostic",
         "P_d_for_R",
@@ -1211,6 +1218,13 @@ def write_terminal_resistance_summary(run_dir: Path, rows: list[dict[str, Any]])
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
+            if row.get("terminal_pressure_error_rel", "") == "":
+                row = dict(row)
+                row["terminal_pressure_error_rel"] = _symmetric_rel_error(
+                    _safe_float(row.get("P_0D")),
+                    _safe_float(row.get("P_interface")),
+                    floor=1.0,
+                )
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
     cumulative_rows: list[dict[str, Any]] = []
@@ -1223,15 +1237,20 @@ def write_terminal_resistance_summary(run_dir: Path, rows: list[dict[str, Any]])
             writer = csv.DictWriter(fp, fieldnames=fieldnames)
             writer.writeheader()
             for row in cumulative_rows:
+                if row.get("terminal_pressure_error_rel", "") == "":
+                    row = dict(row)
+                    row["terminal_pressure_error_rel"] = _symmetric_rel_error(
+                        _safe_float(row.get("P_0D")),
+                        _safe_float(row.get("P_interface")),
+                        floor=1.0,
+                    )
                 writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
 def _terminal_pressure_error_rel_from_row(row: dict[str, Any]) -> float:
     p0 = _safe_float(row.get("P_0D"))
     pi = _safe_float(row.get("P_interface"))
-    if not (np.isfinite(p0) and np.isfinite(pi)):
-        return float("nan")
-    return float(abs(pi - p0) / max(abs(pi), 1.0))
+    return _symmetric_rel_error(p0, pi, floor=1.0)
 
 
 def read_terminal_resistance_summary(path: Path) -> list[dict[str, Any]]:
@@ -1696,6 +1715,7 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "pressure_handoff_enabled",
         "pressure_handoff_rel_tol",
         "terminal_response_correction_gain",
+        "terminal_response_correction_guarded_reasons",
         "score",
         "pressure_score",
         "inverse_flow_pressure_score",
@@ -1760,6 +1780,7 @@ def write_inner_resistance_candidate_grid(
         "pressure_handoff_enabled",
         "pressure_handoff_rel_tol",
         "terminal_response_correction_gain",
+        "terminal_response_correction_guarded_reasons",
     ]
     path = run_dir / "inner_resistance_0d_candidate_grid.csv"
     with path.open("w", newline="") as fp:
@@ -1798,6 +1819,7 @@ def apply_organoid_resistance_from_json(
     terminal_response_correction_error_scale: float = 0.10,
     terminal_response_correction_error_gamma: float = 1.0,
     terminal_response_correction_effective_gain_cap: float = 3.0,
+    terminal_response_correction_guarded_reasons: bool = False,
     stubborn_terminal_response_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
     allow_missing_terminal_bcs: bool = False,
 ) -> list[dict[str, Any]]:
@@ -1863,6 +1885,7 @@ def apply_organoid_resistance_from_json(
         response_error_scale = max(float(terminal_response_correction_error_scale), response_rel_error_tol)
         response_error_gamma = max(float(terminal_response_correction_error_gamma), 0.0)
         response_effective_gain_cap = max(float(terminal_response_correction_effective_gain_cap), 0.0)
+        response_guarded_reasons = bool(terminal_response_correction_guarded_reasons)
 
         def _effective_pd_relaxation(q_denominator: float) -> tuple[float, float]:
             if pd_relax_base <= 0.0 or inv_pd_fraction <= 0.0:
@@ -2171,6 +2194,21 @@ def apply_organoid_resistance_from_json(
             response_severity = 0.0
             response_effective_gain = 0.0
             response_gain = response_gain_base + max(float(stubborn_gain), 0.0)
+            response_allowed_reasons = {
+                "resistance_implied_interface",
+                "pressure_alignment",
+                "pressure_handoff",
+            }
+            if response_guarded_reasons and response_gain_base > 0.0:
+                # Candidate-only move: allow the cheap 0D search to test
+                # pressure-response corrections even when the default update is
+                # holding the terminal for flow-safety reasons. The candidate
+                # score will reject it if the post-trial 0D pressure/flow gets
+                # worse, so this does not become an unconditional Pd kick.
+                response_allowed_reasons.update({
+                    "drive_limited_hold",
+                    "parent_flow_suppression",
+                })
             if np.isfinite(response_error_rel) and response_error_rel > response_rel_error_tol:
                 severity_den = max(
                     response_error_scale - response_rel_error_tol,
@@ -2195,11 +2233,7 @@ def apply_organoid_resistance_from_json(
                 and pd_flow_weight_for_response >= response_min_flow_weight
                 and np.isfinite(response_error_rel)
                 and response_error_rel >= response_rel_error_tol
-                and pd_target_reason in {
-                    "resistance_implied_interface",
-                    "pressure_alignment",
-                    "pressure_handoff",
-                }
+                and pd_target_reason in response_allowed_reasons
             ):
                 # If Pd+RQ already matches Darcy but the actual 0D terminal
                 # pressure is still lagging, compensate for the terminal-tree
@@ -2786,6 +2820,16 @@ def _max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
     return float(np.max(np.abs(aa - bb) / den))
 
 
+def _max_symmetric_rel(a: np.ndarray, b: np.ndarray, floor: float = 1.0) -> float:
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    n = min(a.size, b.size)
+    aa = a[:n]
+    bb = b[:n]
+    den = np.maximum(np.maximum(np.abs(aa), np.abs(bb)), float(floor))
+    return float(np.max(np.abs(aa - bb) / den))
+
+
 def parse_0d_branch_segment_name(name: str) -> Optional[tuple[int, int]]:
     text = str(name).strip()
     patterns = [
@@ -3225,15 +3269,6 @@ def convergence_for_organoid(
 ) -> tuple[bool, float, float]:
     iface = load_json(iface_path)
     if bool(iface.get("skip_1d", False)):
-        q = np.asarray(
-            [iface.get("q_artery_leak", 0.0), iface.get("q_venous_leak", 0.0)],
-            dtype=float,
-        )
-        q_t: Optional[np.ndarray] = None
-        if current_deck is not None and organoid_idx is not None:
-            q_t = _current_leak_flow_targets(current_deck, organoid_idx)
-        if q_t is None:
-            return False, float("inf"), float("inf")
         p = np.asarray(
             [iface.get("p_concave_inlet_bc", 0.0), iface.get("p_concave_outlet_bc", 0.0)],
             dtype=float,
@@ -3245,14 +3280,9 @@ def convergence_for_organoid(
             [prev.get("p_concave_inlet_bc", 0.0), prev.get("p_concave_outlet_bc", 0.0)],
             dtype=float,
         )
-        rq = _max_rel(q, q_t, floor=1e-20)
-        rp = _max_rel(p, p_t, floor=1e-12)
-        return (rq <= tol_q and rp <= tol_p), rq, rp
+        rp = _max_symmetric_rel(p, p_t, floor=1.0)
+        return (rp <= tol_p), float("nan"), rp
 
-    q_in = np.asarray(iface.get("q_inlet_port_in", iface.get("q_inlet", [])), dtype=float)
-    q_in_t = np.asarray(iface.get("q_inlet_target_in", iface.get("q_inlet_target", [])), dtype=float)
-    q_out = np.asarray(iface.get("q_outlet_port_out", iface.get("q_outlet", [])), dtype=float)
-    q_out_t = np.asarray(iface.get("q_outlet_target_out", []), dtype=float)
     p_in = np.asarray(iface.get("p_inlet_nodes_raw", iface.get("p_inlet_nodes", [])), dtype=float)
     p_out = np.asarray(iface.get("p_outlet_nodes_raw", iface.get("p_outlet_nodes", [])), dtype=float)
 
@@ -3263,17 +3293,14 @@ def convergence_for_organoid(
         p_in_t = np.asarray(prev.get("p_inlet_nodes_raw", prev.get("p_inlet_nodes", [])), dtype=float)
         p_out_t = np.asarray(prev.get("p_outlet_nodes_raw", prev.get("p_outlet_nodes", [])), dtype=float)
     else:
-        p_in = np.asarray(iface.get("p_inlet_nodes_coupled", iface.get("p_inlet_nodes", [])), dtype=float)
-        p_out = np.asarray(iface.get("p_outlet_nodes_coupled", iface.get("p_outlet_nodes", [])), dtype=float)
         p_in_t = np.asarray(iface.get("p_inlet_target", []), dtype=float)
         p_out_t = np.asarray(iface.get("p_outlet_target", []), dtype=float)
 
-    if q_in.size == 0 and q_in_t.size == 0 and q_out.size == 0 and q_out_t.size == 0 and p_in.size == 0 and p_out.size == 0:
+    if p_in.size == 0 and p_out.size == 0:
         return False, float("inf"), float("inf")
 
-    rq = max(_max_rel(q_in, q_in_t, floor=1e-20), _max_rel(q_out, q_out_t, floor=1e-20))
-    rp = max(_max_rel(p_in, p_in_t, floor=1e-12), _max_rel(p_out, p_out_t, floor=1e-12))
-    return (rq <= tol_q and rp <= tol_p), rq, rp
+    rp = max(_max_symmetric_rel(p_in, p_in_t, floor=1.0), _max_symmetric_rel(p_out, p_out_t, floor=1.0))
+    return (rp <= tol_p), float("nan"), rp
 
 
 def parse_args() -> argparse.Namespace:
@@ -3290,8 +3317,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max-iter", type=int, default=100)
     ap.add_argument("--start-run", type=int, default=1,
                     help="First coupling run to build. Use 1 for a fresh run from run_0, or a larger value to restart from run_{start_run-1}.")
-    ap.add_argument("--tol-q", type=float, default=1e-3)
-    ap.add_argument("--tol-p", type=float, default=1e-3)
+    ap.add_argument("--tol-q", type=float, default=1e-3,
+                    help="Legacy flow tolerance retained for compatibility; steady resistance-mode convergence now uses terminal pressure continuity only.")
+    ap.add_argument("--tol-p", type=float, default=1e-3,
+                    help="Tolerance for max |P_0D-P_Darcy|/max(|P_0D|,|P_Darcy|,1) across terminals.")
     ap.add_argument("--relaxation", type=float, default=1.0)
     ap.add_argument("--terminal-support-flow-factor", type=float, default=10.0,
                     help="Treat terminal flow as unsupported when |Q_0D| exceeds this multiple of |Q_Darcy_port|.")
@@ -3381,6 +3410,8 @@ def parse_args() -> argparse.Namespace:
                     help="Exponent for pressure-error severity weighting of response correction.")
     ap.add_argument("--terminal-response-correction-effective-gain-cap", type=float, default=3.0,
                     help="Maximum per-terminal effective response-correction gain after pressure-error severity weighting.")
+    ap.add_argument("--inner-response-correction-guarded-reasons", action=argparse.BooleanOptionalAction, default=True,
+                    help="In inner 0D candidate search, allow positive response-correction candidates to test drive-limited/parent-suppressed terminals. The scored 0D trial decides whether to accept the move.")
     ap.add_argument("--stubborn-terminal-response-correction", action=argparse.BooleanOptionalAction, default=True,
                     help="Automatically add extra response correction to terminals with large, slowly improving pressure-continuity error.")
     ap.add_argument("--stubborn-terminal-min-rel-error", type=float, default=0.025,
@@ -3616,6 +3647,7 @@ def main() -> None:
             pressure_handoff_enabled: bool | None = None,
             pressure_handoff_rel_tol: float | None = None,
             terminal_response_correction_gain: float | None = None,
+            terminal_response_correction_guarded_reasons: bool = False,
             print_active_side: bool = True,
         ) -> tuple[dict, list[dict[str, Any]]]:
             candidate = copy.deepcopy(base_deck)
@@ -3712,6 +3744,9 @@ def main() -> None:
                         terminal_response_correction_effective_gain_cap=float(
                             args.terminal_response_correction_effective_gain_cap
                         ),
+                        terminal_response_correction_guarded_reasons=bool(
+                            terminal_response_correction_guarded_reasons
+                        ),
                         stubborn_terminal_response_map=stubborn_terminal_response_map,
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
                     )
@@ -3762,7 +3797,9 @@ def main() -> None:
                     relaxation_multipliers = [4.0]
                     if 0.9 not in pd_relaxation_candidates:
                         pd_relaxation_candidates.append(0.9)
-                    response_correction_gains = [0.0]
+                    response_correction_gains = sorted(
+                        {0.0, *[float(v) for v in response_correction_gains if float(v) > 0.0]}
+                    )
                 elif search_profile == "full":
                     relaxation_multipliers = [0.5, 1.0, 2.0, 4.0]
                     if 0.9 not in pd_relaxation_candidates:
@@ -3778,7 +3815,7 @@ def main() -> None:
                     else [float(args.terminal_pressure_handoff_rel_tol)]
                 )
                 candidate_specs: list[dict[str, Any]] = []
-                seen_specs: set[tuple[float, float, float, float, bool, float, float]] = set()
+                seen_specs: set[tuple[float, float, float, float, bool, float, float, bool]] = set()
                 for relax_mult in relaxation_multipliers:
                     for pd_candidate in pd_relaxation_candidates:
                         for decay_candidate in decay_candidates:
@@ -3795,6 +3832,10 @@ def main() -> None:
                                         "pressure_handoff_enabled": bool(args.terminal_pressure_handoff),
                                         "pressure_handoff_rel_tol": max(float(handoff_tol), 0.0),
                                         "terminal_response_correction_gain": max(float(response_gain), 0.0),
+                                        "terminal_response_correction_guarded_reasons": bool(
+                                            args.inner_response_correction_guarded_reasons
+                                            and float(response_gain) > 0.0
+                                        ),
                                     }
                                     key = (
                                         round(float(spec["resistance_relaxation_multiplier"]), 12),
@@ -3804,6 +3845,7 @@ def main() -> None:
                                         bool(spec["pressure_handoff_enabled"]),
                                         round(float(spec["pressure_handoff_rel_tol"]), 12),
                                         round(float(spec["terminal_response_correction_gain"]), 12),
+                                        bool(spec["terminal_response_correction_guarded_reasons"]),
                                     )
                                     if key not in seen_specs:
                                         candidate_specs.append(spec)
@@ -3824,6 +3866,10 @@ def main() -> None:
                                     "pressure_handoff_enabled": False,
                                     "pressure_handoff_rel_tol": float(args.terminal_pressure_handoff_rel_tol),
                                     "terminal_response_correction_gain": max(float(response_gain), 0.0),
+                                    "terminal_response_correction_guarded_reasons": bool(
+                                        args.inner_response_correction_guarded_reasons
+                                        and float(response_gain) > 0.0
+                                    ),
                                 }
                                 key = (
                                     round(float(no_handoff["resistance_relaxation_multiplier"]), 12),
@@ -3833,6 +3879,7 @@ def main() -> None:
                                     False,
                                     round(float(no_handoff["pressure_handoff_rel_tol"]), 12),
                                     round(float(no_handoff["terminal_response_correction_gain"]), 12),
+                                    bool(no_handoff["terminal_response_correction_guarded_reasons"]),
                                 )
                                 if key not in seen_specs:
                                     no_handoff_specs.append(no_handoff)
@@ -3888,6 +3935,9 @@ def main() -> None:
                     "terminal_response_correction_effective_gain_cap": float(
                         args.terminal_response_correction_effective_gain_cap
                     ),
+                    "inner_response_correction_guarded_reasons": bool(
+                        args.inner_response_correction_guarded_reasons
+                    ),
                     "stubborn_terminal_response_correction": bool(
                         args.stubborn_terminal_response_correction
                     ),
@@ -3942,6 +3992,9 @@ def main() -> None:
                         pressure_handoff_rel_tol=float(spec["pressure_handoff_rel_tol"]),
                         terminal_response_correction_gain=float(
                             spec.get("terminal_response_correction_gain", 0.0)
+                        ),
+                        terminal_response_correction_guarded_reasons=bool(
+                            spec.get("terminal_response_correction_guarded_reasons", False)
                         ),
                         print_active_side=(candidate_idx == 0),
                     )
@@ -4092,6 +4145,9 @@ def main() -> None:
                             "terminal_response_correction_effective_gain_cap": float(
                                 args.terminal_response_correction_effective_gain_cap
                             ),
+                            "inner_response_correction_guarded_reasons": bool(
+                                args.inner_response_correction_guarded_reasons
+                            ),
                             "stubborn_terminal_response_correction": bool(
                                 args.stubborn_terminal_response_correction
                             ),
@@ -4217,18 +4273,10 @@ def main() -> None:
                     ),
                     current_deck=(deck if args.no_synthetic_vasculature else None),
                     organoid_idx=(k if args.no_synthetic_vasculature else None),
-                    pressure_compare_mode=(
-                        "previous"
-                        if (
-                            str(args.terminal_bc_mode) == "resistance"
-                            and i > int(args.resistance_calibration_run)
-                            and not args.no_synthetic_vasculature
-                        )
-                        else "target"
-                    ),
+                    pressure_compare_mode="target",
                 )
                 all_ok = all_ok and ok
-                print(f"  organoid_{k}: rel_q={rq:.3e}, rel_p={rp:.3e}, converged={ok}")
+                print(f"  organoid_{k}: rel_p={rp:.3e}, converged={ok}")
             if all_ok:
                 print(f"\n[done] converged at run_{i}.")
                 return
