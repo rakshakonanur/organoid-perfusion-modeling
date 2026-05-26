@@ -174,6 +174,37 @@ def copy_tree(src: Path, dst: Path, overwrite: bool = True) -> None:
     shutil.copytree(src, dst, dirs_exist_ok=not overwrite)
 
 
+def initialize_iteration_run(prev: Path, cur: Path, overwrite: bool) -> None:
+    """
+    Start a new coupling iteration without cloning the full previous run.
+
+    The iteration only needs the previous combined.in as a mutable starting
+    deck. Previous interface data are read directly from prev/out_darcy, while
+    geometry, branching files, 0D outputs, and Darcy outputs are generated fresh
+    later in the current run directory.
+    """
+    if cur.exists() and overwrite:
+        shutil.rmtree(cur)
+    cur.mkdir(parents=True, exist_ok=True)
+    src_combined = prev / "combined.in"
+    if not src_combined.exists():
+        die(f"Missing previous combined.in: {src_combined}")
+    shutil.copy2(src_combined, cur / "combined.in")
+
+
+def link_or_copy_tree(src: Path, dst: Path) -> None:
+    if dst.is_symlink() or dst.exists():
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        else:
+            shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dst.symlink_to(src.resolve(), target_is_directory=True)
+    except OSError:
+        copy_tree(src, dst, overwrite=True)
+
+
 def copy_xdmf_with_sidecars(src_xdmf: Path, dst_xdmf: Path) -> None:
     """
     Copy XDMF and referenced .h5 sidecars, rewriting HDF5 references so they
@@ -2395,13 +2426,13 @@ def copy_seed_geometry(
     no_synthetic_vasculature: bool = False,
 ) -> None:
     tmp_mesh = seed_run0 / "_tmp_mesh"
-    # Reuse run_all.py geometry copier to stay aligned with pipeline behavior.
-    repo_src = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_src / "prep"))
-    run_all_mod = importlib.import_module("run_all")
-    copy_shared_geometry_outputs = getattr(run_all_mod, "_copy_shared_geometry_outputs")
 
     def _copy_tmp_mesh_well(tmp_dir: Path, dst_geom: Path, k: int) -> None:
+        # Reuse run_all.py geometry copier to stay aligned with pipeline behavior.
+        repo_src = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(repo_src / "prep"))
+        run_all_mod = importlib.import_module("run_all")
+        copy_shared_geometry_outputs = getattr(run_all_mod, "_copy_shared_geometry_outputs")
         dst_geom.mkdir(parents=True, exist_ok=True)
         # Copy canonical geometry/checkpoint files exactly as run_all.py does.
         copy_shared_geometry_outputs(
@@ -2423,12 +2454,13 @@ def copy_seed_geometry(
         src = seed_run0 / f"organoid_{k}" / "geometry"
         dst = run_dir / f"organoid_{k}" / "geometry"
         dst.parent.mkdir(parents=True, exist_ok=True)
-        # Prefer _tmp_mesh well-specific artifacts when available, since these include
-        # the canonical XDMF/HDF5 sidecar pairs for each well.
-        if tmp_mesh.exists():
+        # Geometry is static across coupling iterations, so avoid copying the
+        # large XDMF/HDF5/BP files into every run. A symlink is enough because
+        # downstream steps only read geometry files.
+        if src.exists():
+            link_or_copy_tree(src, dst)
+        elif tmp_mesh.exists():
             _copy_tmp_mesh_well(tmp_mesh, dst, k)
-        elif src.exists():
-            copy_tree(src, dst, overwrite=True)
         else:
             die(f"Missing seed geometry for organoid_{k}: {src} and no fallback {tmp_mesh}")
 
@@ -3596,7 +3628,6 @@ def main() -> None:
     zero_all_interface_bcs(deck0, args.n_organoids)
     save_json(combined0, deck0)
     ensure_organoid_dirs(run0, args.n_organoids)
-    sync_plot_templates(seed_run0, run0, args.n_organoids)
 
     run([
         sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
@@ -3640,9 +3671,7 @@ def main() -> None:
         scale = min(i / float(max(args.n_ramp, 1)), 1.0) if i <= args.n_ramp else 1.0
         prev = coupled_root / f"run_{i-1}"
         cur = coupled_root / f"run_{i}"
-        if cur.exists() and args.overwrite:
-            shutil.rmtree(cur)
-        copy_tree(prev, cur, overwrite=not args.overwrite)
+        initialize_iteration_run(prev, cur, overwrite=bool(args.overwrite))
 
         combined_i = cur / "combined.in"
         base_deck = load_json(combined_i)
@@ -3814,7 +3843,6 @@ def main() -> None:
             return candidate, rows
 
         ensure_organoid_dirs(cur, args.n_organoids)
-        sync_plot_templates(seed_run0, cur, args.n_organoids)
 
         deck: dict
         inner_tries = max(1, int(args.inner_0d_max_tries))
