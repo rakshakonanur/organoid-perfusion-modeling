@@ -2443,6 +2443,12 @@ def copy_seed_geometry(
             "area_checkpoint_outlet.bp",
         ])
 
+    def _remove_existing_geometry(dst_geom: Path) -> None:
+        if dst_geom.is_symlink() or dst_geom.is_file():
+            dst_geom.unlink()
+        elif dst_geom.exists():
+            shutil.rmtree(dst_geom)
+
     def _copy_tmp_mesh_well(tmp_dir: Path, dst_geom: Path, k: int) -> None:
         # Reuse run_all.py geometry copier to stay aligned with pipeline behavior.
         repo_src = Path(__file__).resolve().parents[1]
@@ -2479,6 +2485,7 @@ def copy_seed_geometry(
         src = seed_run0 / f"organoid_{k}" / "geometry"
         dst = run_dir / f"organoid_{k}" / "geometry"
         dst.parent.mkdir(parents=True, exist_ok=True)
+        _remove_existing_geometry(dst)
 
         # Prefer _tmp_mesh because it stores well-specific geometry/checkpoints
         # and run_all.py knows how to remap them to the canonical Darcy names.
@@ -2784,12 +2791,55 @@ def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndar
         outlet_generator(**outlet_kwargs)
 
 
+def required_darcy_geometry_inputs(no_synthetic_vasculature: bool = False) -> list[str]:
+    required = [
+        "bioreactor.xdmf",
+        "mesh_tags.xdmf",
+        "tagged_branches_inlet.bp",
+        "tagged_branches_outlet.bp",
+    ]
+    if not no_synthetic_vasculature:
+        required.extend([
+            "pressure_checkpoint_inlet.bp",
+            "pressure_checkpoint_outlet.bp",
+            "flow_checkpoint_inlet.bp",
+            "flow_checkpoint_outlet.bp",
+            "area_checkpoint_inlet.bp",
+            "area_checkpoint_outlet.bp",
+        ])
+    return required
+
+
+def validate_darcy_geometry_inputs(run_dir: Path, n_organoids: int, no_synthetic_vasculature: bool = False) -> None:
+    required = required_darcy_geometry_inputs(no_synthetic_vasculature)
+    missing_by_organoid: list[str] = []
+    for k in range(1, n_organoids + 1):
+        geom = run_dir / f"organoid_{k}" / "geometry"
+        missing = [name for name in required if not (geom / name).exists()]
+        if missing:
+            missing_by_organoid.append(
+                f"organoid_{k}: {', '.join(missing)} in {geom}"
+            )
+    if missing_by_organoid:
+        die(
+            "Missing required Darcy geometry/checkpoint inputs before Darcy launch. "
+            "The run likely has stale legacy geometry files such as pressure_inlet.bp "
+            "instead of pressure_checkpoint_inlet.bp. Missing: "
+            + " | ".join(missing_by_organoid)
+        )
+
+
 def run_darcy_for_all(
     run_dir: Path,
     args: argparse.Namespace,
     scaled_cfg: Optional[dict[str, Any]] = None,
     replicate_reference_outputs: bool = False,
 ) -> None:
+    validate_darcy_geometry_inputs(
+        run_dir,
+        int(args.n_organoids),
+        no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
+    )
     darcy_script = Path(args.darcy_script).expanduser().resolve()
     if not darcy_script.exists():
         die(f"Missing Darcy script: {darcy_script}")
