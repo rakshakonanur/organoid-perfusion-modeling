@@ -1310,6 +1310,87 @@ def read_terminal_resistance_summary(path: Path) -> list[dict[str, Any]]:
         return list(csv.DictReader(fp))
 
 
+def write_post_darcy_terminal_convergence(
+    run_dir: Path,
+    n_organoids: int,
+    write_cumulative: bool = True,
+) -> None:
+    run_idx = _run_index_from_path(run_dir)
+    rows: list[dict[str, Any]] = []
+    fieldnames = [
+        "run",
+        "organoid",
+        "side",
+        "branch_id",
+        "P_Darcy",
+        "P_0D_target",
+        "terminal_pressure_error_rel",
+    ]
+    for organoid_idx in range(1, int(n_organoids) + 1):
+        iface_path = run_dir / f"organoid_{organoid_idx}" / "out_darcy" / "interface_bc.json"
+        if not iface_path.exists():
+            continue
+        iface = load_json(iface_path)
+        specs = [
+            (
+                "arterial",
+                iface.get("branch_ids_inlet", []),
+                iface.get("p_inlet_nodes_raw", iface.get("p_inlet_nodes", [])),
+                iface.get("p_inlet_target", []),
+            ),
+            (
+                "venous",
+                iface.get("branch_ids_outlet", []),
+                iface.get("p_outlet_nodes_raw", iface.get("p_outlet_nodes", [])),
+                iface.get("p_outlet_target", []),
+            ),
+        ]
+        for side, branch_ids, p_darcy_values, p_0d_values in specs:
+            if not isinstance(branch_ids, list):
+                branch_ids = []
+            if not isinstance(p_darcy_values, list):
+                p_darcy_values = []
+            if not isinstance(p_0d_values, list):
+                p_0d_values = []
+            for j, p_raw in enumerate(p_darcy_values):
+                p_darcy = _safe_float(p_raw)
+                p_0d = _safe_float(p_0d_values[j]) if j < len(p_0d_values) else float("nan")
+                branch_id = int(branch_ids[j]) if j < len(branch_ids) else j
+                rows.append({
+                    "run": int(run_idx),
+                    "organoid": int(organoid_idx),
+                    "side": side,
+                    "branch_id": int(branch_id),
+                    "P_Darcy": float(p_darcy),
+                    "P_0D_target": float(p_0d),
+                    "terminal_pressure_error_rel": _pressure_continuity_rel_error(
+                        p_0d,
+                        p_darcy,
+                        floor=1.0,
+                    ),
+                })
+    path = run_dir / "post_darcy_terminal_convergence.csv"
+    with path.open("w", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    if not bool(write_cumulative):
+        return
+    cumulative_rows: list[dict[str, Any]] = []
+    for path in sorted(
+        run_dir.parent.glob("run_*/post_darcy_terminal_convergence.csv"),
+        key=lambda p: _run_index_from_path(p.parent),
+    ):
+        with path.open("r", newline="") as fp:
+            cumulative_rows.extend(csv.DictReader(fp))
+    if cumulative_rows:
+        cumulative_path = run_dir.parent / "post_darcy_terminal_convergence.csv"
+        with cumulative_path.open("w", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(cumulative_rows)
+
+
 def build_stubborn_terminal_response_map(
     coupled_root: Path,
     current_run: int,
@@ -1361,6 +1442,28 @@ def build_stubborn_terminal_response_map(
     return out
 
 
+def build_previous_terminal_error_map(
+    coupled_root: Path,
+    current_run: int,
+) -> dict[tuple[int, str, int], float]:
+    prev_run = int(current_run) - 1
+    if prev_run < 1:
+        return {}
+    prev_rows = read_terminal_resistance_summary(
+        coupled_root / f"run_{prev_run}" / "terminal_resistance_bc_summary.csv"
+    )
+    out: dict[tuple[int, str, int], float] = {}
+    for row in prev_rows:
+        try:
+            key = (int(row.get("organoid")), str(row.get("side")), int(row.get("branch_id")))
+        except Exception:
+            continue
+        err_percent = 100.0 * _terminal_pressure_error_rel_from_row(row)
+        if np.isfinite(err_percent):
+            out[key] = float(err_percent)
+    return out
+
+
 def _read_split_terminal_map(run_dir: Path, organoid_idx: int, side: str) -> dict[int, dict[str, float]]:
     path = run_dir / "split" / f"organoid_{organoid_idx}_{side}.csv"
     if not path.exists():
@@ -1403,6 +1506,10 @@ def score_resistance_0d_trial(
     flow_guard_reject: bool = False,
     flow_guard_drive_tol: float = 1.0,
     flow_guard_q_floor: float = 1.0e-20,
+    previous_terminal_errors: dict[tuple[int, str, int], float] | None = None,
+    outlier_guard_rel_tol: float = 0.10,
+    outlier_guard_abs_tol_percent: float = 2.0,
+    outlier_guard_weight: float = 100.0,
 ) -> dict[str, float]:
     split_cache: dict[tuple[int, str], dict[int, dict[str, float]]] = {}
 
@@ -1432,6 +1539,7 @@ def score_resistance_0d_trial(
     flow_guard_rel_changes: list[float] = []
     flow_guard_positive_increases: list[float] = []
     flow_guard_reductions: list[float] = []
+    outlier_guard_violations: list[float] = []
     pressure_count = 0
     resistance_count = 0
     for row in rows:
@@ -1469,6 +1577,17 @@ def score_resistance_0d_trial(
                 active_errors.append(float(err))
             if str(row.get("stubborn_terminal", "")).lower() == "true":
                 stubborn_errors.append(float(err))
+            prev_err = (previous_terminal_errors or {}).get(
+                (int(organoid), str(side_label), int(branch_id)),
+                float("nan"),
+            )
+            if np.isfinite(prev_err):
+                allowed = max(
+                    float(prev_err) * (1.0 + max(float(outlier_guard_rel_tol), 0.0)),
+                    float(prev_err) + max(float(outlier_guard_abs_tol_percent), 0.0),
+                )
+                if float(err) > allowed:
+                    outlier_guard_violations.append(float(err) - allowed)
         bc_type = str(row.get("bc_type", "")).upper()
         if bc_type == "PRESSURE":
             pressure_jump = 0.0
@@ -1551,6 +1670,8 @@ def score_resistance_0d_trial(
             "flow_guard_increase_p90_percent": float("inf"),
             "flow_guard_increase_max_percent": float("inf"),
             "flow_guard_reduction_median_percent": 0.0,
+            "outlier_guard_count": 0.0,
+            "outlier_guard_score": float("inf"),
             "stubborn_max_error_percent": float("inf"),
             "stubborn_p90_error_percent": float("inf"),
             "stubborn_error_score": float("inf"),
@@ -1697,6 +1818,16 @@ def score_resistance_0d_trial(
         + 0.25 * flow_guard_increase_p90
         + 0.05 * flow_guard_increase_max
     )
+    outlier_guard_arr = np.array(
+        outlier_guard_violations if outlier_guard_violations else [0.0],
+        dtype=float,
+    )
+    outlier_guard_count = int(len(outlier_guard_violations))
+    outlier_guard_score = (
+        float(np.nanmax(outlier_guard_arr))
+        + 0.25 * float(np.nanpercentile(outlier_guard_arr, 90.0))
+        + 0.05 * float(np.nanmedian(outlier_guard_arr))
+    )
     score = (
         max(float(pressure_weight), 0.0) * pressure_score
         + max(float(implied_alignment_weight), 0.0) * implied_interface_score
@@ -1704,6 +1835,7 @@ def score_resistance_0d_trial(
         + max(float(max_pressure_error_weight), 0.0) * outlier_error_score
         + max(float(stubborn_max_error_weight), 0.0) * stubborn_error_score
         + max(float(flow_guard_weight), 0.0) * flow_guard_score
+        + max(float(outlier_guard_weight), 0.0) * outlier_guard_score
     )
     if flow_guard_reject and flow_guard_increase_count > 0:
         # Keep the score finite so that if every candidate violates the guard,
@@ -1748,6 +1880,8 @@ def score_resistance_0d_trial(
         "flow_guard_increase_p90_percent": float(flow_guard_increase_p90),
         "flow_guard_increase_max_percent": float(flow_guard_increase_max),
         "flow_guard_reduction_median_percent": float(flow_guard_reduction_median),
+        "outlier_guard_count": float(outlier_guard_count),
+        "outlier_guard_score": float(outlier_guard_score),
         "pressure_bc_count": float(pressure_count),
         "resistance_bc_count": float(resistance_count),
     }
@@ -3617,6 +3751,12 @@ def parse_args() -> argparse.Namespace:
                     help="Weight for the max post-trial 0D pressure error among currently stubborn terminals in the inner candidate score.")
     ap.add_argument("--inner-flow-guard-reject", action=argparse.BooleanOptionalAction, default=False,
                     help="If enabled, reject any inner 0D candidate that increases guarded terminal |Q| beyond tolerance.")
+    ap.add_argument("--inner-outlier-guard-weight", type=float, default=100.0,
+                    help="Penalty weight for inner 0D candidates that worsen any terminal pressure error relative to the previous run.")
+    ap.add_argument("--inner-outlier-guard-rel-tol", type=float, default=0.10,
+                    help="Relative terminal-pressure-error increase tolerated by the outlier guard before penalty.")
+    ap.add_argument("--inner-outlier-guard-abs-tol-percent", type=float, default=2.0,
+                    help="Absolute terminal-pressure-error increase in percentage points tolerated by the outlier guard before penalty.")
 
     ap.add_argument("--channel-inlet-bc", default="INFLOW")
     ap.add_argument("--channel-inlet-Q0", type=float, default=6e-2)
@@ -3765,6 +3905,11 @@ def main() -> None:
         scaled_cfg=scaled_cfg,
         replicate_reference_outputs=(scaled_cfg is not None),
     )
+    write_post_darcy_terminal_convergence(
+        run0,
+        int(args.n_organoids),
+        write_cumulative=bool(args.terminal_pd_convergence_csv),
+    )
 
     # Coupling loop: ramp then iterate to convergence
     total_steps = int(args.n_ramp) + int(args.max_iter)
@@ -3796,6 +3941,7 @@ def main() -> None:
             history_window=int(args.stubborn_terminal_history_window),
             gain=float(args.stubborn_terminal_extra_gain),
         )
+        previous_terminal_error_map = build_previous_terminal_error_map(coupled_root, int(i))
         if stubborn_terminal_response_map:
             preview = sorted(stubborn_terminal_response_map.items())[:8]
             preview_text = ", ".join(
@@ -4166,6 +4312,10 @@ def main() -> None:
                     "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                     "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
                     "flow_guard_reject": bool(args.inner_flow_guard_reject),
+                    "outlier_guard_weight": float(args.inner_outlier_guard_weight),
+                    "outlier_guard_rel_tol": float(args.inner_outlier_guard_rel_tol),
+                    "outlier_guard_abs_tol_percent": float(args.inner_outlier_guard_abs_tol_percent),
+                    "previous_terminal_error_count": int(len(previous_terminal_error_map)),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -4222,6 +4372,10 @@ def main() -> None:
                             flow_guard_reject=bool(args.inner_flow_guard_reject),
                             flow_guard_drive_tol=float(args.terminal_pressure_alignment_jump_tol),
                             flow_guard_q_floor=float(args.terminal_resistance_q_floor),
+                            previous_terminal_errors=previous_terminal_error_map,
+                            outlier_guard_rel_tol=float(args.inner_outlier_guard_rel_tol),
+                            outlier_guard_abs_tol_percent=float(args.inner_outlier_guard_abs_tol_percent),
+                            outlier_guard_weight=float(args.inner_outlier_guard_weight),
                         )
                     else:
                         score = {
@@ -4259,6 +4413,8 @@ def main() -> None:
                             "flow_guard_increase_p90_percent": float("inf"),
                             "flow_guard_increase_max_percent": float("inf"),
                             "flow_guard_reduction_median_percent": 0.0,
+                            "outlier_guard_count": 0.0,
+                            "outlier_guard_score": float("inf"),
                             "pressure_bc_count": 0.0,
                             "resistance_bc_count": 0.0,
                         }
@@ -4285,6 +4441,7 @@ def main() -> None:
                         f"median={best[3]['median_error_percent']:.3e}%, "
                         f"p90={best[3]['p90_error_percent']:.3e}%, "
                         f"max={best[3].get('max_error_percent', float('nan')):.3e}%, "
+                        f"outlier_guard={best[3].get('outlier_guard_score', float('nan')):.3e}, "
                         f"jump_median={best[3].get('jump_median_percent', float('nan')):.3e}%, "
                         f"flow_guard={best[3].get('flow_guard_score', float('nan')):.3e}",
                         flush=True,
@@ -4466,6 +4623,11 @@ def main() -> None:
             update_1d_checkpoints(cur, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
             validate_darcy_geometry_inputs(cur, args.n_organoids, no_synthetic_vasculature=False)
         run_darcy_for_all(cur, args, scaled_cfg=scaled_cfg)
+        write_post_darcy_terminal_convergence(
+            cur,
+            int(args.n_organoids),
+            write_cumulative=bool(args.terminal_pd_convergence_csv),
+        )
         update_convergence_plots(args, coupled_root, i)
 
         # convergence after ramp
