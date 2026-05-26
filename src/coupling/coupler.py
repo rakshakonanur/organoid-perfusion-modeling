@@ -1155,7 +1155,11 @@ def _run_index_from_path(path: Path) -> int:
     return int(m.group(1)) if m else -1
 
 
-def write_terminal_resistance_summary(run_dir: Path, rows: list[dict[str, Any]]) -> None:
+def write_terminal_resistance_summary(
+    run_dir: Path,
+    rows: list[dict[str, Any]],
+    write_cumulative: bool = True,
+) -> None:
     fieldnames = [
         "run",
         "organoid",
@@ -1226,6 +1230,9 @@ def write_terminal_resistance_summary(run_dir: Path, rows: list[dict[str, Any]])
                     floor=1.0,
                 )
             writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+    if not bool(write_cumulative):
+        return
 
     cumulative_rows: list[dict[str, Any]] = []
     for path in sorted(run_dir.parent.glob("run_*/terminal_resistance_bc_summary.csv"), key=lambda p: _run_index_from_path(p.parent)):
@@ -2793,6 +2800,8 @@ def run_darcy_for_all(
                 "--perm-high", str(args.perm_high),
                 "--perm-transition-width", str(args.perm_transition_width),
             ])
+        if darcy_script.stem == "darcy_mixed":
+            darcy_args.extend(["--output-mode", str(args.darcy_output_mode)])
         if int(args.darcy_mpi_procs) > 1:
             cmd = build_mpi_command(
                 str(args.darcy_mpirun_cmd),
@@ -2804,7 +2813,14 @@ def run_darcy_for_all(
         run(cmd)
 
     if scaled_cfg is not None:
-        if replicate_reference_outputs:
+        if str(getattr(args, "darcy_output_mode", "full")) == "minimal":
+            replicate_reference_organoid_outputs(
+                run_dir,
+                int(args.n_organoids),
+                scaled_cfg,
+                copy_field_outputs=False,
+            )
+        elif replicate_reference_outputs:
             replicate_reference_organoid_outputs(run_dir, int(args.n_organoids), scaled_cfg)
         else:
             synthesize_scaled_screening_outputs(run_dir, int(args.n_organoids), scaled_cfg)
@@ -3368,8 +3384,26 @@ def parse_args() -> argparse.Namespace:
                     help="Absolute pressure tolerance for pressure handoff. Pd and Pd+RQ must both be within this distance of the Darcy interface pressure.")
     ap.add_argument("--inner-resistance-0d-search", action=argparse.BooleanOptionalAction, default=True,
                     help="Use cheap 0D trial solves to choose the best resistance/Pd/handoff update before each Darcy solve.")
+    ap.add_argument(
+        "--keep-inner-resistance-trials",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Keep bulky _inner_resistance_0d_trials candidate folders after scoring. "
+            "Default is false: keep only the candidate-grid/search-summary CSVs."
+        ),
+    )
     ap.add_argument("--inner-resistance-search-profile", choices=["compact", "full", "custom"], default="compact",
                     help="Candidate-grid profile. compact uses the historically useful subset; full restores the broad grid; custom uses the raw candidate-list arguments exactly.")
+    ap.add_argument(
+        "--terminal-pd-convergence-csv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Write cumulative terminal_pd_convergence.csv after each run. "
+            "Disable for lean long runs; per-run terminal_resistance_bc_summary.csv is still written."
+        ),
+    )
     ap.add_argument("--inner-resistance-decay-candidates", default="1.0,0.85,0.70",
                     help="Comma-separated continuity resistance decay candidates for the inner 0D search.")
     ap.add_argument("--inner-resistance-relaxation-multipliers", default="0.5,1.0,2.0,4.0",
@@ -3447,6 +3481,15 @@ def parse_args() -> argparse.Namespace:
                     help="MPI ranks for Darcy solves (1 = serial).")
     ap.add_argument("--darcy-mpirun-cmd", default="/opt/miniconda3/envs/fenicsx-env/bin/mpiexec.hydra",
                     help="MPI launcher command for Darcy when --darcy-mpi-procs > 1.")
+    ap.add_argument(
+        "--darcy-output-mode",
+        choices=["full", "fields", "minimal"],
+        default="full",
+        help=(
+            "Darcy output mode passed to darcy_mixed.py. Use 'minimal' during "
+            "coupling iterations to write only interface_bc.json and avoid large field files."
+        ),
+    )
     ap.add_argument("--scaled-screening-mode", choices=["auto", "on", "off"], default="auto",
                     help="When enabled, solve only the reference organoid with Darcy and synthesize the remaining repeated-geometry wells using 0D-based scaling. 'auto' enables this when trial_dir contains scaled_screening_summary.json.")
     ap.add_argument("--scaled-pressure-offset-anchor", choices=["arterial", "venous"], default="arterial",
@@ -4085,6 +4128,8 @@ def main() -> None:
                         flush=True,
                     )
                 write_inner_resistance_search_summary(cur, trial_summaries)
+                if not bool(args.keep_inner_resistance_trials):
+                    shutil.rmtree(trial_root, ignore_errors=True)
             else:
                 if bool(args.inner_resistance_0d_search) and first_resistance_iteration:
                     print(
@@ -4168,7 +4213,11 @@ def main() -> None:
                     )
                 deck, resistance_rows = _build_resistance_deck()
             save_json(combined_i, deck)
-            write_terminal_resistance_summary(cur, resistance_rows)
+            write_terminal_resistance_summary(
+                cur,
+                resistance_rows,
+                write_cumulative=bool(args.terminal_pd_convergence_csv),
+            )
             run_0d_split(args, combined_i, cur)
         elif bool(args.no_synthetic_vasculature) or inner_tries <= 1:
             deck = _build_candidate_deck(float(args.relaxation))

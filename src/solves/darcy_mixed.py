@@ -41,6 +41,7 @@ class PerfusionSolver(CGPerfusionSolver):
         perm_low: float = 1.0e-8,
         perm_high: float = 1.0e-6,
         perm_transition_width: float = 0.01,
+        output_mode: str = "full",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -48,6 +49,10 @@ class PerfusionSolver(CGPerfusionSolver):
         self.perm_low = float(perm_low)
         self.perm_high = float(perm_high)
         self.perm_transition_width = float(perm_transition_width)
+        output_mode = str(output_mode or "full").strip().lower()
+        if output_mode not in {"full", "fields", "minimal"}:
+            raise ValueError("--output-mode must be one of: full, fields, minimal")
+        self.output_mode = output_mode
 
     @staticmethod
     def _resolve_perm_region_stls(path_str: str):
@@ -233,6 +238,8 @@ class PerfusionSolver(CGPerfusionSolver):
         return float(numerator / denominator), mode
 
     def _write_permeability_outputs(self, out_dir: Path, Kfun, Kx_fun) -> None:
+        if self.output_mode != "full":
+            return
         try:
             Kfun.name = "K_perp"
             Kx_fun.name = "K_x"
@@ -1764,26 +1771,28 @@ class PerfusionSolver(CGPerfusionSolver):
         out_dir.mkdir(exist_ok=True)
         self._write_permeability_outputs(out_dir, Kfun, Kx_fun)
 
-        with io.XDMFFile(mesh.comm, out_dir / "p.xdmf", "w") as f:
-            f.write_mesh(mesh)
-            f.write_function(p_h)
+        if self.output_mode in {"full", "fields"}:
+            with io.XDMFFile(mesh.comm, out_dir / "p.xdmf", "w") as f:
+                f.write_mesh(mesh)
+                f.write_function(p_h)
 
-        # Project H(div) velocity to P1 vector space for robust IO/visualization.
-        P1vec = fem.functionspace(
-            mesh,
-            element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,)),
-        )
-        u_P1 = Projector(P1vec)(u_h)
+            # Project H(div) velocity to P1 vector space for robust IO/visualization.
+            P1vec = fem.functionspace(
+                mesh,
+                element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,)),
+            )
+            u_P1 = Projector(P1vec)(u_h)
 
-        with io.XDMFFile(mesh.comm, out_dir / "u.xdmf", "w") as f:
-            f.write_mesh(mesh)
-            f.write_function(u_P1)
+            with io.XDMFFile(mesh.comm, out_dir / "u.xdmf", "w") as f:
+                f.write_mesh(mesh)
+                f.write_function(u_P1)
 
-        vtkfile_u = VTKFile(MPI.COMM_WORLD, out_dir / "u.vtu", "w")
-        vtkfile_u.write_function(u_P1)
+            if self.output_mode == "full":
+                vtkfile_u = VTKFile(MPI.COMM_WORLD, out_dir / "u.vtu", "w")
+                vtkfile_u.write_function(u_P1)
 
-        vtkfile_p = VTKFile(MPI.COMM_WORLD, out_dir / "p.vtu", "w")
-        vtkfile_p.write_function(p_h)
+                vtkfile_p = VTKFile(MPI.COMM_WORLD, out_dir / "p.vtu", "w")
+                vtkfile_p.write_function(p_h)
 
         # For mixed solver, interface fluxes should come directly from u_h;
         # avoid pressure-gradient fallback path in inherited interface post-processing.
@@ -1883,6 +1892,15 @@ if __name__ == "__main__":
         help="Half-width of the smooth permeability transition shell around the STL boundary.",
     )
     ap.add_argument("--out-dir", default="", help="Optional output directory for out_darcy")
+    ap.add_argument(
+        "--output-mode",
+        choices=["full", "fields", "minimal"],
+        default="full",
+        help=(
+            "Darcy file output mode: full writes permeability, XDMF, and VTU fields; "
+            "fields writes only p.xdmf/u.xdmf; minimal writes only interface_bc.json."
+        ),
+    )
     args = ap.parse_args()
 
     if args.out_dir:
@@ -1929,5 +1947,6 @@ if __name__ == "__main__":
         outlet_output_csv=args.outlet_output_csv if args.outlet_output_csv else None,
         concave_inlet_pressure=args.concave_inlet_pressure,
         concave_outlet_pressure=args.concave_outlet_pressure,
+        output_mode=args.output_mode,
     )
     solver.setup()
