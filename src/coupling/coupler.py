@@ -2358,10 +2358,11 @@ def apply_organoid_resistance_from_json(
                     suppression_parent_pressure_target = float(p_parent)
                     if side == "inlet" and arterial_parent_margin > 0.0:
                         # A stubborn arterial inlet can plateau with the Darcy
-                        # pressure still above the parent pressure.  Nudging
-                        # the effective terminal target below the parent gives
-                        # that branch a controlled extra reduction in inflow.
-                        suppression_parent_pressure_target -= arterial_parent_margin
+                        # pressure still above the parent pressure.  Raising
+                        # the effective terminal target above the parent reduces
+                        # the parent-to-terminal pressure drop, so it suppresses
+                        # inflow instead of opening the inlet harder.
+                        suppression_parent_pressure_target += arterial_parent_margin
                     elif side == "outlet" and venous_parent_margin > 0.0:
                         # Some low-permeability venous outlets can plateau with
                         # P_implied ~= P_parent while the actual 0D terminal
@@ -3686,7 +3687,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--terminal-suppression-pressure-tol", type=float, default=5.0,
                     help="Absolute pressure deadband for parent-flow suppression in resistance mode.")
     ap.add_argument("--terminal-arterial-suppression-parent-margin", type=float, default=0.0,
-                    help="Extra pressure subtracted from the parent-pressure target for arterial terminals in parent-flow suppression. This makes the effective resistance pressure target P_parent - margin and can reduce a stuck high-pressure inlet. Default 0 preserves the original parent target.")
+                    help="Extra pressure added to the parent-pressure target for arterial terminals in parent-flow suppression. This makes the effective resistance pressure target P_parent + margin and can reduce a stuck high-pressure inlet by suppressing inflow. Default 0 preserves the original parent target.")
     ap.add_argument("--terminal-venous-suppression-parent-margin", type=float, default=0.0,
                     help="Extra pressure added to the parent-pressure target for venous terminals in parent-flow suppression. This makes the effective resistance pressure target P_parent + margin and can reduce a stuck draining outlet. Default 0 preserves the original parent target.")
     ap.add_argument("--terminal-continuity-pressure-tol", type=float, default=5.0,
