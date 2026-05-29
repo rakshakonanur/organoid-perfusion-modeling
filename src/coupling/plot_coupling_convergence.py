@@ -78,9 +78,11 @@ def _selected_inner_summary(run_dir: Path) -> dict[str, str]:
 
 def _terminal_stats(run_dir: Path) -> dict[str, Any]:
     rows = _read_csv(run_dir / "terminal_resistance_bc_summary.csv")
+    post_rows = _read_csv(run_dir / "post_darcy_terminal_convergence.csv")
     out: dict[str, Any] = {}
     for side in ("arterial", "venous", "all"):
         side_rows = [row for row in rows if side == "all" or row.get("side") == side]
+        side_post_rows = [row for row in post_rows if side == "all" or row.get("side") == side]
         pi_pd: list[float] = []
         pd_interface: list[float] = []
         pi_interface: list[float] = []
@@ -100,9 +102,6 @@ def _terminal_stats(run_dir: Path) -> dict[str, Any]:
                 pi_pd.append(p_0d - pd)
             if math.isfinite(pd) and math.isfinite(p_interface):
                 pd_interface.append(pd - p_interface)
-            if math.isfinite(p_0d) and math.isfinite(p_interface):
-                pi_interface.append(p_0d - p_interface)
-                pi_interface_rel.append(_rel_percent(p_0d, p_interface))
             if math.isfinite(q):
                 q_abs.append(abs(q))
             if math.isfinite(r) and r > 0.0:
@@ -110,8 +109,24 @@ def _terminal_stats(run_dir: Path) -> dict[str, Any]:
             pd_reasons[str(row.get("Pd_target_reason", ""))] += 1
             r_reasons[str(row.get("R_target_reason", ""))] += 1
             bc_types[str(row.get("bc_type", ""))] += 1
+
+        pressure_source = "missing_post_darcy_terminal_convergence"
+        if side_post_rows:
+            # The resistance summary is written before the Darcy solve and is
+            # useful for update diagnostics, but it is not the true solved
+            # convergence. Prefer the post-Darcy file for P_0D-vs-P_Darcy
+            # pressure-error metrics whenever it exists.
+            for row in side_post_rows:
+                p_interface = _safe_float(row.get("P_Darcy"))
+                p_0d = _safe_float(row.get("P_0D_target"))
+                if math.isfinite(p_0d) and math.isfinite(p_interface):
+                    pi_interface.append(p_0d - p_interface)
+                    pi_interface_rel.append(_rel_percent(p_0d, p_interface))
+            pressure_source = "post_darcy_terminal_convergence"
+
         out[side] = {
-            "n": len(side_rows),
+            "n": len(side_rows) if side_rows else len(side_post_rows),
+            "pressure_source": pressure_source,
             "pi_pd_mean_abs": _mean_abs(pi_pd),
             "pd_interface_mean_abs": _mean_abs(pd_interface),
             "pi_interface_mean_abs": _mean_abs(pi_interface),
@@ -179,10 +194,10 @@ def _plot_summary(records: list[dict[str, Any]], outdir: Path, title_suffix: str
     ax.legend(loc="best", ncols=2)
 
     ax = axes[1]
-    ax.plot(runs, _series(records, "median_error_percent"), marker="o", ms=3, label="median")
-    ax.plot(runs, _series(records, "p90_error_percent"), marker=".", label="p90")
-    ax.plot(runs, _series(records, "max_error_percent"), marker=".", label="max")
-    ax.set_ylabel("0D-Darcy pressure error (%)")
+    ax.plot(runs, _terminal_series(records, "all", "pi_interface_rel_median"), marker="o", ms=3, label="median")
+    ax.plot(runs, _terminal_series(records, "all", "pi_interface_rel_p90"), marker=".", label="p90")
+    ax.plot(runs, _terminal_series(records, "all", "pi_interface_rel_max"), marker=".", label="max")
+    ax.set_ylabel("post-Darcy pressure error (%)")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", ncols=3)
 
@@ -325,6 +340,7 @@ def _write_summary_csv(records: list[dict[str, Any]], outdir: Path) -> Path:
         "venous_implied_median_percent",
         "jump_score",
         "flow_guard_score",
+        "pressure_error_source",
         "median_error_percent",
         "p90_error_percent",
         "max_error_percent",
@@ -357,9 +373,10 @@ def _write_summary_csv(records: list[dict[str, Any]], outdir: Path) -> Path:
                 "venous_implied_median_percent": selected.get("venous_implied_median_percent", ""),
                 "jump_score": selected.get("jump_score", ""),
                 "flow_guard_score": selected.get("flow_guard_score", ""),
-                "median_error_percent": selected.get("median_error_percent", ""),
-                "p90_error_percent": selected.get("p90_error_percent", ""),
-                "max_error_percent": selected.get("max_error_percent", ""),
+                "pressure_error_source": terminal["all"].get("pressure_source", ""),
+                "median_error_percent": terminal["all"]["pi_interface_rel_median"],
+                "p90_error_percent": terminal["all"]["pi_interface_rel_p90"],
+                "max_error_percent": terminal["all"]["pi_interface_rel_max"],
                 "jump_median_percent": selected.get("jump_median_percent", ""),
                 "jump_p90_percent": selected.get("jump_p90_percent", ""),
                 "flow_guard_increase_fraction": selected.get("flow_guard_increase_fraction", ""),
