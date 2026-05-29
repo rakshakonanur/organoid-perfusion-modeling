@@ -1226,6 +1226,8 @@ def write_terminal_resistance_summary(
         "Pd_target",
         "Pd_target_reason",
         "suppression_pressure_tol",
+        "suppression_parent_margin",
+        "suppression_parent_pressure_target",
         "Pd_previous",
         "Pd_next",
         "Pd_floor",
@@ -1989,6 +1991,7 @@ def apply_organoid_resistance_from_json(
     venous_pd_floor: float | None = 0.0,
     pd_mode: str = "interface",
     suppression_pressure_tol: float = 5.0,
+    venous_suppression_parent_margin: float = 0.0,
     continuity_pressure_tol: float = 5.0,
     continuity_resistance_decay: float = 0.8,
     pressure_alignment_jump_tol: float | None = None,
@@ -2207,6 +2210,8 @@ def apply_organoid_resistance_from_json(
                         "Pd_target": float(pd_next),
                         "Pd_target_reason": "pressure_handoff_reverted_frozen",
                         "suppression_pressure_tol": float(max(float(suppression_pressure_tol), 0.0)),
+                        "suppression_parent_margin": 0.0,
+                        "suppression_parent_pressure_target": float("nan"),
                         "Pd_previous": float(old_pd),
                         "Pd_next": float(pd_next),
                         "Pd_floor": float(pd_floor),
@@ -2249,6 +2254,8 @@ def apply_organoid_resistance_from_json(
                     "Pd_target": float(old_pd),
                     "Pd_target_reason": "frozen_side",
                     "suppression_pressure_tol": float(max(float(suppression_pressure_tol), 0.0)),
+                    "suppression_parent_margin": 0.0,
+                    "suppression_parent_pressure_target": float("nan"),
                     "Pd_previous": float(old_pd),
                     "Pd_next": float(old_pd),
                     "Pd_floor": float("nan"),
@@ -2298,6 +2305,8 @@ def apply_organoid_resistance_from_json(
             else:
                 r_next = _relax_positive_value(r_raw, old_r, resistance_relaxation)
             pressure_tol = max(float(suppression_pressure_tol), 0.0)
+            venous_parent_margin = max(float(venous_suppression_parent_margin), 0.0)
+            suppression_parent_pressure_target = float("nan")
             pd_target_reason = "0d_calibration" if pd_mode == "0d" else "interface"
             if pd_mode == "0d":
                 pd_target = p_0d
@@ -2341,6 +2350,15 @@ def apply_organoid_resistance_from_json(
                         # increase suction, so target the parent instead.
                         flow_suppression_target = p_darcy < p_parent - pressure_tol
                 if flow_suppression_target:
+                    suppression_parent_pressure_target = float(p_parent)
+                    if side == "outlet" and venous_parent_margin > 0.0:
+                        # Some low-permeability venous outlets can plateau with
+                        # P_implied ~= P_parent while the actual 0D terminal
+                        # remains below the parent and continues draining.  A
+                        # positive margin adds controlled backpressure only for
+                        # suppressed venous terminals; default 0 preserves the
+                        # original parent target.
+                        suppression_parent_pressure_target += venous_parent_margin
                     if np.isfinite(r_next) and np.isfinite(q_for_r):
                         # For a RESISTANCE BC the 0D-facing terminal pressure is
                         # P = Pd + R Q.  Suppressing flow toward the parent
@@ -2348,9 +2366,9 @@ def apply_organoid_resistance_from_json(
                         # not Pd itself; otherwise a large remaining RQ jump can
                         # drive the effective terminal pressure far past the
                         # parent value.
-                        pd_target = p_parent - r_next * q_for_r
+                        pd_target = suppression_parent_pressure_target - r_next * q_for_r
                     else:
-                        pd_target = p_parent
+                        pd_target = suppression_parent_pressure_target
                     pd_target_reason = "parent_flow_suppression"
                 elif interface_increases_drive:
                     pd_target = old_pd
@@ -2509,6 +2527,10 @@ def apply_organoid_resistance_from_json(
                 "Pd_target": float(pd_target),
                 "Pd_target_reason": str(pd_target_reason),
                 "suppression_pressure_tol": float(pressure_tol),
+                "suppression_parent_margin": (
+                    float(venous_parent_margin) if side == "outlet" else 0.0
+                ),
+                "suppression_parent_pressure_target": float(suppression_parent_pressure_target),
                 "Pd_previous": float(old_pd),
                 "Pd_next": float(pd_next),
                 "Pd_floor": float(pd_floor),
@@ -3649,6 +3671,8 @@ def parse_args() -> argparse.Namespace:
                     help="Optional lower bound for venous resistance Pd. Omit to allow negative distal pressure.")
     ap.add_argument("--terminal-suppression-pressure-tol", type=float, default=5.0,
                     help="Absolute pressure deadband for parent-flow suppression in resistance mode.")
+    ap.add_argument("--terminal-venous-suppression-parent-margin", type=float, default=0.0,
+                    help="Extra pressure added to the parent-pressure target for venous terminals in parent-flow suppression. This makes the effective resistance pressure target P_parent + margin and can reduce a stuck draining outlet. Default 0 preserves the original parent target.")
     ap.add_argument("--terminal-continuity-pressure-tol", type=float, default=5.0,
                     help="When |Pd-P_interface| is below this tolerance, decay terminal resistance toward zero to recover pressure continuity.")
     ap.add_argument("--terminal-continuity-resistance-decay", type=float, default=1.0,
@@ -4035,6 +4059,9 @@ def main() -> None:
                         ),
                         pd_mode=("0d" if int(i) == int(args.resistance_calibration_run) + 1 else "interface"),
                         suppression_pressure_tol=float(args.terminal_suppression_pressure_tol),
+                        venous_suppression_parent_margin=float(
+                            args.terminal_venous_suppression_parent_margin
+                        ),
                         continuity_pressure_tol=float(args.terminal_continuity_pressure_tol),
                         continuity_resistance_decay=float(
                             args.terminal_continuity_resistance_decay
@@ -4257,6 +4284,10 @@ def main() -> None:
                     "flow_guard_enabled": bool(args.inner_resistance_flow_guard),
                     "flow_guard_tol": float(args.inner_flow_guard_tol),
                     "flow_guard_weight": float(args.inner_flow_guard_weight),
+                    "terminal_suppression_pressure_tol": float(args.terminal_suppression_pressure_tol),
+                    "terminal_venous_suppression_parent_margin": float(
+                        args.terminal_venous_suppression_parent_margin
+                    ),
                     "pressure_weight": float(args.inner_0d_pressure_weight),
                     "inverse_flow_pressure_fraction": float(args.inner_inverse_flow_pressure_fraction),
                     "inverse_flow_pressure_gamma": float(args.inner_inverse_flow_pressure_gamma),
