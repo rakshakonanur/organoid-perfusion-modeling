@@ -2233,6 +2233,7 @@ def apply_organoid_resistance_from_json(
     terminal_response_correction_error_gamma: float = 1.0,
     terminal_response_correction_effective_gain_cap: float = 3.0,
     terminal_response_correction_guarded_reasons: bool = False,
+    cleanup_min_pd_relaxation: float = 0.0,
     stubborn_terminal_response_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
     adaptive_terminal_state_map: dict[tuple[int, str, int], dict[str, Any]] | None = None,
     allow_missing_terminal_bcs: bool = False,
@@ -2765,11 +2766,18 @@ def apply_organoid_resistance_from_json(
                 pd_target = response_target - r_next * q_for_r
                 pd_target_reason = f"{pd_target_reason}_response_correction"
                 response_active = True
+            w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
+            cleanup_relaxation_reason = (
+                pd_target_reason in {"venous_pressure_cleanup", "venous_pressure_recovery"}
+                or pd_target_reason.startswith("venous_pressure_cleanup_")
+                or pd_target_reason.startswith("venous_pressure_recovery_")
+            )
+            cleanup_min_relax = min(max(float(cleanup_min_pd_relaxation), 0.0), 1.0)
+            if cleanup_relaxation_reason and cleanup_min_relax > 0.0:
+                w_pd = max(float(w_pd), cleanup_min_relax)
             if np.isfinite(old_pd):
-                w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
                 pd_next = (1.0 - w_pd) * old_pd + w_pd * pd_target
             else:
-                w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
                 pd_next = pd_target
             pd_floor_applied = False
             if side == "outlet" and venous_pd_floor is not None:
@@ -4132,6 +4140,8 @@ def parse_args() -> argparse.Namespace:
                     help="Maximum recent relative-error improvement for late-stage venous cleanup.")
     ap.add_argument("--adaptive-cleanup-improvement-fraction", type=float, default=0.10,
                     help="Also trigger late-stage cleanup when recent improvement is less than this fraction of the current terminal error.")
+    ap.add_argument("--adaptive-cleanup-min-pd-relaxation", type=float, default=0.5,
+                    help="Minimum effective Pd relaxation applied only to venous cleanup/recovery terminals.")
     ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
                     help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
     ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
@@ -4535,6 +4545,7 @@ def main() -> None:
                         terminal_response_correction_guarded_reasons=bool(
                             terminal_response_correction_guarded_reasons
                         ),
+                        cleanup_min_pd_relaxation=float(args.adaptive_cleanup_min_pd_relaxation),
                         stubborn_terminal_response_map=stubborn_terminal_response_map,
                         adaptive_terminal_state_map=adaptive_terminal_state_map,
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
@@ -4865,6 +4876,9 @@ def main() -> None:
                     "adaptive_cleanup_improvement_fraction": float(
                         args.adaptive_cleanup_improvement_fraction
                     ),
+                    "adaptive_cleanup_min_pd_relaxation": float(
+                        args.adaptive_cleanup_min_pd_relaxation
+                    ),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -5100,6 +5114,9 @@ def main() -> None:
                             "adaptive_cleanup_improvement": float(args.adaptive_cleanup_improvement),
                             "adaptive_cleanup_improvement_fraction": float(
                                 args.adaptive_cleanup_improvement_fraction
+                            ),
+                            "adaptive_cleanup_min_pd_relaxation": float(
+                                args.adaptive_cleanup_min_pd_relaxation
                             ),
                             "candidate_count": 0,
                         },
