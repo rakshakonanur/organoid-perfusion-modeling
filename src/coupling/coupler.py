@@ -2536,14 +2536,18 @@ def apply_organoid_resistance_from_json(
                         # below its parent pressure; chasing that lower pressure would
                         # increase suction, so target the parent instead.
                         flow_suppression_target = p_darcy < p_parent - pressure_tol
-                negative_venous_recovery = (
+                venous_recovery_reference = (
+                    min(p_0d, p_parent)
+                    if np.isfinite(p_0d) and np.isfinite(p_parent)
+                    else float("nan")
+                )
+                venous_recovery_exit_fraction = 0.90
+                venous_pressure_recovery = (
                     side == "outlet"
                     and np.isfinite(p_darcy)
-                    and np.isfinite(p_0d)
-                    and np.isfinite(p_parent)
-                    and p_darcy < 0.0
-                    and p_0d > 0.0
-                    and p_parent > 0.0
+                    and np.isfinite(venous_recovery_reference)
+                    and venous_recovery_reference > 0.0
+                    and p_darcy < venous_recovery_exit_fraction * venous_recovery_reference
                 )
                 if (
                     adaptive_force_suppression
@@ -2551,7 +2555,7 @@ def apply_organoid_resistance_from_json(
                     and np.isfinite(p_darcy)
                     and not pressure_alignment_active
                     and not continuity_decay_active
-                    and not negative_venous_recovery
+                    and not venous_pressure_recovery
                 ):
                     # Hysteresis should prevent chatter near the suppression
                     # boundary, not keep a terminal pinned to its parent after
@@ -2562,27 +2566,26 @@ def apply_organoid_resistance_from_json(
                     )
                     if suppression_still_compatible:
                         flow_suppression_target = True
-                if negative_venous_recovery:
-                    # A venous outlet with negative Darcy/interface pressure
-                    # but positive 0D/parent pressure is over-suppressed, not
-                    # merely high-flow.  The usual parent-flow suppression
+                if venous_pressure_recovery:
+                    # A venous outlet whose Darcy/interface pressure is far
+                    # below the positive 0D/parent target is over-suppressed,
+                    # not merely high-flow.  The usual parent-flow suppression
                     # targets the implied pressure, Pd + RQ = P_parent, which
-                    # can leave Pd negative when RQ is large.  In this recovery
-                    # regime, target Pd itself toward the parent to add actual
-                    # distal backpressure and let the Darcy outlet climb out of
-                    # the negative-pressure state.
+                    # can leave Pd too low when RQ is large.  In this recovery
+                    # regime, target Pd itself toward the parent until the
+                    # Darcy outlet is close to the positive terminal target.
                     suppression_parent_pressure_target = float(p_parent)
                     if venous_parent_margin > 0.0:
                         suppression_parent_pressure_target += venous_parent_margin
                     pd_target = suppression_parent_pressure_target
-                    pd_target_reason = "negative_venous_pressure_recovery"
+                    pd_target_reason = "venous_pressure_recovery"
                     adaptive_force_suppression = False
-                    adaptive_recommendation = "negative_venous_pressure_recovery"
-                    if "negative_venous_pressure_recovery" not in adaptive_state:
+                    adaptive_recommendation = "venous_pressure_recovery"
+                    if "venous_pressure_recovery" not in adaptive_state:
                         adaptive_state = (
-                            f"{adaptive_state}|negative_venous_pressure_recovery"
+                            f"{adaptive_state}|venous_pressure_recovery"
                             if adaptive_state
-                            else "negative_venous_pressure_recovery"
+                            else "venous_pressure_recovery"
                         )
                     flow_suppression_target = False
                 elif flow_suppression_target:
