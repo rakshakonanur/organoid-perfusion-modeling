@@ -42,6 +42,7 @@ class PerfusionSolver(CGPerfusionSolver):
         perm_high: float = 1.0e-6,
         perm_transition_width: float = 0.01,
         output_mode: str = "full",
+        diagnostics_mode: str = "minimal",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -53,6 +54,10 @@ class PerfusionSolver(CGPerfusionSolver):
         if output_mode not in {"full", "fields", "minimal"}:
             raise ValueError("--output-mode must be one of: full, fields, minimal")
         self.output_mode = output_mode
+        diagnostics_mode = str(diagnostics_mode or "minimal").strip().lower()
+        if diagnostics_mode not in {"minimal", "full"}:
+            raise ValueError("--diagnostics-mode must be one of: minimal, full")
+        self.diagnostics_mode = diagnostics_mode
 
     @staticmethod
     def _resolve_perm_region_stls(path_str: str):
@@ -1348,18 +1353,23 @@ class PerfusionSolver(CGPerfusionSolver):
             u_h, outlet_marks, coords_out, port_normals_out_raw
         )
 
-        f_h, _, _, _, _, cell_vol = self._compute_q_from_div_u(u_h)
-        dof_coords = f_h.function_space.tabulate_dof_coordinates()
-        tree = cKDTree(dof_coords)
+        if self.diagnostics_mode == "full":
+            f_h, _, _, _, _, cell_vol = self._compute_q_from_div_u(u_h)
+            dof_coords = f_h.function_space.tabulate_dof_coordinates()
+            tree = cKDTree(dof_coords)
 
-        def _sample_divu(pts):
-            if len(pts) == 0:
-                return np.zeros(0, dtype=float)
-            _, nn = tree.query(pts)
-            return np.asarray(f_h.x.array[np.asarray(nn, dtype=int)], dtype=float)
+            def _sample_divu(pts):
+                if len(pts) == 0:
+                    return np.zeros(0, dtype=float)
+                _, nn = tree.query(pts)
+                return np.asarray(f_h.x.array[np.asarray(nn, dtype=int)], dtype=float)
 
-        divu_inlet_raw = _sample_divu(coords_in)
-        divu_outlet_raw = _sample_divu(coords_out)
+            divu_inlet_raw = _sample_divu(coords_in)
+            divu_outlet_raw = _sample_divu(coords_out)
+        else:
+            cell_vol = float("nan")
+            divu_inlet_raw = np.zeros(len(coords_in), dtype=float)
+            divu_outlet_raw = np.zeros(len(coords_out), dtype=float)
 
         p_inlet_target_marker = self._safe_reindex(self.p_inlet, idx_in_marker)
         p_outlet_target_marker = self._safe_reindex(self.p_outlet, idx_out_marker)
@@ -1521,14 +1531,29 @@ class PerfusionSolver(CGPerfusionSolver):
             interface_bc["branch_ids_inlet"] = np.asarray(ids_in).tolist()
         if ids_out is not None:
             interface_bc["branch_ids_outlet"] = np.asarray(ids_out).tolist()
-        interface_bc.update(
-            self._build_terminal_reversal_diagnostics(
-                p_h,
-                interface_bc,
-                Q_art_leak,
-                Q_ven_leak,
+        if self.diagnostics_mode == "full":
+            interface_bc.update(
+                self._build_terminal_reversal_diagnostics(
+                    p_h,
+                    interface_bc,
+                    Q_art_leak,
+                    Q_ven_leak,
+                )
             )
-        )
+        else:
+            interface_bc.update({
+                "pressure_reversal_model": "disabled_fast_coupling",
+                "p_inlet_nodes_raw": p_inlet.tolist(),
+                "p_outlet_nodes_raw": p_outlet.tolist(),
+                "p_inlet_nodes_coupled": p_inlet.tolist(),
+                "p_outlet_nodes_coupled": p_outlet.tolist(),
+                "arterial_reversal_diagnostics": [],
+                "venous_reversal_diagnostics": [],
+                "arterial_reversal_clip_count": 0,
+                "venous_reversal_clip_count": 0,
+                "arterial_reversal_allowed_count": 0,
+                "venous_reversal_allowed_count": 0,
+            })
         return interface_bc
 
     def setup(self):
@@ -1764,7 +1789,11 @@ class PerfusionSolver(CGPerfusionSolver):
         Q_ven_leak = fem.assemble_scalar(fem.form(ufl.dot(u_h, n) * ds(int(self.venous_concave_marker))))
         Q_art_leak = mesh.comm.allreduce(Q_art_leak, op=MPI.SUM)
         Q_ven_leak = mesh.comm.allreduce(Q_ven_leak, op=MPI.SUM)
-        boundary_audit = self._audit_boundary_fluxes(u_h)
+        boundary_audit = (
+            self._audit_boundary_fluxes(u_h)
+            if self.diagnostics_mode == "full"
+            else {}
+        )
 
         # write outputs
         out_dir = current_dir / "out_darcy"
@@ -1806,8 +1835,16 @@ class PerfusionSolver(CGPerfusionSolver):
         interface_bc["p_inlet_reference"] = [float(p_ref)] * len(interface_bc.get("p_inlet_nodes", []))
         interface_bc["p_outlet_reference"] = [float(p_ref)] * len(interface_bc.get("p_outlet_nodes", []))
         interface_bc["permeability"] = dict(getattr(self, "permeability_metadata", {}))
-        interface_bc.update(boundary_audit)
-        interface_bc.update(self._build_mass_balance_report(interface_bc, boundary_audit, Q_tot))
+        if self.diagnostics_mode == "full":
+            interface_bc.update(boundary_audit)
+            interface_bc.update(self._build_mass_balance_report(interface_bc, boundary_audit, Q_tot))
+        else:
+            interface_bc["diagnostics_mode"] = "minimal"
+            interface_bc["mass_balance_direct_port_relative"] = 0.0
+            interface_bc["mass_balance_note"] = (
+                "Full boundary audit and mass-balance diagnostics disabled for fast coupling. "
+                "Run with --diagnostics-mode full to restore them."
+            )
 
         if mesh.comm.rank == 0:
             with open(out_dir / "interface_bc.json", "w") as fp:
@@ -1901,6 +1938,16 @@ if __name__ == "__main__":
             "fields writes only p.xdmf/u.xdmf; minimal writes only interface_bc.json."
         ),
     )
+    ap.add_argument(
+        "--diagnostics-mode",
+        choices=["minimal", "full"],
+        default="minimal",
+        help=(
+            "Diagnostic workload for interface_bc.json. minimal skips full boundary "
+            "audit printing, mass-balance audit, div(u) sampling, and reversal path "
+            "diagnostics; full restores the previous diagnostic computations."
+        ),
+    )
     args = ap.parse_args()
 
     if args.out_dir:
@@ -1948,5 +1995,6 @@ if __name__ == "__main__":
         concave_inlet_pressure=args.concave_inlet_pressure,
         concave_outlet_pressure=args.concave_outlet_pressure,
         output_mode=args.output_mode,
+        diagnostics_mode=args.diagnostics_mode,
     )
     solver.setup()
