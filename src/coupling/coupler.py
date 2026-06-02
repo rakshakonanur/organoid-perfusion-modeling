@@ -1470,6 +1470,10 @@ def build_adaptive_terminal_state_map(
     plateau_improvement_rel: float,
     release_rel_error: float,
     release_stable_runs: int,
+    late_stage_cleanup: bool = True,
+    cleanup_rel_error: float = 0.02,
+    cleanup_max_rel_error: float = 0.25,
+    cleanup_improvement_rel: float | None = None,
 ) -> dict[tuple[int, str, int], dict[str, Any]]:
     if not bool(enabled):
         return {}
@@ -1525,6 +1529,21 @@ def build_adaptive_terminal_state_map(
             and (not np.isfinite(improvement) or improvement <= float(plateau_improvement_rel))
         ):
             states.append("plateaued")
+        cleanup_improvement_limit = (
+            float(plateau_improvement_rel)
+            if cleanup_improvement_rel is None
+            else float(cleanup_improvement_rel)
+        )
+        late_cleanup = (
+            bool(late_stage_cleanup)
+            and key[1] == "venous"
+            and np.isfinite(last_err)
+            and last_err >= max(float(cleanup_rel_error), 0.0)
+            and last_err <= max(float(cleanup_max_rel_error), float(cleanup_rel_error))
+            and (not np.isfinite(improvement) or improvement <= cleanup_improvement_limit)
+        )
+        if late_cleanup:
+            states.append("late_stage_cleanup")
         if len(rows) >= 2:
             prev_err = _safe_float(rows[-2].get("_error_rel"))
             if np.isfinite(prev_err) and np.isfinite(last_err) and last_err > prev_err * 1.25:
@@ -1537,6 +1556,8 @@ def build_adaptive_terminal_state_map(
         recommendation = ""
         if "diverging" in states:
             recommendation = "rollback_or_reject_worsening_candidates"
+        elif "late_stage_cleanup" in states:
+            recommendation = "venous_pressure_cleanup"
         elif "plateaued" in states and key[1] == "venous":
             recommendation = "consider_increasing_venous_parent_margin"
         elif "plateaued" in states and key[1] == "arterial":
@@ -2549,6 +2570,14 @@ def apply_organoid_resistance_from_json(
                     and venous_recovery_reference > 0.0
                     and p_darcy < venous_recovery_exit_fraction * venous_recovery_reference
                 )
+                venous_pressure_cleanup = (
+                    side == "outlet"
+                    and "late_stage_cleanup" in adaptive_state
+                    and np.isfinite(p_darcy)
+                    and np.isfinite(venous_recovery_reference)
+                    and venous_recovery_reference > 0.0
+                    and p_darcy < venous_recovery_reference - pressure_tol
+                )
                 if (
                     adaptive_force_suppression
                     and np.isfinite(p_parent)
@@ -2556,6 +2585,7 @@ def apply_organoid_resistance_from_json(
                     and not pressure_alignment_active
                     and not continuity_decay_active
                     and not venous_pressure_recovery
+                    and not venous_pressure_cleanup
                 ):
                     # Hysteresis should prevent chatter near the suppression
                     # boundary, not keep a terminal pinned to its parent after
@@ -2566,7 +2596,7 @@ def apply_organoid_resistance_from_json(
                     )
                     if suppression_still_compatible:
                         flow_suppression_target = True
-                if venous_pressure_recovery:
+                if venous_pressure_recovery or venous_pressure_cleanup:
                     # A venous outlet whose Darcy/interface pressure is far
                     # below the positive 0D/parent target is over-suppressed,
                     # not merely high-flow.  The usual parent-flow suppression
@@ -2574,18 +2604,27 @@ def apply_organoid_resistance_from_json(
                     # can leave Pd too low when RQ is large.  In this recovery
                     # regime, target Pd itself toward the parent until the
                     # Darcy outlet is close to the positive terminal target.
+                    # The late-stage cleanup variant uses the same target, but
+                    # only after the adaptive classifier sees a moderate
+                    # plateaued residual so one outlet is not sacrificed to
+                    # protect already-converged terminals.
                     suppression_parent_pressure_target = float(p_parent)
                     if venous_parent_margin > 0.0:
                         suppression_parent_pressure_target += venous_parent_margin
                     pd_target = suppression_parent_pressure_target
-                    pd_target_reason = "venous_pressure_recovery"
+                    pd_target_reason = (
+                        "venous_pressure_cleanup"
+                        if venous_pressure_cleanup and not venous_pressure_recovery
+                        else "venous_pressure_recovery"
+                    )
                     adaptive_force_suppression = False
-                    adaptive_recommendation = "venous_pressure_recovery"
-                    if "venous_pressure_recovery" not in adaptive_state:
+                    adaptive_recommendation = str(pd_target_reason)
+                    adaptive_state_tag = str(pd_target_reason)
+                    if adaptive_state_tag not in adaptive_state:
                         adaptive_state = (
-                            f"{adaptive_state}|venous_pressure_recovery"
+                            f"{adaptive_state}|{adaptive_state_tag}"
                             if adaptive_state
-                            else "venous_pressure_recovery"
+                            else adaptive_state_tag
                         )
                     flow_suppression_target = False
                 elif flow_suppression_target:
@@ -4050,6 +4089,14 @@ def parse_args() -> argparse.Namespace:
                     help="Suppression hysteresis release threshold for terminal pressure error.")
     ap.add_argument("--adaptive-suppression-release-stable-runs", type=int, default=3,
                     help="Consecutive low-error runs required before releasing a previously suppressed terminal.")
+    ap.add_argument("--adaptive-late-stage-cleanup", action=argparse.BooleanOptionalAction, default=True,
+                    help="When adaptive coupling is enabled, target Pd itself for moderate plateaued venous residuals that are below the positive parent/0D reference.")
+    ap.add_argument("--adaptive-cleanup-rel-error", type=float, default=0.02,
+                    help="Minimum relative terminal-pressure error for late-stage venous cleanup.")
+    ap.add_argument("--adaptive-cleanup-max-rel-error", type=float, default=0.25,
+                    help="Maximum relative terminal-pressure error for late-stage venous cleanup; larger errors use the existing aggressive/recovery logic.")
+    ap.add_argument("--adaptive-cleanup-improvement", type=float, default=0.002,
+                    help="Maximum recent relative-error improvement for late-stage venous cleanup.")
     ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
                     help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
     ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
@@ -4268,6 +4315,10 @@ def main() -> None:
             plateau_improvement_rel=float(args.adaptive_plateau_improvement),
             release_rel_error=float(args.adaptive_suppression_release_rel_error),
             release_stable_runs=int(args.adaptive_suppression_release_stable_runs),
+            late_stage_cleanup=bool(args.adaptive_late_stage_cleanup),
+            cleanup_rel_error=float(args.adaptive_cleanup_rel_error),
+            cleanup_max_rel_error=float(args.adaptive_cleanup_max_rel_error),
+            cleanup_improvement_rel=float(args.adaptive_cleanup_improvement),
         )
         write_adaptive_terminal_state_summary(cur, adaptive_terminal_state_map)
         adaptive_forced = [
@@ -4767,6 +4818,10 @@ def main() -> None:
                     "adaptive_suppression_release_stable_runs": int(
                         args.adaptive_suppression_release_stable_runs
                     ),
+                    "adaptive_late_stage_cleanup": bool(args.adaptive_late_stage_cleanup),
+                    "adaptive_cleanup_rel_error": float(args.adaptive_cleanup_rel_error),
+                    "adaptive_cleanup_max_rel_error": float(args.adaptive_cleanup_max_rel_error),
+                    "adaptive_cleanup_improvement": float(args.adaptive_cleanup_improvement),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -4987,6 +5042,14 @@ def main() -> None:
                             "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                             "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
                             "flow_guard_reject": bool(args.inner_flow_guard_reject),
+                            "adaptive_coupling": bool(args.adaptive_coupling),
+                            "adaptive_history_window": int(args.adaptive_history_window),
+                            "adaptive_stubborn_rel_error": float(args.adaptive_stubborn_rel_error),
+                            "adaptive_plateau_improvement": float(args.adaptive_plateau_improvement),
+                            "adaptive_late_stage_cleanup": bool(args.adaptive_late_stage_cleanup),
+                            "adaptive_cleanup_rel_error": float(args.adaptive_cleanup_rel_error),
+                            "adaptive_cleanup_max_rel_error": float(args.adaptive_cleanup_max_rel_error),
+                            "adaptive_cleanup_improvement": float(args.adaptive_cleanup_improvement),
                             "candidate_count": 0,
                         },
                     )
