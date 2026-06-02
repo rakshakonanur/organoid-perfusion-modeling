@@ -1684,6 +1684,7 @@ def score_resistance_0d_trial(
     jump_weight: float = 0.05,
     max_pressure_error_weight: float = 2.0,
     stubborn_max_error_weight: float = 2.0,
+    cleanup_max_error_weight: float = 0.0,
     flow_guard_reject: bool = False,
     flow_guard_drive_tol: float = 1.0,
     flow_guard_q_floor: float = 1.0e-20,
@@ -1715,6 +1716,7 @@ def score_resistance_0d_trial(
     active_errors: list[float] = []
     errors_by_side: dict[str, list[float]] = {"arterial": [], "venous": []}
     stubborn_errors: list[float] = []
+    cleanup_errors: list[float] = []
     pressure_error_flow_samples: list[tuple[str, float, float]] = []
     proposed_implied_errors: list[float] = []
     proposed_implied_errors_by_side: dict[str, list[float]] = {"arterial": [], "venous": []}
@@ -1761,6 +1763,10 @@ def score_resistance_0d_trial(
                 active_errors.append(float(err))
             if str(row.get("stubborn_terminal", "")).lower() == "true":
                 stubborn_errors.append(float(err))
+            adaptive_state = str(row.get("adaptive_terminal_state", ""))
+            pd_reason = str(row.get("Pd_target_reason", ""))
+            if "late_stage_cleanup" in adaptive_state or "venous_pressure_cleanup" in pd_reason:
+                cleanup_errors.append(float(err))
             prev_err = (previous_terminal_errors or {}).get(
                 (int(organoid), str(side_label), int(branch_id)),
                 float("nan"),
@@ -1859,6 +1865,9 @@ def score_resistance_0d_trial(
             "stubborn_max_error_percent": float("inf"),
             "stubborn_p90_error_percent": float("inf"),
             "stubborn_error_score": float("inf"),
+            "cleanup_max_error_percent": float("inf"),
+            "cleanup_p90_error_percent": float("inf"),
+            "cleanup_error_score": float("inf"),
             "pressure_bc_count": float(pressure_count),
             "resistance_bc_count": float(resistance_count),
         }
@@ -1879,6 +1888,10 @@ def score_resistance_0d_trial(
     stubborn_max_err = float(np.nanmax(stubborn_arr))
     stubborn_p90_err = float(np.nanpercentile(stubborn_arr, 90.0))
     stubborn_error_score = stubborn_max_err + 0.25 * stubborn_p90_err
+    cleanup_arr = np.array(cleanup_errors if cleanup_errors else [0.0], dtype=float)
+    cleanup_max_err = float(np.nanmax(cleanup_arr))
+    cleanup_p90_err = float(np.nanpercentile(cleanup_arr, 90.0))
+    cleanup_error_score = cleanup_max_err + 0.5 * cleanup_p90_err
     active_median = float(np.nanmedian(active_arr))
     jump_median = float(np.nanmedian(jump_arr))
     jump_p90 = float(np.nanpercentile(jump_arr, 90.0))
@@ -2027,6 +2040,7 @@ def score_resistance_0d_trial(
         + max(float(jump_weight), 0.0) * jump_score
         + max(float(max_pressure_error_weight), 0.0) * outlier_error_score
         + max(float(stubborn_max_error_weight), 0.0) * stubborn_error_score
+        + max(float(cleanup_max_error_weight), 0.0) * cleanup_error_score
         + max(float(flow_guard_weight), 0.0) * flow_guard_score
         + max(float(outlier_guard_weight), 0.0) * outlier_guard_score
     )
@@ -2051,6 +2065,9 @@ def score_resistance_0d_trial(
         "stubborn_max_error_percent": float(stubborn_max_err),
         "stubborn_p90_error_percent": float(stubborn_p90_err),
         "stubborn_error_score": float(stubborn_error_score),
+        "cleanup_max_error_percent": float(cleanup_max_err),
+        "cleanup_p90_error_percent": float(cleanup_p90_err),
+        "cleanup_error_score": float(cleanup_error_score),
         "jump_median_percent": jump_median,
         "jump_p90_percent": jump_p90,
         "jump_max_percent": jump_max,
@@ -2130,6 +2147,9 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "stubborn_max_error_percent",
         "stubborn_p90_error_percent",
         "stubborn_error_score",
+        "cleanup_max_error_percent",
+        "cleanup_p90_error_percent",
+        "cleanup_error_score",
         "jump_median_percent",
         "active_jump_median_percent",
         "jump_p90_percent",
@@ -2707,6 +2727,8 @@ def apply_organoid_resistance_from_json(
                 response_allowed_reasons.update({
                     "drive_limited_hold",
                     "parent_flow_suppression",
+                    "venous_pressure_cleanup",
+                    "venous_pressure_recovery",
                 })
             if np.isfinite(response_error_rel) and response_error_rel > response_rel_error_tol:
                 severity_den = max(
@@ -4078,6 +4100,8 @@ def parse_args() -> argparse.Namespace:
                     help="Weight for the global worst-terminal post-trial 0D pressure error in the inner candidate score.")
     ap.add_argument("--inner-stubborn-max-error-weight", type=float, default=2.0,
                     help="Weight for the max post-trial 0D pressure error among currently stubborn terminals in the inner candidate score.")
+    ap.add_argument("--inner-cleanup-max-error-weight", type=float, default=8.0,
+                    help="Weight for the max post-trial 0D pressure error among late-stage cleanup terminals in the inner candidate score.")
     ap.add_argument("--inner-flow-guard-reject", action=argparse.BooleanOptionalAction, default=False,
                     help="If enabled, reject any inner 0D candidate that increases guarded terminal |Q| beyond tolerance.")
     ap.add_argument("--inner-outlier-guard-weight", type=float, default=100.0,
@@ -4815,6 +4839,7 @@ def main() -> None:
                     "jump_weight": float(args.inner_jump_weight),
                     "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                     "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
+                    "cleanup_max_error_weight": float(args.inner_cleanup_max_error_weight),
                     "flow_guard_reject": bool(args.inner_flow_guard_reject),
                     "outlier_guard_weight": float(args.inner_outlier_guard_weight),
                     "outlier_guard_rel_tol": float(args.inner_outlier_guard_rel_tol),
@@ -4898,6 +4923,7 @@ def main() -> None:
                             jump_weight=float(args.inner_jump_weight),
                             max_pressure_error_weight=float(args.inner_max_pressure_error_weight),
                             stubborn_max_error_weight=float(args.inner_stubborn_max_error_weight),
+                            cleanup_max_error_weight=float(args.inner_cleanup_max_error_weight),
                             flow_guard_reject=bool(args.inner_flow_guard_reject),
                             flow_guard_drive_tol=float(args.terminal_pressure_alignment_jump_tol),
                             flow_guard_q_floor=float(args.terminal_resistance_q_floor),
@@ -4934,6 +4960,9 @@ def main() -> None:
                             "stubborn_max_error_percent": float("inf"),
                             "stubborn_p90_error_percent": float("inf"),
                             "stubborn_error_score": float("inf"),
+                            "cleanup_max_error_percent": float("inf"),
+                            "cleanup_p90_error_percent": float("inf"),
+                            "cleanup_error_score": float("inf"),
                             "jump_median_percent": float("inf"),
                             "jump_p90_percent": float("inf"),
                             "jump_max_percent": float("inf"),
@@ -5059,6 +5088,7 @@ def main() -> None:
                             "jump_weight": float(args.inner_jump_weight),
                             "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                             "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
+                            "cleanup_max_error_weight": float(args.inner_cleanup_max_error_weight),
                             "flow_guard_reject": bool(args.inner_flow_guard_reject),
                             "adaptive_coupling": bool(args.adaptive_coupling),
                             "adaptive_history_window": int(args.adaptive_history_window),
