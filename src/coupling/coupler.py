@@ -1254,6 +1254,11 @@ def write_terminal_resistance_summary(
         "stubborn_terminal_gain",
         "stubborn_terminal_error_rel",
         "stubborn_terminal_recent_improvement_rel",
+        "adaptive_terminal_state",
+        "adaptive_force_suppression",
+        "adaptive_recommendation",
+        "adaptive_recent_improvement_rel",
+        "adaptive_recent_error_rel",
         "Q_0D",
         "Q_for_R",
         "Q_denominator",
@@ -1445,6 +1450,149 @@ def build_stubborn_terminal_response_map(
     return out
 
 
+def _terminal_key_from_row(row: dict[str, Any]) -> tuple[int, str, int] | None:
+    try:
+        return (int(row.get("organoid")), str(row.get("side")), int(row.get("branch_id")))
+    except Exception:
+        return None
+
+
+def _row_reason(row: dict[str, Any]) -> str:
+    return str(row.get("Pd_target_reason", "") or "")
+
+
+def build_adaptive_terminal_state_map(
+    coupled_root: Path,
+    current_run: int,
+    enabled: bool,
+    history_window: int,
+    stubborn_rel_error: float,
+    plateau_improvement_rel: float,
+    release_rel_error: float,
+    release_stable_runs: int,
+) -> dict[tuple[int, str, int], dict[str, Any]]:
+    if not bool(enabled):
+        return {}
+    prev_run = int(current_run) - 1
+    if prev_run < 1:
+        return {}
+
+    window = max(int(history_window), int(release_stable_runs), 1)
+    start_run = max(1, prev_run - window + 1)
+    history: dict[tuple[int, str, int], list[dict[str, Any]]] = {}
+    for run_idx in range(start_run, prev_run + 1):
+        rows = read_terminal_resistance_summary(
+            coupled_root / f"run_{run_idx}" / "terminal_resistance_bc_summary.csv"
+        )
+        for row in rows:
+            key = _terminal_key_from_row(row)
+            if key is None:
+                continue
+            item = dict(row)
+            item["_run"] = run_idx
+            item["_error_rel"] = _terminal_pressure_error_rel_from_row(row)
+            history.setdefault(key, []).append(item)
+
+    out: dict[tuple[int, str, int], dict[str, Any]] = {}
+    for key, rows in history.items():
+        rows = sorted(rows, key=lambda row: int(row.get("_run", 0)))
+        if not rows:
+            continue
+        last = rows[-1]
+        last_err = _safe_float(last.get("_error_rel"))
+        first_err = _safe_float(rows[0].get("_error_rel"))
+        improvement = first_err - last_err if np.isfinite(first_err) and np.isfinite(last_err) else float("nan")
+        last_reason = _row_reason(last)
+        was_suppressed = last_reason.startswith("parent_flow_suppression")
+        stable_count = max(int(release_stable_runs), 1)
+        stable_rows = rows[-stable_count:]
+        release_stable = (
+            len(stable_rows) >= stable_count
+            and all(
+                np.isfinite(_safe_float(row.get("_error_rel")))
+                and _safe_float(row.get("_error_rel")) <= float(release_rel_error)
+                for row in stable_rows
+            )
+        )
+        force_suppression = bool(was_suppressed and not release_stable)
+
+        states: list[str] = []
+        if np.isfinite(last_err) and last_err >= float(stubborn_rel_error):
+            states.append("stubborn")
+        if (
+            np.isfinite(last_err)
+            and last_err >= float(stubborn_rel_error)
+            and (not np.isfinite(improvement) or improvement <= float(plateau_improvement_rel))
+        ):
+            states.append("plateaued")
+        if len(rows) >= 2:
+            prev_err = _safe_float(rows[-2].get("_error_rel"))
+            if np.isfinite(prev_err) and np.isfinite(last_err) and last_err > prev_err * 1.25:
+                states.append("diverging")
+        if force_suppression:
+            states.append("suppression_hysteresis")
+        if not states:
+            states.append("normal")
+
+        recommendation = ""
+        if "diverging" in states:
+            recommendation = "rollback_or_reject_worsening_candidates"
+        elif "plateaued" in states and key[1] == "venous":
+            recommendation = "consider_increasing_venous_parent_margin"
+        elif "plateaued" in states and key[1] == "arterial":
+            recommendation = "consider_increasing_arterial_parent_margin"
+        elif force_suppression:
+            recommendation = "hold_parent_flow_suppression_until_stable"
+
+        out[key] = {
+            "state": "|".join(states),
+            "force_suppression": bool(force_suppression),
+            "recommendation": recommendation,
+            "recent_improvement_rel": float(improvement),
+            "recent_error_rel": float(last_err),
+            "last_reason": last_reason,
+        }
+    return out
+
+
+def write_adaptive_terminal_state_summary(
+    run_dir: Path,
+    state_map: dict[tuple[int, str, int], dict[str, Any]],
+) -> None:
+    if not state_map:
+        return
+    fieldnames = [
+        "run",
+        "organoid",
+        "side",
+        "branch_id",
+        "state",
+        "force_suppression",
+        "recommendation",
+        "recent_improvement_rel",
+        "recent_error_rel",
+        "last_reason",
+    ]
+    path = run_dir / "adaptive_terminal_state_summary.csv"
+    run_idx = _run_index_from_path(run_dir)
+    with path.open("w", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for key, value in sorted(state_map.items()):
+            writer.writerow({
+                "run": int(run_idx),
+                "organoid": int(key[0]),
+                "side": str(key[1]),
+                "branch_id": int(key[2]),
+                "state": str(value.get("state", "")),
+                "force_suppression": bool(value.get("force_suppression", False)),
+                "recommendation": str(value.get("recommendation", "")),
+                "recent_improvement_rel": float(_safe_float(value.get("recent_improvement_rel"))),
+                "recent_error_rel": float(_safe_float(value.get("recent_error_rel"))),
+                "last_reason": str(value.get("last_reason", "")),
+            })
+
+
 def build_previous_terminal_error_map(
     coupled_root: Path,
     current_run: int,
@@ -1513,6 +1661,9 @@ def score_resistance_0d_trial(
     outlier_guard_rel_tol: float = 0.10,
     outlier_guard_abs_tol_percent: float = 2.0,
     outlier_guard_weight: float = 100.0,
+    adaptive_candidate: bool = False,
+    adaptive_implied_bonus_weight: float = 0.0,
+    adaptive_pressure_score_weight: float = 1.0,
 ) -> dict[str, float]:
     split_cache: dict[tuple[int, str], dict[int, dict[str, float]]] = {}
 
@@ -1831,8 +1982,17 @@ def score_resistance_0d_trial(
         + 0.25 * float(np.nanpercentile(outlier_guard_arr, 90.0))
         + 0.05 * float(np.nanmedian(outlier_guard_arr))
     )
+    effective_pressure_weight = max(float(pressure_weight), 0.0)
+    adaptive_implied_bonus = 0.0
+    if bool(adaptive_candidate):
+        effective_pressure_weight *= min(max(float(adaptive_pressure_score_weight), 0.0), 1.0)
+        # Keep the historical column for run-to-run CSV compatibility, but do
+        # not subtract a "bonus" from the score. implied_interface_score is an
+        # error, so subtracting it rewards worse implied-pressure alignment and
+        # cancels the adaptive implied-alignment penalty.
+        adaptive_implied_bonus = 0.0
     score = (
-        max(float(pressure_weight), 0.0) * pressure_score
+        effective_pressure_weight * pressure_score
         + max(float(implied_alignment_weight), 0.0) * implied_interface_score
         + max(float(jump_weight), 0.0) * jump_score
         + max(float(max_pressure_error_weight), 0.0) * outlier_error_score
@@ -1847,6 +2007,11 @@ def score_resistance_0d_trial(
         score += 1.0e9
     return {
         "score": float(score),
+        "adaptive_candidate": bool(adaptive_candidate),
+        "adaptive_pressure_score_weight": float(
+            min(max(float(adaptive_pressure_score_weight), 0.0), 1.0)
+        ),
+        "adaptive_implied_bonus": float(adaptive_implied_bonus),
         "median_error_percent": median_err,
         "p90_error_percent": p90_err,
         "p95_error_percent": p95_err,
@@ -1905,6 +2070,10 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "pressure_handoff_rel_tol",
         "terminal_response_correction_gain",
         "terminal_response_correction_guarded_reasons",
+        "adaptive_candidate",
+        "candidate_implied_alignment_weight",
+        "adaptive_pressure_score_weight",
+        "adaptive_implied_bonus",
         "score",
         "pressure_score",
         "inverse_flow_pressure_score",
@@ -1970,6 +2139,8 @@ def write_inner_resistance_candidate_grid(
         "pressure_handoff_rel_tol",
         "terminal_response_correction_gain",
         "terminal_response_correction_guarded_reasons",
+        "adaptive_candidate",
+        "candidate_implied_alignment_weight",
     ]
     path = run_dir / "inner_resistance_0d_candidate_grid.csv"
     with path.open("w", newline="") as fp:
@@ -2013,6 +2184,7 @@ def apply_organoid_resistance_from_json(
     terminal_response_correction_effective_gain_cap: float = 3.0,
     terminal_response_correction_guarded_reasons: bool = False,
     stubborn_terminal_response_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
+    adaptive_terminal_state_map: dict[tuple[int, str, int], dict[str, Any]] | None = None,
     allow_missing_terminal_bcs: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -2125,6 +2297,16 @@ def apply_organoid_resistance_from_json(
             stubborn_recent_improvement_rel = _safe_float(
                 stubborn_info.get("recent_improvement_rel")
             )
+            adaptive_info = (
+                adaptive_terminal_state_map or {}
+            ).get((int(organoid_idx), side_label, int(branch_id)), {})
+            adaptive_state = str(adaptive_info.get("state", ""))
+            adaptive_force_suppression = bool(adaptive_info.get("force_suppression", False))
+            adaptive_recommendation = str(adaptive_info.get("recommendation", ""))
+            adaptive_recent_improvement_rel = _safe_float(
+                adaptive_info.get("recent_improvement_rel")
+            )
+            adaptive_recent_error_rel = _safe_float(adaptive_info.get("recent_error_rel"))
             if not np.isfinite(p_darcy):
                 continue
             if not np.isfinite(p_0d):
@@ -2354,6 +2536,22 @@ def apply_organoid_resistance_from_json(
                         # below its parent pressure; chasing that lower pressure would
                         # increase suction, so target the parent instead.
                         flow_suppression_target = p_darcy < p_parent - pressure_tol
+                if (
+                    adaptive_force_suppression
+                    and np.isfinite(p_parent)
+                    and np.isfinite(p_darcy)
+                    and not pressure_alignment_active
+                    and not continuity_decay_active
+                ):
+                    # Hysteresis should prevent chatter near the suppression
+                    # boundary, not keep a terminal pinned to its parent after
+                    # Darcy has crossed decisively to the supported side.
+                    suppression_still_compatible = (
+                        (side == "inlet" and p_darcy >= p_parent - pressure_tol)
+                        or (side == "outlet" and p_darcy <= p_parent + pressure_tol)
+                    )
+                    if suppression_still_compatible:
+                        flow_suppression_target = True
                 if flow_suppression_target:
                     suppression_parent_pressure_target = float(p_parent)
                     if side == "inlet" and arterial_parent_margin > 0.0:
@@ -2571,6 +2769,11 @@ def apply_organoid_resistance_from_json(
                 "stubborn_terminal_gain": float(stubborn_gain),
                 "stubborn_terminal_error_rel": float(stubborn_error_rel),
                 "stubborn_terminal_recent_improvement_rel": float(stubborn_recent_improvement_rel),
+                "adaptive_terminal_state": str(adaptive_state),
+                "adaptive_force_suppression": bool(adaptive_force_suppression),
+                "adaptive_recommendation": str(adaptive_recommendation),
+                "adaptive_recent_improvement_rel": float(adaptive_recent_improvement_rel),
+                "adaptive_recent_error_rel": float(adaptive_recent_error_rel),
                 "Q_0D": float(q_0d),
                 "Q_for_R": float(q_for_r),
                 "Q_denominator": float(q_den),
@@ -3119,6 +3322,7 @@ def run_darcy_for_all(
             ])
         if darcy_script.stem == "darcy_mixed":
             darcy_args.extend(["--output-mode", str(args.darcy_output_mode)])
+            darcy_args.extend(["--diagnostics-mode", str(args.darcy_diagnostics_mode)])
         if int(args.darcy_mpi_procs) > 1:
             cmd = build_mpi_command(
                 str(args.darcy_mpirun_cmd),
@@ -3641,12 +3845,12 @@ def convergence_for_organoid(
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Organoid coupling driver with geometry reuse + P1-LM Darcy.")
-    ap.add_argument("--template-combined", default="../prep/scaled-screening/Run3_10branches/combined.in")
-    ap.add_argument("--trial-dir", default="../prep/scaled-screening/Run3_10branches/",
+    ap.add_argument("--template-combined", default="../prep/scaled-screening/Run2_10branches/combined.in")
+    ap.add_argument("--trial-dir", default="../prep/scaled-screening/Run2_10branches/",
                     help="Optional trial directory used to copy branchingData_{0,1}.csv into each run. Not required in --no-synthetic-vasculature mode.")
-    ap.add_argument("--seed-run0", default="../prep/scaled-screening/Run3_10branches",
+    ap.add_argument("--seed-run0", default="../prep/scaled-screening/Run2_10branches",
                     help="Existing run_0 folder with 3D meshing/tagging to reuse.")
-    ap.add_argument("--coupled-root", default="../coupling-output",)
+    ap.add_argument("--coupled-root", default="../coupling-output-run-2-very-low",)
 
     ap.add_argument("--n-organoids", type=int, default=4)
     ap.add_argument("--n-ramp", type=int, default=1)
@@ -3798,6 +4002,30 @@ def parse_args() -> argparse.Namespace:
                     help="Relative terminal-pressure-error increase tolerated by the outlier guard before penalty.")
     ap.add_argument("--inner-outlier-guard-abs-tol-percent", type=float, default=2.0,
                     help="Absolute terminal-pressure-error increase in percentage points tolerated by the outlier guard before penalty.")
+    ap.add_argument("--adaptive-coupling", action=argparse.BooleanOptionalAction, default=False,
+                    help="Enable conservative adaptive coupling diagnostics and suppression hysteresis.")
+    ap.add_argument("--adaptive-history-window", type=int, default=5,
+                    help="Number of previous terminal-summary runs used to classify terminal states.")
+    ap.add_argument("--adaptive-stubborn-rel-error", type=float, default=0.025,
+                    help="Relative terminal pressure error used to mark a terminal as stubborn/plateaued.")
+    ap.add_argument("--adaptive-plateau-improvement", type=float, default=0.002,
+                    help="Minimum recent relative-error improvement before a stubborn terminal is considered plateaued.")
+    ap.add_argument("--adaptive-suppression-release-rel-error", type=float, default=0.02,
+                    help="Suppression hysteresis release threshold for terminal pressure error.")
+    ap.add_argument("--adaptive-suppression-release-stable-runs", type=int, default=3,
+                    help="Consecutive low-error runs required before releasing a previously suppressed terminal.")
+    ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
+                    help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
+    ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
+                    help="Activate adaptive aggressive Pd candidates when any venous terminal has recent relative pressure error above this value. Default 1.0 = 100%%.")
+    ap.add_argument("--adaptive-extra-pd-relaxation-candidates", default="0.7,1.0",
+                    help="Extra Pd relaxation candidates appended when adaptive plateau or large-error venous triggers are present.")
+    ap.add_argument("--adaptive-implied-alignment-weight", type=float, default=25.0,
+                    help="Candidate-specific implied-pressure alignment weight used for adaptive plateau candidates.")
+    ap.add_argument("--adaptive-implied-bonus-weight", type=float, default=15.0,
+                    help="Deprecated no-op kept for CLI compatibility. Adaptive implied alignment is controlled by --adaptive-implied-alignment-weight.")
+    ap.add_argument("--adaptive-pressure-score-weight", type=float, default=0.75,
+                    help="Multiplier on immediate 0D pressure score for adaptive candidates; lets slow P_0D response be guided by improved P_implied.")
 
     ap.add_argument("--channel-inlet-bc", default="INFLOW")
     ap.add_argument("--channel-inlet-Q0", type=float, default=6e-2)
@@ -3822,6 +4050,16 @@ def parse_args() -> argparse.Namespace:
             "coupling iterations to write only interface_bc.json and avoid large field files."
         ),
     )
+    ap.add_argument(
+        "--darcy-diagnostics-mode",
+        choices=["minimal", "full"],
+        default="minimal",
+        help=(
+            "Darcy diagnostics mode passed to darcy_mixed.py. Use 'minimal' for "
+            "fast coupling; use 'full' to restore boundary flux audits, mass-balance "
+            "diagnostics, div(u) sampling, and reversal path diagnostics."
+        ),
+    )
     ap.add_argument("--scaled-screening-mode", choices=["auto", "on", "off"], default="auto",
                     help="When enabled, solve only the reference organoid with Darcy and synthesize the remaining repeated-geometry wells using 0D-based scaling. 'auto' enables this when trial_dir contains scaled_screening_summary.json.")
     ap.add_argument("--scaled-pressure-offset-anchor", choices=["arterial", "venous"], default="arterial",
@@ -3837,8 +4075,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375])
     ap.add_argument("--perm-region-root", default=str(Path(__file__).resolve().parents[2] / "files" / "stl" / "organoid-growth-domains" / "sphere"),
                     help="Directory, STL path, or pattern for organoid permeability regions. If a directory is given, organoid-k uses organoid-k.stl. You can also use a path containing 'X' as the organoid index placeholder.")
-    ap.add_argument("--perm-low", type=float, default=5.0e-11)
-    ap.add_argument("--perm-high", type=float, default=1.0e-8)
+    ap.add_argument("--perm-low", type=float, default=1.0e-13)
+    ap.add_argument("--perm-high", type=float, default=2.0e-11)
+    
+    # ap.add_argument("--perm-low", type=float, default=5.0e-11)
+    # ap.add_argument("--perm-high", type=float, default=1.0e-8)
 
     # ap.add_argument("--perm-low", type=float, default=1.0e-9)
     # ap.add_argument("--perm-high", type=float, default=2.0e-7)
@@ -3892,65 +4133,65 @@ def main() -> None:
         )
 
     coupled_root = Path(args.coupled_root).expanduser().resolve()
-    # coupled_root.mkdir(parents=True, exist_ok=True)
+    coupled_root.mkdir(parents=True, exist_ok=True)
 
-    # # Build run_0
-    # run0 = coupled_root / "run_0"
-    # if run0.exists() and args.overwrite:
-    #     shutil.rmtree(run0)
-    # run0.mkdir(parents=True, exist_ok=True)
-    # combined0 = run0 / "combined.in"
-    # shutil.copy2(template, combined0)
-    # deck0 = load_json(combined0)
-    # apply_channel_ramp(
-    #     deck0,
-    #     args.channel_inlet_bc,
-    #     Q0=float(args.channel_inlet_Q0),
-    #     scale=0.0,
-    #     outlet_name=args.channel_outlet_bc if args.use_outlet_pressure_ramp else None,
-    #     outlet_P0=float(args.channel_outlet_P0),
-    # )
-    # zero_all_interface_bcs(deck0, args.n_organoids)
-    # save_json(combined0, deck0)
-    # ensure_organoid_dirs(run0, args.n_organoids)
-    # sync_plot_templates(seed_run0, run0, args.n_organoids)
+    # Build run_0
+    run0 = coupled_root / "run_0"
+    if run0.exists() and args.overwrite:
+        shutil.rmtree(run0)
+    run0.mkdir(parents=True, exist_ok=True)
+    combined0 = run0 / "combined.in"
+    shutil.copy2(template, combined0)
+    deck0 = load_json(combined0)
+    apply_channel_ramp(
+        deck0,
+        args.channel_inlet_bc,
+        Q0=float(args.channel_inlet_Q0),
+        scale=0.0,
+        outlet_name=args.channel_outlet_bc if args.use_outlet_pressure_ramp else None,
+        outlet_P0=float(args.channel_outlet_P0),
+    )
+    zero_all_interface_bcs(deck0, args.n_organoids)
+    save_json(combined0, deck0)
+    ensure_organoid_dirs(run0, args.n_organoids)
+    sync_plot_templates(seed_run0, run0, args.n_organoids)
 
-    # run([
-    #     sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
-    #     "--exe", args.svzerodsolver,
-    #     "--input", str(combined0),
-    #     "--outdir", str(run0),
-    #     "--output", "output.csv",
-    #     "--organoid-root", str(run0),
-    #     "--no-plot",
-    # ] + (["--debug"] if args.debug else []))
+    run([
+        sys.executable, str(Path(args.run_and_split).expanduser().resolve()),
+        "--exe", args.svzerodsolver,
+        "--input", str(combined0),
+        "--outdir", str(run0),
+        "--output", "output.csv",
+        "--organoid-root", str(run0),
+        "--no-plot",
+    ] + (["--debug"] if args.debug else []))
 
-    # copy_seed_geometry(
-    #     seed_run0,
-    #     run0,
-    #     args.n_organoids,
-    #     no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
-    # )
-    # copy_branching_files(
-    #     trial_dir,
-    #     run0,
-    #     args.n_organoids,
-    #     allow_missing=bool(args.no_synthetic_vasculature),
-    # )
-    # if not args.no_synthetic_vasculature:
-    #     update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
-    #     validate_darcy_geometry_inputs(run0, args.n_organoids, no_synthetic_vasculature=False)
-    # run_darcy_for_all(
-    #     run0,
-    #     args,
-    #     scaled_cfg=scaled_cfg,
-    #     replicate_reference_outputs=(scaled_cfg is not None),
-    # )
-    # write_post_darcy_terminal_convergence(
-    #     run0,
-    #     int(args.n_organoids),
-    #     write_cumulative=bool(args.terminal_pd_convergence_csv),
-    # )
+    copy_seed_geometry(
+        seed_run0,
+        run0,
+        args.n_organoids,
+        no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
+    )
+    copy_branching_files(
+        trial_dir,
+        run0,
+        args.n_organoids,
+        allow_missing=bool(args.no_synthetic_vasculature),
+    )
+    if not args.no_synthetic_vasculature:
+        update_1d_checkpoints(run0, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
+        validate_darcy_geometry_inputs(run0, args.n_organoids, no_synthetic_vasculature=False)
+    run_darcy_for_all(
+        run0,
+        args,
+        scaled_cfg=scaled_cfg,
+        replicate_reference_outputs=(scaled_cfg is not None),
+    )
+    write_post_darcy_terminal_convergence(
+        run0,
+        int(args.n_organoids),
+        write_cumulative=bool(args.terminal_pd_convergence_csv),
+    )
 
     # Coupling loop: ramp then iterate to convergence
     total_steps = int(args.n_ramp) + int(args.max_iter)
@@ -3982,6 +4223,43 @@ def main() -> None:
             history_window=int(args.stubborn_terminal_history_window),
             gain=float(args.stubborn_terminal_extra_gain),
         )
+        adaptive_terminal_state_map = build_adaptive_terminal_state_map(
+            coupled_root,
+            int(i),
+            enabled=bool(args.adaptive_coupling),
+            history_window=int(args.adaptive_history_window),
+            stubborn_rel_error=float(args.adaptive_stubborn_rel_error),
+            plateau_improvement_rel=float(args.adaptive_plateau_improvement),
+            release_rel_error=float(args.adaptive_suppression_release_rel_error),
+            release_stable_runs=int(args.adaptive_suppression_release_stable_runs),
+        )
+        write_adaptive_terminal_state_summary(cur, adaptive_terminal_state_map)
+        adaptive_forced = [
+            (key, value)
+            for key, value in adaptive_terminal_state_map.items()
+            if bool(value.get("force_suppression", False))
+        ]
+        adaptive_recommended = [
+            (key, value)
+            for key, value in adaptive_terminal_state_map.items()
+            if str(value.get("recommendation", ""))
+        ]
+        if adaptive_terminal_state_map:
+            print(
+                "[adaptive-coupling] classified "
+                f"{len(adaptive_terminal_state_map)} terminals; "
+                f"forcing suppression for {len(adaptive_forced)}; "
+                f"recommendations for {len(adaptive_recommended)}.",
+                flush=True,
+            )
+            if adaptive_recommended:
+                preview = sorted(adaptive_recommended)[:8]
+                preview_text = ", ".join(
+                    f"org{key[0]}:{key[1]}:{key[2]} "
+                    f"{value.get('state')} -> {value.get('recommendation')}"
+                    for key, value in preview
+                )
+                print(f"[adaptive-coupling] {preview_text}", flush=True)
         previous_terminal_error_map = build_previous_terminal_error_map(coupled_root, int(i))
         if stubborn_terminal_response_map:
             preview = sorted(stubborn_terminal_response_map.items())[:8]
@@ -4135,6 +4413,7 @@ def main() -> None:
                             terminal_response_correction_guarded_reasons
                         ),
                         stubborn_terminal_response_map=stubborn_terminal_response_map,
+                        adaptive_terminal_state_map=adaptive_terminal_state_map,
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
                     )
                 )
@@ -4175,6 +4454,34 @@ def main() -> None:
                     args.inner_terminal_response_correction_gains,
                     [0.0],
                 )
+                adaptive_plateau_active = bool(
+                    args.adaptive_coupling
+                    and args.adaptive_candidate_actions
+                    and any(
+                        "plateaued" in str(value.get("state", ""))
+                        for value in adaptive_terminal_state_map.values()
+                    )
+                )
+                adaptive_large_venous_error_active = bool(
+                    args.adaptive_coupling
+                    and args.adaptive_candidate_actions
+                    and any(
+                        key[1] == "venous"
+                        and np.isfinite(_safe_float(value.get("recent_error_rel")))
+                        and _safe_float(value.get("recent_error_rel"))
+                        >= max(float(args.adaptive_aggressive_venous_rel_error), 0.0)
+                        for key, value in adaptive_terminal_state_map.items()
+                    )
+                )
+                adaptive_candidate_active = bool(
+                    adaptive_plateau_active or adaptive_large_venous_error_active
+                )
+                adaptive_pd_relaxation_candidates: list[float] = []
+                if adaptive_candidate_active:
+                    adaptive_pd_relaxation_candidates = _parse_float_list(
+                        args.adaptive_extra_pd_relaxation_candidates,
+                        [0.7, 1.0],
+                    )
                 search_profile = str(args.inner_resistance_search_profile)
                 if search_profile == "compact":
                     # Empirically, both high- and low-permeability histories
@@ -4184,6 +4491,10 @@ def main() -> None:
                     relaxation_multipliers = [4.0]
                     if 0.9 not in pd_relaxation_candidates:
                         pd_relaxation_candidates.append(0.9)
+                    if adaptive_candidate_active:
+                        for value in adaptive_pd_relaxation_candidates:
+                            if value not in pd_relaxation_candidates:
+                                pd_relaxation_candidates.append(value)
                     response_correction_gains = sorted(
                         {0.0, *[float(v) for v in response_correction_gains if float(v) > 0.0]}
                     )
@@ -4211,41 +4522,58 @@ def main() -> None:
                     else [float(args.terminal_pressure_handoff_rel_tol)]
                 )
                 candidate_specs: list[dict[str, Any]] = []
-                seen_specs: set[tuple[float, float, float, float, bool, float, float, bool]] = set()
+                seen_specs: set[tuple[float, float, float, float, bool, float, float, bool, bool, float]] = set()
+                implied_weight_candidates = [float(args.inner_implied_alignment_weight)]
+                if adaptive_candidate_active:
+                    implied_weight_candidates.append(
+                        max(
+                            float(args.inner_implied_alignment_weight),
+                            float(args.adaptive_implied_alignment_weight),
+                        )
+                    )
                 for relax_mult in relaxation_multipliers:
                     for pd_candidate in pd_relaxation_candidates:
                         for decay_candidate in decay_candidates:
                             for handoff_tol in handoff_tol_candidates:
                                 for response_gain in response_correction_gains:
-                                    spec = {
-                                        "resistance_relaxation_multiplier": float(relax_mult),
-                                        "resistance_relaxation": min(
-                                            max(float(args.terminal_resistance_relaxation) * float(relax_mult), 0.0),
-                                            1.0,
-                                        ),
-                                        "pd_relaxation": min(max(float(pd_candidate), 0.0), 1.0),
-                                        "continuity_resistance_decay": min(max(float(decay_candidate), 0.0), 1.0),
-                                        "pressure_handoff_enabled": bool(pressure_handoff_active_for_search),
-                                        "pressure_handoff_rel_tol": max(float(handoff_tol), 0.0),
-                                        "terminal_response_correction_gain": max(float(response_gain), 0.0),
-                                        "terminal_response_correction_guarded_reasons": bool(
-                                            args.inner_response_correction_guarded_reasons
-                                            and float(response_gain) > 0.0
-                                        ),
-                                    }
-                                    key = (
-                                        round(float(spec["resistance_relaxation_multiplier"]), 12),
-                                        round(float(spec["resistance_relaxation"]), 12),
-                                        round(float(spec["pd_relaxation"]), 12),
-                                        round(float(spec["continuity_resistance_decay"]), 12),
-                                        bool(spec["pressure_handoff_enabled"]),
-                                        round(float(spec["pressure_handoff_rel_tol"]), 12),
-                                        round(float(spec["terminal_response_correction_gain"]), 12),
-                                        bool(spec["terminal_response_correction_guarded_reasons"]),
-                                    )
-                                    if key not in seen_specs:
-                                        candidate_specs.append(spec)
-                                        seen_specs.add(key)
+                                    for implied_weight in implied_weight_candidates:
+                                        adaptive_candidate = (
+                                            adaptive_candidate_active
+                                            and float(implied_weight) > float(args.inner_implied_alignment_weight)
+                                        )
+                                        spec = {
+                                            "resistance_relaxation_multiplier": float(relax_mult),
+                                            "resistance_relaxation": min(
+                                                max(float(args.terminal_resistance_relaxation) * float(relax_mult), 0.0),
+                                                1.0,
+                                            ),
+                                            "pd_relaxation": min(max(float(pd_candidate), 0.0), 1.0),
+                                            "continuity_resistance_decay": min(max(float(decay_candidate), 0.0), 1.0),
+                                            "pressure_handoff_enabled": bool(pressure_handoff_active_for_search),
+                                            "pressure_handoff_rel_tol": max(float(handoff_tol), 0.0),
+                                            "terminal_response_correction_gain": max(float(response_gain), 0.0),
+                                            "terminal_response_correction_guarded_reasons": bool(
+                                                args.inner_response_correction_guarded_reasons
+                                                and float(response_gain) > 0.0
+                                            ),
+                                            "adaptive_candidate": bool(adaptive_candidate),
+                                            "candidate_implied_alignment_weight": max(float(implied_weight), 0.0),
+                                        }
+                                        key = (
+                                            round(float(spec["resistance_relaxation_multiplier"]), 12),
+                                            round(float(spec["resistance_relaxation"]), 12),
+                                            round(float(spec["pd_relaxation"]), 12),
+                                            round(float(spec["continuity_resistance_decay"]), 12),
+                                            bool(spec["pressure_handoff_enabled"]),
+                                            round(float(spec["pressure_handoff_rel_tol"]), 12),
+                                            round(float(spec["terminal_response_correction_gain"]), 12),
+                                            bool(spec["terminal_response_correction_guarded_reasons"]),
+                                            bool(spec["adaptive_candidate"]),
+                                            round(float(spec["candidate_implied_alignment_weight"]), 12),
+                                        )
+                                        if key not in seen_specs:
+                                            candidate_specs.append(spec)
+                                            seen_specs.add(key)
                 if pressure_handoff_active_for_search:
                     no_handoff_specs: list[dict[str, Any]] = []
                     for relax_mult in relaxation_multipliers:
@@ -4266,6 +4594,8 @@ def main() -> None:
                                         args.inner_response_correction_guarded_reasons
                                         and float(response_gain) > 0.0
                                     ),
+                                    "adaptive_candidate": False,
+                                    "candidate_implied_alignment_weight": float(args.inner_implied_alignment_weight),
                                 }
                                 key = (
                                     round(float(no_handoff["resistance_relaxation_multiplier"]), 12),
@@ -4276,6 +4606,8 @@ def main() -> None:
                                     round(float(no_handoff["pressure_handoff_rel_tol"]), 12),
                                     round(float(no_handoff["terminal_response_correction_gain"]), 12),
                                     bool(no_handoff["terminal_response_correction_guarded_reasons"]),
+                                    bool(no_handoff["adaptive_candidate"]),
+                                    round(float(no_handoff["candidate_implied_alignment_weight"]), 12),
                                 )
                                 if key not in seen_specs:
                                     no_handoff_specs.append(no_handoff)
@@ -4296,6 +4628,22 @@ def main() -> None:
                     ),
                     "raw_inner_resistance_decay_candidates": str(args.inner_resistance_decay_candidates),
                     "raw_inner_pressure_handoff_tol_candidates": str(args.inner_pressure_handoff_tol_candidates),
+                    "adaptive_plateau_active": bool(adaptive_plateau_active),
+                    "adaptive_large_venous_error_active": bool(adaptive_large_venous_error_active),
+                    "adaptive_candidate_active": bool(adaptive_candidate_active),
+                    "adaptive_candidate_actions": bool(args.adaptive_candidate_actions),
+                    "adaptive_aggressive_venous_rel_error": float(
+                        args.adaptive_aggressive_venous_rel_error
+                    ),
+                    "raw_adaptive_extra_pd_relaxation_candidates": str(
+                        args.adaptive_extra_pd_relaxation_candidates
+                    ),
+                    "parsed_adaptive_extra_pd_relaxation_candidates": [
+                        float(v) for v in adaptive_pd_relaxation_candidates
+                    ],
+                    "adaptive_implied_alignment_weight": float(args.adaptive_implied_alignment_weight),
+                    "adaptive_implied_bonus_weight": float(args.adaptive_implied_bonus_weight),
+                    "adaptive_pressure_score_weight": float(args.adaptive_pressure_score_weight),
                     "parsed_resistance_relaxation_multipliers": [float(v) for v in relaxation_multipliers],
                     "parsed_pd_relaxation_candidates": [float(v) for v in pd_relaxation_candidates],
                     "parsed_terminal_response_correction_gains": [float(v) for v in response_correction_gains],
@@ -4370,6 +4718,19 @@ def main() -> None:
                     "outlier_guard_rel_tol": float(args.inner_outlier_guard_rel_tol),
                     "outlier_guard_abs_tol_percent": float(args.inner_outlier_guard_abs_tol_percent),
                     "previous_terminal_error_count": int(len(previous_terminal_error_map)),
+                    "adaptive_coupling": bool(args.adaptive_coupling),
+                    "adaptive_terminal_count": int(len(adaptive_terminal_state_map)),
+                    "adaptive_forced_suppression_count": int(len(adaptive_forced)),
+                    "adaptive_recommendation_count": int(len(adaptive_recommended)),
+                    "adaptive_history_window": int(args.adaptive_history_window),
+                    "adaptive_stubborn_rel_error": float(args.adaptive_stubborn_rel_error),
+                    "adaptive_plateau_improvement": float(args.adaptive_plateau_improvement),
+                    "adaptive_suppression_release_rel_error": float(
+                        args.adaptive_suppression_release_rel_error
+                    ),
+                    "adaptive_suppression_release_stable_runs": int(
+                        args.adaptive_suppression_release_stable_runs
+                    ),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -4419,7 +4780,12 @@ def main() -> None:
                             inverse_flow_pressure_fraction=float(args.inner_inverse_flow_pressure_fraction),
                             inverse_flow_pressure_gamma=float(args.inner_inverse_flow_pressure_gamma),
                             inverse_flow_pressure_weight_cap=float(args.inner_inverse_flow_pressure_weight_cap),
-                            implied_alignment_weight=float(args.inner_implied_alignment_weight),
+                            implied_alignment_weight=float(
+                                spec.get(
+                                    "candidate_implied_alignment_weight",
+                                    args.inner_implied_alignment_weight,
+                                )
+                            ),
                             jump_weight=float(args.inner_jump_weight),
                             max_pressure_error_weight=float(args.inner_max_pressure_error_weight),
                             stubborn_max_error_weight=float(args.inner_stubborn_max_error_weight),
@@ -4430,6 +4796,9 @@ def main() -> None:
                             outlier_guard_rel_tol=float(args.inner_outlier_guard_rel_tol),
                             outlier_guard_abs_tol_percent=float(args.inner_outlier_guard_abs_tol_percent),
                             outlier_guard_weight=float(args.inner_outlier_guard_weight),
+                            adaptive_candidate=bool(spec.get("adaptive_candidate", False)),
+                            adaptive_implied_bonus_weight=float(args.adaptive_implied_bonus_weight),
+                            adaptive_pressure_score_weight=float(args.adaptive_pressure_score_weight),
                         )
                     else:
                         score = {
