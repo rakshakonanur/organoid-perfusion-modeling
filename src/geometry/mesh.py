@@ -75,6 +75,28 @@ logger.setLevel(logging.INFO)
 current_dir = Path("/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/geometry")
 
 
+def _remove_generated_path(path: Path) -> None:
+    """
+    Remove generated files/directories before rewriting them.
+
+    On HPC scratch filesystems, send2trash can fail when the volume-level
+    .Trash-$UID directory is not writable. Fall back to direct removal so
+    generated ADIOS .bp outputs can be refreshed in scratch.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        send2trash(path)
+        return
+    except Exception as exc:
+        logger.warning("send2trash failed for %s (%s); removing directly", path, exc)
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
 def _read_branching_dataframe(csv_path: str) -> pd.DataFrame:
     try:
         return pd.read_csv(csv_path)
@@ -84,7 +106,7 @@ def _read_branching_dataframe(csv_path: str) -> pd.DataFrame:
 
 def _copy_artifact(src: Path, dst: Path) -> None:
     if dst.exists():
-        send2trash(dst)
+        _remove_generated_path(dst)
     if src.is_dir():
         shutil.copytree(src, dst)
     else:
@@ -493,7 +515,7 @@ def _write_tagged_branch_bp(
     if path.exists() and not rewrite:
         return
     if path.exists():
-        send2trash(path)
+        _remove_generated_path(path)
     adios4dolfinx.write_mesh(Path(str(path)), mesh, engine="BP4")
     adios4dolfinx.write_meshtags(Path(str(path)), mesh, facet_tag, engine="BP4")
 
@@ -541,13 +563,13 @@ def generate_1d_files_from_csv(
     sampled_tangents = tangents[indices]
 
     if (current_dir / f"velocity_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"velocity_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"velocity_checkpoint{file_prefix}.bp")
     if (current_dir / f"pressure_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"pressure_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"pressure_checkpoint{file_prefix}.bp")
     if (current_dir / f"flow_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"flow_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"flow_checkpoint{file_prefix}.bp")
     if (current_dir / f"area_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"area_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"area_checkpoint{file_prefix}.bp")
 
     interpolated_area = area[indices]
     for tidx, time_value in enumerate(times):
@@ -615,7 +637,7 @@ def generate_1d_files(xdmf_file: str, output_dir: str, file_prefix: str = "", in
 
     # If file exists, remove it
     if (current_dir / f"tagged_branches{file_prefix}.bp").exists():
-        send2trash(current_dir / f"tagged_branches{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"tagged_branches{file_prefix}.bp")
 
     adios4dolfinx.write_mesh(Path(str(current_dir / f"tagged_branches{file_prefix}.bp")), mesh, engine="BP4")
     adios4dolfinx.write_meshtags(Path(str(current_dir / f"tagged_branches{file_prefix}.bp")), mesh, facet_tag, engine="BP4")
@@ -652,13 +674,13 @@ def generate_1d_files(xdmf_file: str, output_dir: str, file_prefix: str = "", in
 
     # if checkpoint files exist, remove them
     if (current_dir / f"velocity_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"velocity_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"velocity_checkpoint{file_prefix}.bp")
     if (current_dir / f"pressure_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"pressure_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"pressure_checkpoint{file_prefix}.bp")
     if (current_dir / f"flow_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"flow_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"flow_checkpoint{file_prefix}.bp")
     if (current_dir / f"area_checkpoint{file_prefix}.bp").exists():
-        send2trash(current_dir / f"area_checkpoint{file_prefix}.bp")
+        _remove_generated_path(current_dir / f"area_checkpoint{file_prefix}.bp")
 
     for i in range(Nt):
         time = i * dt
