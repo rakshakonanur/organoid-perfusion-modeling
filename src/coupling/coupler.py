@@ -1474,6 +1474,7 @@ def build_adaptive_terminal_state_map(
     cleanup_rel_error: float = 0.02,
     cleanup_max_rel_error: float = 0.25,
     cleanup_improvement_rel: float | None = None,
+    cleanup_improvement_fraction: float = 0.10,
 ) -> dict[tuple[int, str, int], dict[str, Any]]:
     if not bool(enabled):
         return {}
@@ -1534,13 +1535,21 @@ def build_adaptive_terminal_state_map(
             if cleanup_improvement_rel is None
             else float(cleanup_improvement_rel)
         )
+        slow_cleanup_progress = (
+            not np.isfinite(improvement)
+            or improvement <= cleanup_improvement_limit
+            or (
+                np.isfinite(last_err)
+                and improvement <= max(float(cleanup_improvement_fraction), 0.0) * last_err
+            )
+        )
         late_cleanup = (
             bool(late_stage_cleanup)
             and key[1] == "venous"
             and np.isfinite(last_err)
             and last_err >= max(float(cleanup_rel_error), 0.0)
             and last_err <= max(float(cleanup_max_rel_error), float(cleanup_rel_error))
-            and (not np.isfinite(improvement) or improvement <= cleanup_improvement_limit)
+            and slow_cleanup_progress
         )
         if late_cleanup:
             states.append("late_stage_cleanup")
@@ -4097,6 +4106,8 @@ def parse_args() -> argparse.Namespace:
                     help="Maximum relative terminal-pressure error for late-stage venous cleanup; larger errors use the existing aggressive/recovery logic.")
     ap.add_argument("--adaptive-cleanup-improvement", type=float, default=0.002,
                     help="Maximum recent relative-error improvement for late-stage venous cleanup.")
+    ap.add_argument("--adaptive-cleanup-improvement-fraction", type=float, default=0.10,
+                    help="Also trigger late-stage cleanup when recent improvement is less than this fraction of the current terminal error.")
     ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
                     help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
     ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
@@ -4319,6 +4330,7 @@ def main() -> None:
             cleanup_rel_error=float(args.adaptive_cleanup_rel_error),
             cleanup_max_rel_error=float(args.adaptive_cleanup_max_rel_error),
             cleanup_improvement_rel=float(args.adaptive_cleanup_improvement),
+            cleanup_improvement_fraction=float(args.adaptive_cleanup_improvement_fraction),
         )
         write_adaptive_terminal_state_summary(cur, adaptive_terminal_state_map)
         adaptive_forced = [
@@ -4545,7 +4557,10 @@ def main() -> None:
                     args.adaptive_coupling
                     and args.adaptive_candidate_actions
                     and any(
-                        "plateaued" in str(value.get("state", ""))
+                        (
+                            "plateaued" in str(value.get("state", ""))
+                            or "late_stage_cleanup" in str(value.get("state", ""))
+                        )
                         for value in adaptive_terminal_state_map.values()
                     )
                 )
@@ -4822,6 +4837,9 @@ def main() -> None:
                     "adaptive_cleanup_rel_error": float(args.adaptive_cleanup_rel_error),
                     "adaptive_cleanup_max_rel_error": float(args.adaptive_cleanup_max_rel_error),
                     "adaptive_cleanup_improvement": float(args.adaptive_cleanup_improvement),
+                    "adaptive_cleanup_improvement_fraction": float(
+                        args.adaptive_cleanup_improvement_fraction
+                    ),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -5050,6 +5068,9 @@ def main() -> None:
                             "adaptive_cleanup_rel_error": float(args.adaptive_cleanup_rel_error),
                             "adaptive_cleanup_max_rel_error": float(args.adaptive_cleanup_max_rel_error),
                             "adaptive_cleanup_improvement": float(args.adaptive_cleanup_improvement),
+                            "adaptive_cleanup_improvement_fraction": float(
+                                args.adaptive_cleanup_improvement_fraction
+                            ),
                             "candidate_count": 0,
                         },
                     )
