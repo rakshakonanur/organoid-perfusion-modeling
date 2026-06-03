@@ -1462,7 +1462,7 @@ def merge_adaptive_stubborn_response_map(
     out = dict(response_map)
     for key, info in adaptive_state_map.items():
         state = str(info.get("state", ""))
-        if not any(tag in state for tag in ("stubborn", "plateaued", "late_stage_cleanup")):
+        if not any(tag in state for tag in ("plateaued", "late_stage_cleanup")):
             continue
         err = _safe_float(info.get("recent_error_rel"))
         if not np.isfinite(err) or err < float(min_rel_error):
@@ -1576,7 +1576,6 @@ def build_adaptive_terminal_state_map(
         )
         late_cleanup = (
             bool(late_stage_cleanup)
-            and key[1] == "venous"
             and np.isfinite(last_err)
             and last_err >= max(float(cleanup_rel_error), 0.0)
             and last_err <= max(float(cleanup_max_rel_error), float(cleanup_rel_error))
@@ -1597,7 +1596,7 @@ def build_adaptive_terminal_state_map(
         if "diverging" in states:
             recommendation = "rollback_or_reject_worsening_candidates"
         elif "late_stage_cleanup" in states:
-            recommendation = "venous_pressure_cleanup"
+            recommendation = "pressure_response_cleanup"
         elif "plateaued" in states and key[1] == "venous":
             recommendation = "consider_increasing_venous_parent_margin"
         elif "plateaued" in states and key[1] == "arterial":
@@ -2845,10 +2844,12 @@ def apply_organoid_resistance_from_json(
                 pd_target_reason = f"{pd_target_reason}_response_correction"
                 response_active = True
             w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
+            pressure_response_cleanup = "late_stage_cleanup" in adaptive_state
             cleanup_relaxation_reason = (
                 pd_target_reason in {"venous_pressure_cleanup", "venous_pressure_recovery"}
                 or pd_target_reason.startswith("venous_pressure_cleanup_")
                 or pd_target_reason.startswith("venous_pressure_recovery_")
+                or pressure_response_cleanup
             )
             cleanup_min_relax = min(max(float(cleanup_min_pd_relaxation), 0.0), 1.0)
             if cleanup_relaxation_reason and cleanup_min_relax > 0.0:
@@ -4211,19 +4212,19 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--adaptive-suppression-release-stable-runs", type=int, default=3,
                     help="Consecutive low-error runs required before releasing a previously suppressed terminal.")
     ap.add_argument("--adaptive-late-stage-cleanup", action=argparse.BooleanOptionalAction, default=True,
-                    help="When adaptive coupling is enabled, target Pd itself for moderate plateaued venous residuals that are below the positive parent/0D reference.")
+                    help="When adaptive coupling is enabled, mark moderate plateaued terminal-pressure residuals for pressure-prioritized cleanup.")
     ap.add_argument("--adaptive-cleanup-rel-error", type=float, default=0.02,
-                    help="Minimum relative terminal-pressure error for late-stage venous cleanup.")
+                    help="Minimum relative terminal-pressure error for late-stage cleanup.")
     ap.add_argument("--adaptive-cleanup-max-rel-error", type=float, default=0.25,
-                    help="Maximum relative terminal-pressure error for late-stage venous cleanup; larger errors use the existing aggressive/recovery logic.")
+                    help="Maximum relative terminal-pressure error for late-stage cleanup; larger errors use the existing aggressive/recovery logic.")
     ap.add_argument("--adaptive-cleanup-improvement", type=float, default=0.002,
-                    help="Maximum recent relative-error improvement for late-stage venous cleanup.")
+                    help="Maximum recent relative-error improvement for late-stage cleanup.")
     ap.add_argument("--adaptive-cleanup-improvement-fraction", type=float, default=0.10,
                     help="Also trigger late-stage cleanup when recent improvement is less than this fraction of the current terminal error.")
     ap.add_argument("--adaptive-cleanup-min-pd-relaxation", type=float, default=0.5,
-                    help="Minimum effective Pd relaxation applied only to venous cleanup/recovery terminals.")
+                    help="Minimum effective Pd relaxation applied to late-stage cleanup/recovery terminals.")
     ap.add_argument("--adaptive-cleanup-reopen-flow-fraction", type=float, default=0.25,
-                    help="Fraction of representative side flow used to recalibrate R for near-zero-flow venous cleanup terminals.")
+                    help="Fraction of representative side flow used to recalibrate R for near-zero-flow recovery terminals.")
     ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
                     help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
     ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
