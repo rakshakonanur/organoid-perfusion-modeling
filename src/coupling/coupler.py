@@ -2234,6 +2234,7 @@ def apply_organoid_resistance_from_json(
     terminal_response_correction_effective_gain_cap: float = 3.0,
     terminal_response_correction_guarded_reasons: bool = False,
     cleanup_min_pd_relaxation: float = 0.0,
+    cleanup_reopen_flow_fraction: float = 0.25,
     stubborn_terminal_response_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
     adaptive_terminal_state_map: dict[tuple[int, str, int], dict[str, Any]] | None = None,
     allow_missing_terminal_bcs: bool = False,
@@ -2301,6 +2302,7 @@ def apply_organoid_resistance_from_json(
         response_error_gamma = max(float(terminal_response_correction_error_gamma), 0.0)
         response_effective_gain_cap = max(float(terminal_response_correction_effective_gain_cap), 0.0)
         response_guarded_reasons = bool(terminal_response_correction_guarded_reasons)
+        cleanup_reopen_fraction = max(float(cleanup_reopen_flow_fraction), 0.0)
 
         def _effective_pd_relaxation(q_denominator: float) -> tuple[float, float]:
             if pd_relax_base <= 0.0 or inv_pd_fraction <= 0.0:
@@ -2641,7 +2643,28 @@ def apply_organoid_resistance_from_json(
                     suppression_parent_pressure_target = float(p_parent)
                     if venous_parent_margin > 0.0:
                         suppression_parent_pressure_target += venous_parent_margin
-                    pd_target = suppression_parent_pressure_target
+                    if venous_pressure_cleanup:
+                        # Late-stage cleanup is a pressure-continuity repair.
+                        # If the outlet has collapsed to numerical-zero flow,
+                        # calibrating R with q_floor produces a huge resistance
+                        # and keeps P_0D pinned to the parent. Reopen the path
+                        # with a representative side flow, then target the
+                        # resistance-implied terminal pressure to Darcy.
+                        q_reopen = max(q_den, q_ref_side * cleanup_reopen_fraction)
+                        if q_reopen > q_den and np.isfinite(p_d_for_r):
+                            r_raw = abs(p_darcy - p_d_for_r) / max(
+                                q_reopen,
+                                float(q_floor),
+                                np.finfo(float).tiny,
+                            )
+                            r_next = max(float(r_raw), np.finfo(float).tiny)
+                            r_target_reason = "venous_pressure_cleanup_reopen"
+                        if np.isfinite(r_next) and np.isfinite(q_for_r):
+                            pd_target = p_darcy - r_next * q_for_r
+                        else:
+                            pd_target = p_darcy
+                    else:
+                        pd_target = suppression_parent_pressure_target
                     pd_target_reason = (
                         "venous_pressure_cleanup"
                         if venous_pressure_cleanup and not venous_pressure_recovery
@@ -4142,6 +4165,8 @@ def parse_args() -> argparse.Namespace:
                     help="Also trigger late-stage cleanup when recent improvement is less than this fraction of the current terminal error.")
     ap.add_argument("--adaptive-cleanup-min-pd-relaxation", type=float, default=0.5,
                     help="Minimum effective Pd relaxation applied only to venous cleanup/recovery terminals.")
+    ap.add_argument("--adaptive-cleanup-reopen-flow-fraction", type=float, default=0.25,
+                    help="Fraction of representative side flow used to recalibrate R for near-zero-flow venous cleanup terminals.")
     ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
                     help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
     ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
@@ -4546,6 +4571,9 @@ def main() -> None:
                             terminal_response_correction_guarded_reasons
                         ),
                         cleanup_min_pd_relaxation=float(args.adaptive_cleanup_min_pd_relaxation),
+                        cleanup_reopen_flow_fraction=float(
+                            args.adaptive_cleanup_reopen_flow_fraction
+                        ),
                         stubborn_terminal_response_map=stubborn_terminal_response_map,
                         adaptive_terminal_state_map=adaptive_terminal_state_map,
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
@@ -4879,6 +4907,9 @@ def main() -> None:
                     "adaptive_cleanup_min_pd_relaxation": float(
                         args.adaptive_cleanup_min_pd_relaxation
                     ),
+                    "adaptive_cleanup_reopen_flow_fraction": float(
+                        args.adaptive_cleanup_reopen_flow_fraction
+                    ),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -5117,6 +5148,9 @@ def main() -> None:
                             ),
                             "adaptive_cleanup_min_pd_relaxation": float(
                                 args.adaptive_cleanup_min_pd_relaxation
+                            ),
+                            "adaptive_cleanup_reopen_flow_fraction": float(
+                                args.adaptive_cleanup_reopen_flow_fraction
                             ),
                             "candidate_count": 0,
                         },
