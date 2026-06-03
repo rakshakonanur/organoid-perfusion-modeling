@@ -1681,6 +1681,7 @@ def score_resistance_0d_trial(
     inverse_flow_pressure_gamma: float = 0.5,
     inverse_flow_pressure_weight_cap: float = 10.0,
     implied_alignment_weight: float = 2.0,
+    implied_alignment_score_cap: float = 100.0,
     jump_weight: float = 0.05,
     max_pressure_error_weight: float = 2.0,
     stubborn_max_error_weight: float = 2.0,
@@ -1842,6 +1843,8 @@ def score_resistance_0d_trial(
             "arterial_inverse_flow_pressure_score": float("inf"),
             "venous_inverse_flow_pressure_score": float("inf"),
             "implied_interface_score": float("inf"),
+            "implied_interface_objective_score": float("inf"),
+            "implied_alignment_score_cap": float(implied_alignment_score_cap),
             "implied_median_percent": float("inf"),
             "implied_p90_percent": float("inf"),
             "implied_max_percent": float("inf"),
@@ -2034,9 +2037,14 @@ def score_resistance_0d_trial(
         # error, so subtracting it rewards worse implied-pressure alignment and
         # cancels the adaptive implied-alignment penalty.
         adaptive_implied_bonus = 0.0
+    implied_objective_score = float(implied_interface_score)
+    if np.isfinite(implied_objective_score):
+        cap = float(implied_alignment_score_cap)
+        if np.isfinite(cap) and cap > 0.0:
+            implied_objective_score = min(implied_objective_score, cap)
     score = (
         effective_pressure_weight * pressure_score
-        + max(float(implied_alignment_weight), 0.0) * implied_interface_score
+        + max(float(implied_alignment_weight), 0.0) * implied_objective_score
         + max(float(jump_weight), 0.0) * jump_score
         + max(float(max_pressure_error_weight), 0.0) * outlier_error_score
         + max(float(stubborn_max_error_weight), 0.0) * stubborn_error_score
@@ -2077,6 +2085,8 @@ def score_resistance_0d_trial(
         "arterial_inverse_flow_pressure_score": float(arterial_inverse_flow_score),
         "venous_inverse_flow_pressure_score": float(venous_inverse_flow_score),
         "implied_interface_score": float(implied_interface_score),
+        "implied_interface_objective_score": float(implied_objective_score),
+        "implied_alignment_score_cap": float(implied_alignment_score_cap),
         "implied_median_percent": float(implied_median),
         "implied_p90_percent": float(implied_p90),
         "implied_max_percent": float(implied_max),
@@ -2127,6 +2137,8 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "arterial_inverse_flow_pressure_score",
         "venous_inverse_flow_pressure_score",
         "implied_interface_score",
+        "implied_interface_objective_score",
+        "implied_alignment_score_cap",
         "implied_median_percent",
         "implied_p90_percent",
         "implied_max_percent",
@@ -2161,6 +2173,8 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "flow_guard_increase_p90_percent",
         "flow_guard_increase_max_percent",
         "flow_guard_reduction_median_percent",
+        "outlier_guard_count",
+        "outlier_guard_score",
         "pressure_bc_count",
         "resistance_bc_count",
     ]
@@ -4135,6 +4149,8 @@ def parse_args() -> argparse.Namespace:
                     help="Extra response-correction gain added only to stubborn terminals.")
     ap.add_argument("--inner-implied-alignment-weight", type=float, default=0.0,
                     help="Weight for candidate-proposed auxiliary P_implied versus Darcy interface alignment in the inner 0D score.")
+    ap.add_argument("--inner-implied-alignment-score-cap", type=float, default=100.0,
+                    help="Cap the auxiliary implied-pressure alignment score used in the inner 0D objective; <=0 disables the cap.")
     ap.add_argument("--inner-jump-weight", type=float, default=0.0,
                     help="Weight for the temporary resistance pressure-jump penalty in the candidate score.")
     ap.add_argument("--inner-max-pressure-error-weight", type=float, default=2.0,
@@ -4885,6 +4901,7 @@ def main() -> None:
                         for key, value in sorted(stubborn_terminal_response_map.items())
                     ],
                     "implied_alignment_weight": float(args.inner_implied_alignment_weight),
+                    "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
                     "jump_weight": float(args.inner_jump_weight),
                     "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                     "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
@@ -4975,6 +4992,7 @@ def main() -> None:
                                     args.inner_implied_alignment_weight,
                                 )
                             ),
+                            implied_alignment_score_cap=float(args.inner_implied_alignment_score_cap),
                             jump_weight=float(args.inner_jump_weight),
                             max_pressure_error_weight=float(args.inner_max_pressure_error_weight),
                             stubborn_max_error_weight=float(args.inner_stubborn_max_error_weight),
@@ -4995,6 +5013,8 @@ def main() -> None:
                             "score": float("inf"),
                             "pressure_score": float("inf"),
                             "implied_interface_score": float("inf"),
+                            "implied_interface_objective_score": float("inf"),
+                            "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
                             "implied_median_percent": float("inf"),
                             "implied_p90_percent": float("inf"),
                             "implied_max_percent": float("inf"),
@@ -5140,6 +5160,7 @@ def main() -> None:
                             "stubborn_terminal_extra_gain": float(args.stubborn_terminal_extra_gain),
                             "stubborn_terminal_count": int(len(stubborn_terminal_response_map)),
                             "implied_alignment_weight": float(args.inner_implied_alignment_weight),
+                            "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
                             "jump_weight": float(args.inner_jump_weight),
                             "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                             "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
