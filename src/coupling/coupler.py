@@ -2768,6 +2768,16 @@ def apply_organoid_resistance_from_json(
                     response_gain * response_severity,
                     response_effective_gain_cap,
                 )
+            response_flow_weight_ok = (
+                pd_flow_weight_for_response >= response_min_flow_weight
+                or (
+                    max(float(stubborn_gain), 0.0) > 0.0
+                    and (
+                        "late_stage_cleanup" in adaptive_state
+                        or "plateaued" in adaptive_state
+                    )
+                )
+            )
             if (
                 response_effective_gain > 0.0
                 and pd_mode != "0d"
@@ -2775,7 +2785,7 @@ def apply_organoid_resistance_from_json(
                 and np.isfinite(q_for_r)
                 and np.isfinite(p_darcy)
                 and np.isfinite(p_0d)
-                and pd_flow_weight_for_response >= response_min_flow_weight
+                and response_flow_weight_ok
                 and np.isfinite(response_error_rel)
                 and response_error_rel >= response_rel_error_tol
                 and pd_target_reason in response_allowed_reasons
