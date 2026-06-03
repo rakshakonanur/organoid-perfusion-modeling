@@ -1302,6 +1302,14 @@ def write_terminal_resistance_summary(
         "terminal_response_correction_active",
         "terminal_response_correction_target",
         "terminal_response_correction_error_rel",
+        "terminal_pressure_sensitivity_active",
+        "terminal_pressure_sensitivity_slope",
+        "terminal_pressure_sensitivity_recent_slope",
+        "terminal_pressure_sensitivity_effective_slope",
+        "terminal_pressure_sensitivity_sign_consistency",
+        "terminal_pressure_sensitivity_sample_count",
+        "terminal_pressure_sensitivity_correction",
+        "terminal_pressure_sensitivity_target",
         "stubborn_continuity_override_active",
         "stubborn_continuity_override_relaxation",
         "stubborn_continuity_override_target",
@@ -1368,6 +1376,13 @@ def _terminal_pressure_error_rel_from_row(row: dict[str, Any]) -> float:
 
 
 def read_terminal_resistance_summary(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open("r", newline="") as fp:
+        return list(csv.DictReader(fp))
+
+
+def read_post_darcy_terminal_convergence(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     with path.open("r", newline="") as fp:
@@ -1728,6 +1743,89 @@ def build_previous_terminal_error_map(
         err_percent = 100.0 * _terminal_pressure_error_rel_from_row(row)
         if np.isfinite(err_percent):
             out[key] = float(err_percent)
+    return out
+
+
+def build_terminal_pressure_sensitivity_map(
+    coupled_root: Path,
+    current_run: int,
+    enabled: bool,
+    history_window: int,
+    min_pd_change: float,
+    min_p0d_change: float,
+) -> dict[tuple[int, str, int], dict[str, float]]:
+    if not bool(enabled):
+        return {}
+    prev_run = int(current_run) - 1
+    if prev_run < 2:
+        return {}
+
+    window = max(int(history_window), 2)
+    start_run = max(1, prev_run - window + 1)
+    history: dict[tuple[int, str, int], list[dict[str, float]]] = {}
+    for run_idx in range(start_run, prev_run + 1):
+        run_dir = coupled_root / f"run_{run_idx}"
+        cmd_rows = read_terminal_resistance_summary(
+            run_dir / "terminal_resistance_bc_summary.csv"
+        )
+        result_rows = read_post_darcy_terminal_convergence(
+            run_dir / "post_darcy_terminal_convergence.csv"
+        )
+        if not cmd_rows or not result_rows:
+            continue
+        result_by_key: dict[tuple[int, str, int], dict[str, Any]] = {}
+        for row in result_rows:
+            key = _terminal_key_from_row(row)
+            if key is None:
+                continue
+            result_by_key[key] = row
+        for row in cmd_rows:
+            key = _terminal_key_from_row(row)
+            if key is None or key not in result_by_key:
+                continue
+            pd_next = _safe_float(row.get("Pd_next"))
+            p0d_result = _safe_float(result_by_key[key].get("P_0D_target"))
+            p_darcy_result = _safe_float(result_by_key[key].get("P_Darcy"))
+            if not (np.isfinite(pd_next) and np.isfinite(p0d_result)):
+                continue
+            history.setdefault(key, []).append({
+                "run": float(run_idx),
+                "pd_next": float(pd_next),
+                "p0d_result": float(p0d_result),
+                "p_darcy_result": float(p_darcy_result),
+            })
+
+    out: dict[tuple[int, str, int], dict[str, float]] = {}
+    pd_tol = max(float(min_pd_change), 0.0)
+    p0d_tol = max(float(min_p0d_change), 0.0)
+    for key, items in history.items():
+        items = sorted(items, key=lambda item: item["run"])
+        slopes: list[float] = []
+        pd_changes: list[float] = []
+        p0d_changes: list[float] = []
+        for prev_item, cur_item in zip(items[:-1], items[1:]):
+            d_pd = float(cur_item["pd_next"] - prev_item["pd_next"])
+            d_p0d = float(cur_item["p0d_result"] - prev_item["p0d_result"])
+            if abs(d_pd) < pd_tol or abs(d_p0d) < p0d_tol:
+                continue
+            slope = d_p0d / d_pd
+            if not np.isfinite(slope):
+                continue
+            slopes.append(float(slope))
+            pd_changes.append(abs(d_pd))
+            p0d_changes.append(abs(d_p0d))
+        if not slopes:
+            continue
+        signs = [1.0 if value > 0.0 else -1.0 if value < 0.0 else 0.0 for value in slopes]
+        sign_consistency = abs(float(np.mean(signs))) if signs else 0.0
+        out[key] = {
+            "dp0d_dpd": float(np.median(np.asarray(slopes, dtype=float))),
+            "recent_dp0d_dpd": float(slopes[-1]),
+            "sign_consistency": float(sign_consistency),
+            "sample_count": float(len(slopes)),
+            "median_pd_change": float(np.median(np.asarray(pd_changes, dtype=float))),
+            "median_p0d_change": float(np.median(np.asarray(p0d_changes, dtype=float))),
+        }
     return out
 
 
@@ -2354,6 +2452,12 @@ def apply_organoid_resistance_from_json(
     cleanup_reopen_flow_fraction: float = 0.25,
     stubborn_terminal_response_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
     adaptive_terminal_state_map: dict[tuple[int, str, int], dict[str, Any]] | None = None,
+    terminal_pressure_sensitivity_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
+    terminal_sensitivity_rel_error_tol: float = 0.01,
+    terminal_sensitivity_gain: float = 0.5,
+    terminal_sensitivity_min_abs_slope: float = 0.01,
+    terminal_sensitivity_sign_consistency: float = 0.75,
+    terminal_sensitivity_max_multiplier: float = 3.0,
     allow_missing_terminal_bcs: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -2481,6 +2585,15 @@ def apply_organoid_resistance_from_json(
                 adaptive_info.get("recent_improvement_rel")
             )
             adaptive_recent_error_rel = _safe_float(adaptive_info.get("recent_error_rel"))
+            sensitivity_info = (
+                terminal_pressure_sensitivity_map or {}
+            ).get((int(organoid_idx), side_label, int(branch_id)), {})
+            sensitivity_slope = _safe_float(sensitivity_info.get("dp0d_dpd"))
+            sensitivity_recent_slope = _safe_float(sensitivity_info.get("recent_dp0d_dpd"))
+            sensitivity_sign_consistency_value = _safe_float(
+                sensitivity_info.get("sign_consistency")
+            )
+            sensitivity_sample_count = _safe_float(sensitivity_info.get("sample_count"))
             if not np.isfinite(p_darcy):
                 continue
             if not np.isfinite(p_0d):
@@ -2857,6 +2970,10 @@ def apply_organoid_resistance_from_json(
             response_active = False
             response_severity = 0.0
             response_effective_gain = 0.0
+            sensitivity_target = float("nan")
+            sensitivity_active = False
+            sensitivity_correction = 0.0
+            sensitivity_effective_slope = float("nan")
             response_gain = response_gain_base + max(float(stubborn_gain), 0.0)
             response_allowed_reasons = {
                 "resistance_implied_interface",
@@ -2931,6 +3048,51 @@ def apply_organoid_resistance_from_json(
                 pd_target = response_target - r_next * q_for_r
                 pd_target_reason = f"{pd_target_reason}_response_correction"
                 response_active = True
+            sensitivity_state_active = any(
+                tag in adaptive_state for tag in ("stubborn", "plateaued", "late_stage_cleanup")
+            )
+            sensitivity_consistency = (
+                1.0
+                if not np.isfinite(sensitivity_sign_consistency_value)
+                else float(sensitivity_sign_consistency_value)
+            )
+            min_slope = max(float(terminal_sensitivity_min_abs_slope), np.finfo(float).tiny)
+            if (
+                sensitivity_state_active
+                and np.isfinite(p_darcy)
+                and np.isfinite(p_0d)
+                and np.isfinite(response_error_rel)
+                and response_error_rel >= max(float(terminal_sensitivity_rel_error_tol), 0.0)
+                and np.isfinite(sensitivity_slope)
+                and np.isfinite(sensitivity_sample_count)
+                and sensitivity_sample_count >= 1.0
+                and sensitivity_consistency >= max(float(terminal_sensitivity_sign_consistency), 0.0)
+            ):
+                sensitivity_effective_slope = (
+                    float(np.sign(sensitivity_slope))
+                    * max(abs(float(sensitivity_slope)), min_slope)
+                )
+                raw_correction = (
+                    max(float(terminal_sensitivity_gain), 0.0)
+                    * (p_darcy - p_0d)
+                    / sensitivity_effective_slope
+                )
+                base_step = max(
+                    abs(float(pd_target - old_pd))
+                    if np.isfinite(pd_target) and np.isfinite(old_pd)
+                    else 0.0,
+                    abs(float(p_darcy - p_0d)),
+                    1.0,
+                )
+                correction_cap = max(float(terminal_sensitivity_max_multiplier), 0.0) * base_step
+                if np.isfinite(correction_cap) and correction_cap > 0.0:
+                    raw_correction = float(np.clip(raw_correction, -correction_cap, correction_cap))
+                sensitivity_correction = float(raw_correction)
+                if sensitivity_correction != 0.0:
+                    sensitivity_target = float(pd_target + sensitivity_correction)
+                    pd_target = sensitivity_target
+                    pd_target_reason = f"{pd_target_reason}_sensitivity"
+                    sensitivity_active = True
             w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
             pressure_response_cleanup = "late_stage_cleanup" in adaptive_state
             cleanup_relaxation_reason = (
@@ -3043,6 +3205,14 @@ def apply_organoid_resistance_from_json(
                 "terminal_response_correction_active": bool(response_active),
                 "terminal_response_correction_target": float(response_target),
                 "terminal_response_correction_error_rel": float(response_error_rel),
+                "terminal_pressure_sensitivity_active": bool(sensitivity_active),
+                "terminal_pressure_sensitivity_slope": float(sensitivity_slope),
+                "terminal_pressure_sensitivity_recent_slope": float(sensitivity_recent_slope),
+                "terminal_pressure_sensitivity_effective_slope": float(sensitivity_effective_slope),
+                "terminal_pressure_sensitivity_sign_consistency": float(sensitivity_consistency),
+                "terminal_pressure_sensitivity_sample_count": float(sensitivity_sample_count),
+                "terminal_pressure_sensitivity_correction": float(sensitivity_correction),
+                "terminal_pressure_sensitivity_target": float(sensitivity_target),
                 "stubborn_continuity_override_active": False,
                 "stubborn_continuity_override_relaxation": float("nan"),
                 "stubborn_continuity_override_target": float("nan"),
@@ -4322,6 +4492,24 @@ def parse_args() -> argparse.Namespace:
                     help="Minimum effective Pd relaxation applied to late-stage cleanup/recovery terminals.")
     ap.add_argument("--adaptive-cleanup-reopen-flow-fraction", type=float, default=0.25,
                     help="Fraction of representative side flow used to recalibrate R for near-zero-flow recovery terminals.")
+    ap.add_argument("--terminal-sensitivity-correction", action=argparse.BooleanOptionalAction, default=True,
+                    help="Use prior coupling runs to estimate dP_0D/dPd and apply a bounded late-stage Pd correction for stubborn/cleanup terminals.")
+    ap.add_argument("--terminal-sensitivity-history-window", type=int, default=6,
+                    help="Number of previous runs used to estimate terminal-pressure sensitivity from commanded Pd versus realized post-0D pressure.")
+    ap.add_argument("--terminal-sensitivity-min-pd-change", type=float, default=1.0,
+                    help="Minimum |Delta Pd| between past runs required when estimating dP_0D/dPd.")
+    ap.add_argument("--terminal-sensitivity-min-p0d-change", type=float, default=0.05,
+                    help="Minimum |Delta P_0D| between past runs required when estimating dP_0D/dPd.")
+    ap.add_argument("--terminal-sensitivity-rel-error-tol", type=float, default=0.01,
+                    help="Only apply the sensitivity-based Pd correction when terminal pressure error exceeds this threshold.")
+    ap.add_argument("--terminal-sensitivity-gain", type=float, default=0.5,
+                    help="Gain applied to the sensitivity-predicted Pd correction for stubborn/cleanup terminals.")
+    ap.add_argument("--terminal-sensitivity-min-abs-slope", type=float, default=0.01,
+                    help="Lower bound on |dP_0D/dPd| used when converting terminal pressure residual into a Pd correction.")
+    ap.add_argument("--terminal-sensitivity-sign-consistency", type=float, default=0.75,
+                    help="Minimum sign consistency of historical dP_0D/dPd samples before using the sensitivity-based correction.")
+    ap.add_argument("--terminal-sensitivity-max-multiplier", type=float, default=3.0,
+                    help="Maximum multiple of the current Pd step/residual used to cap the sensitivity-based Pd correction.")
     ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
                     help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
     ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
@@ -4581,6 +4769,14 @@ def main() -> None:
                 )
                 print(f"[adaptive-coupling] {preview_text}", flush=True)
         previous_terminal_error_map = build_previous_terminal_error_map(coupled_root, int(i))
+        terminal_pressure_sensitivity_map = build_terminal_pressure_sensitivity_map(
+            coupled_root,
+            int(i),
+            enabled=bool(args.terminal_sensitivity_correction),
+            history_window=int(args.terminal_sensitivity_history_window),
+            min_pd_change=float(args.terminal_sensitivity_min_pd_change),
+            min_p0d_change=float(args.terminal_sensitivity_min_p0d_change),
+        )
         if stubborn_terminal_response_map:
             preview = sorted(stubborn_terminal_response_map.items())[:8]
             preview_text = ", ".join(
@@ -4591,6 +4787,18 @@ def main() -> None:
             print(
                 f"[stubborn-terminal] applying extra response gain to "
                 f"{len(stubborn_terminal_response_map)} terminals: {preview_text}",
+                flush=True,
+            )
+        if terminal_pressure_sensitivity_map:
+            preview = sorted(terminal_pressure_sensitivity_map.items())[:8]
+            preview_text = ", ".join(
+                f"org{key[0]}:{key[1]}:{key[2]} "
+                f"sens={value['dp0d_dpd']:.3e} sign={value['sign_consistency']:.2f}"
+                for key, value in preview
+            )
+            print(
+                f"[terminal-sensitivity] using history-based dP_0D/dPd estimates for "
+                f"{len(terminal_pressure_sensitivity_map)} terminals: {preview_text}",
                 flush=True,
             )
 
@@ -4741,6 +4949,20 @@ def main() -> None:
                         ),
                         stubborn_terminal_response_map=stubborn_terminal_response_map,
                         adaptive_terminal_state_map=adaptive_terminal_state_map,
+                        terminal_pressure_sensitivity_map=terminal_pressure_sensitivity_map,
+                        terminal_sensitivity_rel_error_tol=float(
+                            args.terminal_sensitivity_rel_error_tol
+                        ),
+                        terminal_sensitivity_gain=float(args.terminal_sensitivity_gain),
+                        terminal_sensitivity_min_abs_slope=float(
+                            args.terminal_sensitivity_min_abs_slope
+                        ),
+                        terminal_sensitivity_sign_consistency=float(
+                            args.terminal_sensitivity_sign_consistency
+                        ),
+                        terminal_sensitivity_max_multiplier=float(
+                            args.terminal_sensitivity_max_multiplier
+                        ),
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
                     )
                 )
@@ -5082,6 +5304,20 @@ def main() -> None:
                     "adaptive_cleanup_reopen_flow_fraction": float(
                         args.adaptive_cleanup_reopen_flow_fraction
                     ),
+                    "terminal_sensitivity_correction": bool(args.terminal_sensitivity_correction),
+                    "terminal_sensitivity_history_window": int(args.terminal_sensitivity_history_window),
+                    "terminal_sensitivity_min_pd_change": float(args.terminal_sensitivity_min_pd_change),
+                    "terminal_sensitivity_min_p0d_change": float(args.terminal_sensitivity_min_p0d_change),
+                    "terminal_sensitivity_rel_error_tol": float(args.terminal_sensitivity_rel_error_tol),
+                    "terminal_sensitivity_gain": float(args.terminal_sensitivity_gain),
+                    "terminal_sensitivity_min_abs_slope": float(args.terminal_sensitivity_min_abs_slope),
+                    "terminal_sensitivity_sign_consistency": float(
+                        args.terminal_sensitivity_sign_consistency
+                    ),
+                    "terminal_sensitivity_max_multiplier": float(
+                        args.terminal_sensitivity_max_multiplier
+                    ),
+                    "terminal_sensitivity_terminal_count": int(len(terminal_pressure_sensitivity_map)),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -5340,6 +5576,34 @@ def main() -> None:
                             ),
                             "adaptive_cleanup_reopen_flow_fraction": float(
                                 args.adaptive_cleanup_reopen_flow_fraction
+                            ),
+                            "terminal_sensitivity_correction": bool(
+                                args.terminal_sensitivity_correction
+                            ),
+                            "terminal_sensitivity_history_window": int(
+                                args.terminal_sensitivity_history_window
+                            ),
+                            "terminal_sensitivity_min_pd_change": float(
+                                args.terminal_sensitivity_min_pd_change
+                            ),
+                            "terminal_sensitivity_min_p0d_change": float(
+                                args.terminal_sensitivity_min_p0d_change
+                            ),
+                            "terminal_sensitivity_rel_error_tol": float(
+                                args.terminal_sensitivity_rel_error_tol
+                            ),
+                            "terminal_sensitivity_gain": float(args.terminal_sensitivity_gain),
+                            "terminal_sensitivity_min_abs_slope": float(
+                                args.terminal_sensitivity_min_abs_slope
+                            ),
+                            "terminal_sensitivity_sign_consistency": float(
+                                args.terminal_sensitivity_sign_consistency
+                            ),
+                            "terminal_sensitivity_max_multiplier": float(
+                                args.terminal_sensitivity_max_multiplier
+                            ),
+                            "terminal_sensitivity_terminal_count": int(
+                                len(terminal_pressure_sensitivity_map)
                             ),
                             "candidate_count": 0,
                         },
