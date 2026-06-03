@@ -1450,6 +1450,37 @@ def build_stubborn_terminal_response_map(
     return out
 
 
+def merge_adaptive_stubborn_response_map(
+    response_map: dict[tuple[int, str, int], dict[str, float]],
+    adaptive_state_map: dict[tuple[int, str, int], dict[str, Any]],
+    enabled: bool,
+    min_rel_error: float,
+    gain: float,
+) -> dict[tuple[int, str, int], dict[str, float]]:
+    if not enabled or gain <= 0.0:
+        return response_map
+    out = dict(response_map)
+    for key, info in adaptive_state_map.items():
+        state = str(info.get("state", ""))
+        if not any(tag in state for tag in ("stubborn", "plateaued", "late_stage_cleanup")):
+            continue
+        err = _safe_float(info.get("recent_error_rel"))
+        if not np.isfinite(err) or err < float(min_rel_error):
+            continue
+        improvement = _safe_float(info.get("recent_improvement_rel"))
+        if not np.isfinite(improvement):
+            improvement = 0.0
+        existing_gain = _safe_float(out.get(key, {}).get("gain"))
+        if np.isfinite(existing_gain) and existing_gain >= float(gain):
+            continue
+        out[key] = {
+            "gain": float(gain),
+            "error_rel": float(err),
+            "recent_improvement_rel": float(improvement),
+        }
+    return out
+
+
 def _terminal_key_from_row(row: dict[str, Any]) -> tuple[int, str, int] | None:
     try:
         return (int(row.get("organoid")), str(row.get("side")), int(row.get("branch_id")))
@@ -4416,6 +4447,13 @@ def main() -> None:
             cleanup_max_rel_error=float(args.adaptive_cleanup_max_rel_error),
             cleanup_improvement_rel=float(args.adaptive_cleanup_improvement),
             cleanup_improvement_fraction=float(args.adaptive_cleanup_improvement_fraction),
+        )
+        stubborn_terminal_response_map = merge_adaptive_stubborn_response_map(
+            stubborn_terminal_response_map,
+            adaptive_terminal_state_map,
+            enabled=bool(args.stubborn_terminal_response_correction),
+            min_rel_error=float(args.stubborn_terminal_min_rel_error),
+            gain=float(args.stubborn_terminal_extra_gain),
         )
         write_adaptive_terminal_state_summary(cur, adaptive_terminal_state_map)
         adaptive_forced = [
