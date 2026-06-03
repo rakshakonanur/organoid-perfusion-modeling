@@ -424,6 +424,46 @@ def _build_scaled_interface_bc(
     return iface
 
 
+def _write_scaled_organoid_interface_bc(
+    run_dir: Path,
+    organoid_id: int,
+    ref_iface: dict[str, Any],
+    target_zero_d: dict[str, Any],
+    pressure_transform: dict[str, float],
+    shift: tuple[float, float, float],
+    reference_organoid: int,
+    field_outputs_written: bool,
+) -> dict[str, Any]:
+    scale_factor = float(pressure_transform["scale_factor"])
+    pressure_offset = float(pressure_transform["pressure_offset"])
+
+    out_dir = run_dir / f"organoid_{organoid_id}" / "out_darcy"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    iface = _build_scaled_interface_bc(
+        ref_iface=ref_iface,
+        target_zero_d=target_zero_d,
+        pressure_transform=pressure_transform,
+        scale_factor=scale_factor,
+        shift=shift,
+    )
+    iface["scaled_from_reference_organoid"] = int(reference_organoid)
+    if not bool(field_outputs_written):
+        iface["scaled_output_mode"] = "interface_only"
+    (out_dir / "interface_bc.json").write_text(json.dumps(iface, indent=2))
+    return {
+        "organoid_id": organoid_id,
+        "scale_factor": scale_factor,
+        "pressure_offset": pressure_offset,
+        "shift": list(shift),
+        "target_arterial_pressure": float(pressure_transform["target_arterial_pressure"]),
+        "target_venous_pressure": float(pressure_transform["target_venous_pressure"]),
+        "offset_anchor": pressure_transform["offset_anchor"],
+        "offset_mismatch": float(pressure_transform["offset_mismatch"]),
+        "field_outputs_written": bool(field_outputs_written),
+    }
+
+
 def _write_scaled_organoid_outputs(
     run_dir: Path,
     organoid_id: int,
@@ -469,25 +509,16 @@ def _write_scaled_organoid_outputs(
         h5py,
     )
 
-    iface = _build_scaled_interface_bc(
+    return _write_scaled_organoid_interface_bc(
+        run_dir=run_dir,
+        organoid_id=organoid_id,
         ref_iface=ref_iface,
         target_zero_d=target_zero_d,
         pressure_transform=pressure_transform,
-        scale_factor=scale_factor,
         shift=shift,
+        reference_organoid=reference_organoid,
+        field_outputs_written=True,
     )
-    iface["scaled_from_reference_organoid"] = int(reference_organoid)
-    (out_dir / "interface_bc.json").write_text(json.dumps(iface, indent=2))
-    return {
-        "organoid_id": organoid_id,
-        "scale_factor": scale_factor,
-        "pressure_offset": pressure_offset,
-        "shift": list(shift),
-        "target_arterial_pressure": float(pressure_transform["target_arterial_pressure"]),
-        "target_venous_pressure": float(pressure_transform["target_venous_pressure"]),
-        "offset_anchor": pressure_transform["offset_anchor"],
-        "offset_mismatch": float(pressure_transform["offset_mismatch"]),
-    }
 
 
 def replicate_reference_organoid_outputs(
@@ -551,10 +582,11 @@ def synthesize_scaled_screening_outputs(
     run_dir: Path,
     n_organoids: int,
     scaled_cfg: dict[str, Any],
+    write_field_outputs: bool = True,
 ) -> None:
     scaled_fields = _import_scaled_field_helpers()
     np_mod = scaled_fields._import_numpy()
-    h5py = scaled_fields._import_h5py()
+    h5py = scaled_fields._import_h5py() if bool(write_field_outputs) else None
 
     reference_organoid = int(scaled_cfg["reference_organoid"])
     grouped = scaled_fields._load_0d_groups(run_dir, np_mod)
@@ -568,15 +600,19 @@ def synthesize_scaled_screening_outputs(
     ref_iface_path = ref_out / "interface_bc.json"
     ref_p_path = ref_out / "p.xdmf"
     ref_u_path = ref_out / "u.xdmf"
-    if not ref_iface_path.exists() or not ref_p_path.exists() or not ref_u_path.exists():
+    missing_reference = not ref_iface_path.exists() or (
+        bool(write_field_outputs)
+        and (not ref_p_path.exists() or not ref_u_path.exists())
+    )
+    if missing_reference:
         die(
             "Scaled-screening mode requires Darcy outputs for the reference organoid; "
             f"missing one of {ref_iface_path}, {ref_p_path}, or {ref_u_path}"
         )
 
     ref_iface = json.loads(ref_iface_path.read_text())
-    ref_p = scaled_fields._load_xdmf_field(ref_p_path, np_mod, h5py)
-    ref_u = scaled_fields._load_xdmf_field(ref_u_path, np_mod, h5py)
+    ref_p = scaled_fields._load_xdmf_field(ref_p_path, np_mod, h5py) if bool(write_field_outputs) else None
+    ref_u = scaled_fields._load_xdmf_field(ref_u_path, np_mod, h5py) if bool(write_field_outputs) else None
 
     scaling_rows: list[dict[str, Any]] = []
     for organoid_id in range(1, int(n_organoids) + 1):
@@ -593,35 +629,54 @@ def synthesize_scaled_screening_outputs(
             zero_d[organoid_id],
             scaled_cfg["pressure_offset_anchor"],
         )
-        scaling_rows.append(
-            _write_scaled_organoid_outputs(
-                run_dir=run_dir,
-                organoid_id=organoid_id,
-                ref_iface=ref_iface,
-                ref_p=ref_p,
-                ref_u=ref_u,
-                target_zero_d=zero_d[organoid_id],
-                pressure_transform=transform,
-                shift=shift,
-                h5py=h5py,
-                scaled_fields=scaled_fields,
-                reference_organoid=reference_organoid,
+        if bool(write_field_outputs):
+            scaling_rows.append(
+                _write_scaled_organoid_outputs(
+                    run_dir=run_dir,
+                    organoid_id=organoid_id,
+                    ref_iface=ref_iface,
+                    ref_p=ref_p,
+                    ref_u=ref_u,
+                    target_zero_d=zero_d[organoid_id],
+                    pressure_transform=transform,
+                    shift=shift,
+                    h5py=h5py,
+                    scaled_fields=scaled_fields,
+                    reference_organoid=reference_organoid,
+                )
             )
-        )
+        else:
+            scaling_rows.append(
+                _write_scaled_organoid_interface_bc(
+                    run_dir=run_dir,
+                    organoid_id=organoid_id,
+                    ref_iface=ref_iface,
+                    target_zero_d=zero_d[organoid_id],
+                    pressure_transform=transform,
+                    shift=shift,
+                    reference_organoid=reference_organoid,
+                    field_outputs_written=False,
+                )
+            )
 
+    assumptions = list(
+        scaled_cfg.get("assumptions")
+        or [
+            "The same synthetic vasculature is replicated into each organoid well.",
+            "Only the reference organoid is solved with Darcy; wells 2..N reuse the reference fields with y-translation and 0D-based scaling.",
+            "Scaled wells write p.xdmf, u.xdmf, and interface_bc.json but do not run an independent Darcy solve.",
+        ]
+    )
+    if not bool(write_field_outputs):
+        assumptions.append(
+            "Minimal Darcy output mode writes per-organoid scaled interface_bc.json for synthesized wells; p.xdmf/u.xdmf are omitted."
+        )
     summary = {
         "trial_dir": str(run_dir),
         "prepared_root": str(run_dir),
         "reference_organoid": reference_organoid,
         "scaled_organoids": scaling_rows,
-        "assumptions": list(
-            scaled_cfg.get("assumptions")
-            or [
-                "The same synthetic vasculature is replicated into each organoid well.",
-                "Only the reference organoid is solved with Darcy; wells 2..N reuse the reference fields with y-translation and 0D-based scaling.",
-                "Scaled wells write p.xdmf, u.xdmf, and interface_bc.json but do not run an independent Darcy solve.",
-            ]
-        ),
+        "assumptions": assumptions,
     }
     save_json(run_dir / "scaled_screening_summary.json", summary)
 
@@ -1242,6 +1297,7 @@ def write_terminal_resistance_summary(
         "Pd_relaxation_q_ref",
         "terminal_response_correction_gain",
         "terminal_response_correction_effective_gain",
+        "terminal_response_correction_effective_gain_cap",
         "terminal_response_correction_severity",
         "terminal_response_correction_active",
         "terminal_response_correction_target",
@@ -1712,6 +1768,7 @@ def score_resistance_0d_trial(
     inverse_flow_pressure_weight_cap: float = 10.0,
     implied_alignment_weight: float = 2.0,
     implied_alignment_score_cap: float = 100.0,
+    cleanup_implied_alignment_score_cap: float = 10.0,
     jump_weight: float = 0.05,
     max_pressure_error_weight: float = 2.0,
     stubborn_max_error_weight: float = 2.0,
@@ -1875,6 +1932,8 @@ def score_resistance_0d_trial(
             "implied_interface_score": float("inf"),
             "implied_interface_objective_score": float("inf"),
             "implied_alignment_score_cap": float(implied_alignment_score_cap),
+            "cleanup_implied_alignment_score_cap": float(cleanup_implied_alignment_score_cap),
+            "cleanup_implied_alignment_cap_active": 0.0,
             "implied_median_percent": float("inf"),
             "implied_p90_percent": float("inf"),
             "implied_max_percent": float("inf"),
@@ -2068,8 +2127,17 @@ def score_resistance_0d_trial(
         # cancels the adaptive implied-alignment penalty.
         adaptive_implied_bonus = 0.0
     implied_objective_score = float(implied_interface_score)
+    cleanup_implied_alignment_cap_active = False
     if np.isfinite(implied_objective_score):
         cap = float(implied_alignment_score_cap)
+        if cleanup_errors:
+            cleanup_cap = float(cleanup_implied_alignment_score_cap)
+            if np.isfinite(cleanup_cap) and cleanup_cap > 0.0:
+                cleanup_implied_alignment_cap_active = True
+                if np.isfinite(cap) and cap > 0.0:
+                    cap = min(cap, cleanup_cap)
+                else:
+                    cap = cleanup_cap
         if np.isfinite(cap) and cap > 0.0:
             implied_objective_score = min(implied_objective_score, cap)
     score = (
@@ -2117,6 +2185,8 @@ def score_resistance_0d_trial(
         "implied_interface_score": float(implied_interface_score),
         "implied_interface_objective_score": float(implied_objective_score),
         "implied_alignment_score_cap": float(implied_alignment_score_cap),
+        "cleanup_implied_alignment_score_cap": float(cleanup_implied_alignment_score_cap),
+        "cleanup_implied_alignment_cap_active": float(cleanup_implied_alignment_cap_active),
         "implied_median_percent": float(implied_median),
         "implied_p90_percent": float(implied_p90),
         "implied_max_percent": float(implied_max),
@@ -2169,6 +2239,8 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "implied_interface_score",
         "implied_interface_objective_score",
         "implied_alignment_score_cap",
+        "cleanup_implied_alignment_score_cap",
+        "cleanup_implied_alignment_cap_active",
         "implied_median_percent",
         "implied_p90_percent",
         "implied_max_percent",
@@ -2276,6 +2348,7 @@ def apply_organoid_resistance_from_json(
     terminal_response_correction_error_scale: float = 0.10,
     terminal_response_correction_error_gamma: float = 1.0,
     terminal_response_correction_effective_gain_cap: float = 3.0,
+    terminal_cleanup_response_correction_effective_gain_cap: float = 5.0,
     terminal_response_correction_guarded_reasons: bool = False,
     cleanup_min_pd_relaxation: float = 0.0,
     cleanup_reopen_flow_fraction: float = 0.25,
@@ -2345,6 +2418,10 @@ def apply_organoid_resistance_from_json(
         response_error_scale = max(float(terminal_response_correction_error_scale), response_rel_error_tol)
         response_error_gamma = max(float(terminal_response_correction_error_gamma), 0.0)
         response_effective_gain_cap = max(float(terminal_response_correction_effective_gain_cap), 0.0)
+        cleanup_response_effective_gain_cap = max(
+            response_effective_gain_cap,
+            float(terminal_cleanup_response_correction_effective_gain_cap),
+        )
         response_guarded_reasons = bool(terminal_response_correction_guarded_reasons)
         cleanup_reopen_fraction = max(float(cleanup_reopen_flow_fraction), 0.0)
 
@@ -2808,9 +2885,20 @@ def apply_organoid_resistance_from_json(
                     0.0,
                 )
                 response_severity = float(response_severity ** response_error_gamma)
+                terminal_response_cap = (
+                    cleanup_response_effective_gain_cap
+                    if "late_stage_cleanup" in adaptive_state
+                    else response_effective_gain_cap
+                )
                 response_effective_gain = min(
                     response_gain * response_severity,
-                    response_effective_gain_cap,
+                    terminal_response_cap,
+                )
+            else:
+                terminal_response_cap = (
+                    cleanup_response_effective_gain_cap
+                    if "late_stage_cleanup" in adaptive_state
+                    else response_effective_gain_cap
                 )
             response_flow_weight_ok = (
                 pd_flow_weight_for_response >= response_min_flow_weight
@@ -2950,6 +3038,7 @@ def apply_organoid_resistance_from_json(
                 "Pd_relaxation_q_ref": float(q_ref_side),
                 "terminal_response_correction_gain": float(response_gain),
                 "terminal_response_correction_effective_gain": float(response_effective_gain),
+                "terminal_response_correction_effective_gain_cap": float(terminal_response_cap),
                 "terminal_response_correction_severity": float(response_severity),
                 "terminal_response_correction_active": bool(response_active),
                 "terminal_response_correction_target": float(response_target),
@@ -3527,17 +3616,21 @@ def run_darcy_for_all(
         run(cmd)
 
     if scaled_cfg is not None:
-        if str(getattr(args, "darcy_output_mode", "full")) == "minimal":
+        minimal_darcy_outputs = str(getattr(args, "darcy_output_mode", "full")) == "minimal"
+        if replicate_reference_outputs:
             replicate_reference_organoid_outputs(
                 run_dir,
                 int(args.n_organoids),
                 scaled_cfg,
-                copy_field_outputs=False,
+                copy_field_outputs=not minimal_darcy_outputs,
             )
-        elif replicate_reference_outputs:
-            replicate_reference_organoid_outputs(run_dir, int(args.n_organoids), scaled_cfg)
         else:
-            synthesize_scaled_screening_outputs(run_dir, int(args.n_organoids), scaled_cfg)
+            synthesize_scaled_screening_outputs(
+                run_dir,
+                int(args.n_organoids),
+                scaled_cfg,
+                write_field_outputs=not minimal_darcy_outputs,
+            )
 
 
 def _max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
@@ -4167,6 +4260,8 @@ def parse_args() -> argparse.Namespace:
                     help="Exponent for pressure-error severity weighting of response correction.")
     ap.add_argument("--terminal-response-correction-effective-gain-cap", type=float, default=3.0,
                     help="Maximum per-terminal effective response-correction gain after pressure-error severity weighting.")
+    ap.add_argument("--terminal-cleanup-response-correction-effective-gain-cap", type=float, default=5.0,
+                    help="Higher effective response-correction gain cap used only for terminals marked late_stage_cleanup; set near --terminal-response-correction-effective-gain-cap to preserve the older late-stage behavior.")
     ap.add_argument("--inner-response-correction-guarded-reasons", action=argparse.BooleanOptionalAction, default=True,
                     help="In inner 0D candidate search, allow positive response-correction candidates to test drive-limited/parent-suppressed terminals. The scored 0D trial decides whether to accept the move.")
     ap.add_argument("--stubborn-terminal-response-correction", action=argparse.BooleanOptionalAction, default=True,
@@ -4183,6 +4278,8 @@ def parse_args() -> argparse.Namespace:
                     help="Weight for candidate-proposed auxiliary P_implied versus Darcy interface alignment in the inner 0D score.")
     ap.add_argument("--inner-implied-alignment-score-cap", type=float, default=100.0,
                     help="Cap the auxiliary implied-pressure alignment score used in the inner 0D objective; <=0 disables the cap.")
+    ap.add_argument("--inner-cleanup-implied-alignment-score-cap", type=float, default=10.0,
+                    help="During late-stage cleanup, cap the auxiliary implied-pressure alignment score more tightly so the inner search prioritizes true terminal-pressure cleanup; <=0 disables this cleanup-specific cap.")
     ap.add_argument("--inner-jump-weight", type=float, default=0.0,
                     help="Weight for the temporary resistance pressure-jump penalty in the candidate score.")
     ap.add_argument("--inner-max-pressure-error-weight", type=float, default=2.0,
@@ -4632,6 +4729,9 @@ def main() -> None:
                         terminal_response_correction_effective_gain_cap=float(
                             args.terminal_response_correction_effective_gain_cap
                         ),
+                        terminal_cleanup_response_correction_effective_gain_cap=float(
+                            args.terminal_cleanup_response_correction_effective_gain_cap
+                        ),
                         terminal_response_correction_guarded_reasons=bool(
                             terminal_response_correction_guarded_reasons
                         ),
@@ -4917,6 +5017,9 @@ def main() -> None:
                     "terminal_response_correction_effective_gain_cap": float(
                         args.terminal_response_correction_effective_gain_cap
                     ),
+                    "terminal_cleanup_response_correction_effective_gain_cap": float(
+                        args.terminal_cleanup_response_correction_effective_gain_cap
+                    ),
                     "inner_response_correction_guarded_reasons": bool(
                         args.inner_response_correction_guarded_reasons
                     ),
@@ -4941,6 +5044,9 @@ def main() -> None:
                     ],
                     "implied_alignment_weight": float(args.inner_implied_alignment_weight),
                     "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
+                    "cleanup_implied_alignment_score_cap": float(
+                        args.inner_cleanup_implied_alignment_score_cap
+                    ),
                     "jump_weight": float(args.inner_jump_weight),
                     "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                     "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
@@ -5032,6 +5138,9 @@ def main() -> None:
                                 )
                             ),
                             implied_alignment_score_cap=float(args.inner_implied_alignment_score_cap),
+                            cleanup_implied_alignment_score_cap=float(
+                                args.inner_cleanup_implied_alignment_score_cap
+                            ),
                             jump_weight=float(args.inner_jump_weight),
                             max_pressure_error_weight=float(args.inner_max_pressure_error_weight),
                             stubborn_max_error_weight=float(args.inner_stubborn_max_error_weight),
@@ -5054,6 +5163,10 @@ def main() -> None:
                             "implied_interface_score": float("inf"),
                             "implied_interface_objective_score": float("inf"),
                             "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
+                            "cleanup_implied_alignment_score_cap": float(
+                                args.inner_cleanup_implied_alignment_score_cap
+                            ),
+                            "cleanup_implied_alignment_cap_active": 0.0,
                             "implied_median_percent": float("inf"),
                             "implied_p90_percent": float("inf"),
                             "implied_max_percent": float("inf"),
@@ -5185,6 +5298,9 @@ def main() -> None:
                             "terminal_response_correction_effective_gain_cap": float(
                                 args.terminal_response_correction_effective_gain_cap
                             ),
+                            "terminal_cleanup_response_correction_effective_gain_cap": float(
+                                args.terminal_cleanup_response_correction_effective_gain_cap
+                            ),
                             "inner_response_correction_guarded_reasons": bool(
                                 args.inner_response_correction_guarded_reasons
                             ),
@@ -5200,6 +5316,9 @@ def main() -> None:
                             "stubborn_terminal_count": int(len(stubborn_terminal_response_map)),
                             "implied_alignment_weight": float(args.inner_implied_alignment_weight),
                             "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
+                            "cleanup_implied_alignment_score_cap": float(
+                                args.inner_cleanup_implied_alignment_score_cap
+                            ),
                             "jump_weight": float(args.inner_jump_weight),
                             "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                             "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
