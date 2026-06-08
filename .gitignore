@@ -94,3 +94,11 @@ src/prep/scaled-screening-old/
 src/prep/scaled-screening/
 src/coupling-output-high/
 src/coupling-output-low/
+simvascular/final-paper/
+simvascular/final-rom/
+src/coupling-output-run-2-low/
+src/coupling-output-run-2-very-low/
+src/coupling-output-run-8-high/
+src/coupling-output-run-8-low/
+src/coupling-output-run-8-medium/
+src/coupling-output-run-8-very-high/
