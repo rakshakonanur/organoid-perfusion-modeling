@@ -58,13 +58,18 @@ def _copy_trial_organoid_inputs(trial_dir: Path, org_id: int, prepared_root: Pat
     return dst_org
 
 
-def _copy_well_geometry_from_tmp_mesh(tmp_mesh_dir: Path, dst_geom: Path, well_idx: int) -> None:
+def _copy_well_geometry_from_tmp_mesh(
+    tmp_mesh_dir: Path,
+    dst_geom: Path,
+    well_idx: int,
+    copy_1d_artifacts: bool = True,
+) -> None:
     dst_geom.mkdir(parents=True, exist_ok=True)
     run_all._copy_shared_geometry_outputs(
         tmp_mesh_dir,
         dst_geom,
         well_idx=well_idx,
-        copy_1d_artifacts=True,
+        copy_1d_artifacts=copy_1d_artifacts,
     )
 
     for stem in ("branched_network_inlet", "branched_network_outlet"):
@@ -89,6 +94,8 @@ def _scale_nonpressure_value(value: Any, scale_factor: float) -> Any:
 
 def _shift_coords_value(value: Any, shift: tuple[float, float, float]) -> Any:
     arr = np.asarray(value, dtype=float)
+    if arr.size == 0:
+        return [] if isinstance(value, list) else value
     return (arr + np.asarray(shift, dtype=float)).tolist()
 
 
@@ -239,13 +246,19 @@ def _write_scaled_organoid_outputs(
 
 
 def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
-    source_folder = args.source_folder.expanduser().resolve()
-    if not source_folder.exists():
-        raise FileNotFoundError(f"Missing source folder: {source_folder}")
+    use_no_synth = bool(getattr(args, "no_synthetic_vasculature", False))
+    source_folder = None
+    if not use_no_synth:
+        if args.source_folder is None:
+            raise ValueError("--source-folder is required unless --no-synthetic-vasculature is enabled.")
+        source_folder = args.source_folder.expanduser().resolve()
+        if not source_folder.exists():
+            raise FileNotFoundError(f"Missing source folder: {source_folder}")
 
     trial_root = args.trial_root.expanduser().resolve()
     prepared_root_parent = args.prepared_root.expanduser().resolve()
-    trial_name = args.trial_name.strip() if args.trial_name else source_folder.name
+    default_trial_name = "coupled-no-vasc-scaled" if use_no_synth else source_folder.name
+    trial_name = args.trial_name.strip() if args.trial_name else default_trial_name
     prepared_name = args.prepared_name.strip() if args.prepared_name else trial_name
     trial_dir = trial_root / trial_name
     prepared_root = prepared_root_parent / prepared_name
@@ -256,8 +269,6 @@ def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
     build_cmd = [
         sys.executable,
         str(build_script),
-        "--source-folder",
-        str(source_folder),
         "--trial-root",
         str(trial_root),
         "--trial-name",
@@ -275,6 +286,10 @@ def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
         "--shift-sign",
         str(float(args.shift_sign)),
     ]
+    if use_no_synth:
+        build_cmd.append("--no-synthetic-vasculature")
+    else:
+        build_cmd.extend(["--source-folder", str(source_folder)])
     if args.overwrite:
         build_cmd.append("--overwrite-trial")
     if args.no_shift_coords:
@@ -333,7 +348,7 @@ def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
         concave_bc_mode=str(args.concave_bc_mode),
         lp_arterial=float(args.lp_arterial),
         lp_venous=float(args.lp_venous),
-        no_synthetic_vasculature=False,
+        no_synthetic_vasculature=use_no_synth,
         fallback_inlet_pressure=float(args.fallback_inlet_pressure),
         fallback_outlet_pressure=float(args.fallback_outlet_pressure),
         inlet_flux_correction=bool(args.inlet_flux_correction),
@@ -359,7 +374,12 @@ def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
     for organoid_id in range(1, int(args.n_organoids) + 1):
         dst_org = _copy_trial_organoid_inputs(trial_dir, organoid_id, prepared_root)
         if organoid_id >= 2:
-            _copy_well_geometry_from_tmp_mesh(tmp_mesh_dir, dst_org / "geometry", organoid_id)
+            _copy_well_geometry_from_tmp_mesh(
+                tmp_mesh_dir,
+                dst_org / "geometry",
+                organoid_id,
+                copy_1d_artifacts=(not use_no_synth),
+            )
 
     np_mod = scaled_fields._import_numpy()
     h5py = scaled_fields._import_h5py()
@@ -396,13 +416,19 @@ def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     summary = {
-        "source_folder": str(source_folder),
+        "source_folder": str(source_folder) if source_folder is not None else "",
         "trial_dir": str(trial_dir),
         "prepared_root": str(prepared_root),
         "reference_organoid": 1,
+        "no_synthetic_vasculature": use_no_synth,
         "scaled_organoids": scaling_rows,
         "assumptions": [
-            "The same synthetic vasculature is replicated into each organoid well.",
+            (
+                "No synthetic vasculature is used; only organoid_1 is solved with Darcy and "
+                "wells 2..N reuse organoid_1 fields with y-translation and 0D-based scaling."
+                if use_no_synth
+                else "The same synthetic vasculature is replicated into each organoid well."
+            ),
             "Only organoid_1 is solved with Darcy; wells 2..N reuse organoid_1 fields with y-translation and 0D-based scaling.",
             "Scaled wells write p.xdmf, u.xdmf, and interface_bc.json but do not run an independent Darcy solve.",
         ],
@@ -415,12 +441,12 @@ def prepare_scaled_screening_trial(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build one repeated-geometry trial from a synthetic vasculature folder, "
-            "run the full Darcy solve only for organoid_1, and synthesize wells 2..N "
-            "using the 0D-based scaling rules from compare_scaled_organoid_fields.py."
+            "Build one repeated-geometry trial, run the full Darcy solve only for "
+            "organoid_1, and synthesize wells 2..N using the 0D-based scaling rules "
+            "from compare_scaled_organoid_fields.py."
         )
     )
-    parser.add_argument("--source-folder", type=Path, required=True)
+    parser.add_argument("--source-folder", type=Path, default=None)
     parser.add_argument("--trial-root", type=Path, default=REPO_SRC / "prep" / "prepped")
     parser.add_argument("--trial-name", default="")
     parser.add_argument("--prepared-root", type=Path, default=REPO_SRC / "prep" / "scaled-screening")
@@ -460,6 +486,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, 0.5375])
     parser.add_argument("--y-shift-step", type=float, default=0.6)
     parser.add_argument("--pressure-offset-anchor", choices=("arterial", "venous"), default="arterial")
+    parser.add_argument("--no-synthetic-vasculature", action="store_true")
     return parser.parse_args()
 
 
