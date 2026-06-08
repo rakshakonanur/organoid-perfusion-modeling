@@ -14,8 +14,8 @@ import csv
 from time import perf_counter
 
 # Import your existing scripts as modules
-MESH_DIR  = Path("../../src/geometry").resolve()
-DARCY_DIR = Path("../../src/solves").resolve()
+MESH_DIR  = Path("./src/geometry").resolve()
+DARCY_DIR = Path("./src/solves").resolve()
 
 sys.path.insert(0, str(MESH_DIR))
 sys.path.insert(0, str(DARCY_DIR))
