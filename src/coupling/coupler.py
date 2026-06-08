@@ -274,6 +274,7 @@ def load_scaled_screening_config(trial_dir: Optional[Path], args: argparse.Names
     shifts: dict[int, tuple[float, float, float]] = {
         reference_organoid: (0.0, 0.0, 0.0),
     }
+    prepared_transforms: dict[int, dict[str, Any]] = {}
     pressure_offset_anchor = str(getattr(args, "scaled_pressure_offset_anchor", "arterial"))
 
     for row in summary.get("scaled_organoids", []):
@@ -289,6 +290,7 @@ def load_scaled_screening_config(trial_dir: Optional[Path], args: argparse.Names
                 pass
         if "offset_anchor" in row:
             pressure_offset_anchor = str(row.get("offset_anchor", pressure_offset_anchor))
+        prepared_transforms[organoid_id] = dict(row)
 
     for organoid_id in range(1, int(args.n_organoids) + 1):
         shifts.setdefault(
@@ -302,7 +304,43 @@ def load_scaled_screening_config(trial_dir: Optional[Path], args: argparse.Names
         "reference_organoid": reference_organoid,
         "pressure_offset_anchor": str(pressure_offset_anchor).strip().lower(),
         "shifts": shifts,
+        "prepared_transforms": prepared_transforms,
         "assumptions": list(summary.get("assumptions", [])),
+    }
+
+
+def _fallback_scaled_pressure_transform(
+    scaled_cfg: dict[str, Any],
+    organoid_id: int,
+) -> Optional[dict[str, float]]:
+    row = dict(scaled_cfg.get("prepared_transforms", {}).get(int(organoid_id), {}))
+    if not row:
+        return None
+    required = (
+        "scale_factor",
+        "pressure_offset",
+        "target_arterial_pressure",
+        "target_venous_pressure",
+    )
+    if any(key not in row for key in required):
+        return None
+    anchor = str(
+        row.get(
+            "offset_anchor",
+            scaled_cfg.get("pressure_offset_anchor", "arterial"),
+        )
+    ).strip().lower()
+    return {
+        "scale_factor": float(row["scale_factor"]),
+        "pressure_offset": float(row["pressure_offset"]),
+        "target_arterial_pressure": float(row["target_arterial_pressure"]),
+        "target_venous_pressure": float(row["target_venous_pressure"]),
+        "offset_anchor": anchor,
+        "offset_from_artery": float(row.get("pressure_offset", 0.0)),
+        "offset_from_vein": float(row.get("pressure_offset", 0.0)),
+        "offset_mismatch": float(row.get("offset_mismatch", 0.0)),
+        "arterial_channel_drop": float(row.get("arterial_channel_drop", 0.0)),
+        "venous_channel_drop": float(row.get("venous_channel_drop", 0.0)),
     }
 
 
@@ -424,46 +462,6 @@ def _build_scaled_interface_bc(
     return iface
 
 
-def _write_scaled_organoid_interface_bc(
-    run_dir: Path,
-    organoid_id: int,
-    ref_iface: dict[str, Any],
-    target_zero_d: dict[str, Any],
-    pressure_transform: dict[str, float],
-    shift: tuple[float, float, float],
-    reference_organoid: int,
-    field_outputs_written: bool,
-) -> dict[str, Any]:
-    scale_factor = float(pressure_transform["scale_factor"])
-    pressure_offset = float(pressure_transform["pressure_offset"])
-
-    out_dir = run_dir / f"organoid_{organoid_id}" / "out_darcy"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    iface = _build_scaled_interface_bc(
-        ref_iface=ref_iface,
-        target_zero_d=target_zero_d,
-        pressure_transform=pressure_transform,
-        scale_factor=scale_factor,
-        shift=shift,
-    )
-    iface["scaled_from_reference_organoid"] = int(reference_organoid)
-    if not bool(field_outputs_written):
-        iface["scaled_output_mode"] = "interface_only"
-    (out_dir / "interface_bc.json").write_text(json.dumps(iface, indent=2))
-    return {
-        "organoid_id": organoid_id,
-        "scale_factor": scale_factor,
-        "pressure_offset": pressure_offset,
-        "shift": list(shift),
-        "target_arterial_pressure": float(pressure_transform["target_arterial_pressure"]),
-        "target_venous_pressure": float(pressure_transform["target_venous_pressure"]),
-        "offset_anchor": pressure_transform["offset_anchor"],
-        "offset_mismatch": float(pressure_transform["offset_mismatch"]),
-        "field_outputs_written": bool(field_outputs_written),
-    }
-
-
 def _write_scaled_organoid_outputs(
     run_dir: Path,
     organoid_id: int,
@@ -509,16 +507,25 @@ def _write_scaled_organoid_outputs(
         h5py,
     )
 
-    return _write_scaled_organoid_interface_bc(
-        run_dir=run_dir,
-        organoid_id=organoid_id,
+    iface = _build_scaled_interface_bc(
         ref_iface=ref_iface,
         target_zero_d=target_zero_d,
         pressure_transform=pressure_transform,
+        scale_factor=scale_factor,
         shift=shift,
-        reference_organoid=reference_organoid,
-        field_outputs_written=True,
     )
+    iface["scaled_from_reference_organoid"] = int(reference_organoid)
+    (out_dir / "interface_bc.json").write_text(json.dumps(iface, indent=2))
+    return {
+        "organoid_id": organoid_id,
+        "scale_factor": scale_factor,
+        "pressure_offset": pressure_offset,
+        "shift": list(shift),
+        "target_arterial_pressure": float(pressure_transform["target_arterial_pressure"]),
+        "target_venous_pressure": float(pressure_transform["target_venous_pressure"]),
+        "offset_anchor": pressure_transform["offset_anchor"],
+        "offset_mismatch": float(pressure_transform["offset_mismatch"]),
+    }
 
 
 def replicate_reference_organoid_outputs(
@@ -586,7 +593,7 @@ def synthesize_scaled_screening_outputs(
 ) -> None:
     scaled_fields = _import_scaled_field_helpers()
     np_mod = scaled_fields._import_numpy()
-    h5py = scaled_fields._import_h5py() if bool(write_field_outputs) else None
+    h5py = scaled_fields._import_h5py() if write_field_outputs else None
 
     reference_organoid = int(scaled_cfg["reference_organoid"])
     grouped = scaled_fields._load_0d_groups(run_dir, np_mod)
@@ -601,8 +608,7 @@ def synthesize_scaled_screening_outputs(
     ref_p_path = ref_out / "p.xdmf"
     ref_u_path = ref_out / "u.xdmf"
     missing_reference = not ref_iface_path.exists() or (
-        bool(write_field_outputs)
-        and (not ref_p_path.exists() or not ref_u_path.exists())
+        bool(write_field_outputs) and (not ref_p_path.exists() or not ref_u_path.exists())
     )
     if missing_reference:
         die(
@@ -611,8 +617,8 @@ def synthesize_scaled_screening_outputs(
         )
 
     ref_iface = json.loads(ref_iface_path.read_text())
-    ref_p = scaled_fields._load_xdmf_field(ref_p_path, np_mod, h5py) if bool(write_field_outputs) else None
-    ref_u = scaled_fields._load_xdmf_field(ref_u_path, np_mod, h5py) if bool(write_field_outputs) else None
+    ref_p = scaled_fields._load_xdmf_field(ref_p_path, np_mod, h5py) if write_field_outputs else None
+    ref_u = scaled_fields._load_xdmf_field(ref_u_path, np_mod, h5py) if write_field_outputs else None
 
     scaling_rows: list[dict[str, Any]] = []
     for organoid_id in range(1, int(n_organoids) + 1):
@@ -624,12 +630,17 @@ def synthesize_scaled_screening_outputs(
                 scaled_fields._shift_for_organoid(reference_organoid, organoid_id, float(0.0)),
             )
         )
-        transform = scaled_fields._pressure_transform_from_0d(
-            ref_zero_d,
-            zero_d[organoid_id],
-            scaled_cfg["pressure_offset_anchor"],
-        )
-        if bool(write_field_outputs):
+        try:
+            transform = scaled_fields._pressure_transform_from_0d(
+                ref_zero_d,
+                zero_d[organoid_id],
+                scaled_cfg["pressure_offset_anchor"],
+            )
+        except ZeroDivisionError:
+            transform = _fallback_scaled_pressure_transform(scaled_cfg, organoid_id)
+            if transform is None:
+                raise
+        if write_field_outputs:
             scaling_rows.append(
                 _write_scaled_organoid_outputs(
                     run_dir=run_dir,
@@ -646,37 +657,50 @@ def synthesize_scaled_screening_outputs(
                 )
             )
         else:
+            out_dir = run_dir / f"organoid_{organoid_id}" / "out_darcy"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            iface = _build_scaled_interface_bc(
+                ref_iface=ref_iface,
+                target_zero_d=zero_d[organoid_id],
+                pressure_transform=transform,
+                scale_factor=float(transform["scale_factor"]),
+                shift=shift,
+            )
+            iface["scaled_from_reference_organoid"] = int(reference_organoid)
+            (out_dir / "interface_bc.json").write_text(json.dumps(iface, indent=2))
             scaling_rows.append(
-                _write_scaled_organoid_interface_bc(
-                    run_dir=run_dir,
-                    organoid_id=organoid_id,
-                    ref_iface=ref_iface,
-                    target_zero_d=zero_d[organoid_id],
-                    pressure_transform=transform,
-                    shift=shift,
-                    reference_organoid=reference_organoid,
-                    field_outputs_written=False,
-                )
+                {
+                    "organoid_id": organoid_id,
+                    "mode": "scaled_interface_only",
+                    "reference_organoid": reference_organoid,
+                    "scale_factor": float(transform["scale_factor"]),
+                    "pressure_offset": float(transform["pressure_offset"]),
+                    "shift": list(shift),
+                    "target_arterial_pressure": float(transform["target_arterial_pressure"]),
+                    "target_venous_pressure": float(transform["target_venous_pressure"]),
+                    "offset_anchor": transform["offset_anchor"],
+                    "offset_mismatch": float(transform["offset_mismatch"]),
+                    "field_outputs_copied": False,
+                }
             )
 
-    assumptions = list(
-        scaled_cfg.get("assumptions")
-        or [
-            "The same synthetic vasculature is replicated into each organoid well.",
-            "Only the reference organoid is solved with Darcy; wells 2..N reuse the reference fields with y-translation and 0D-based scaling.",
-            "Scaled wells write p.xdmf, u.xdmf, and interface_bc.json but do not run an independent Darcy solve.",
-        ]
-    )
-    if not bool(write_field_outputs):
-        assumptions.append(
-            "Minimal Darcy output mode writes per-organoid scaled interface_bc.json for synthesized wells; p.xdmf/u.xdmf are omitted."
-        )
     summary = {
         "trial_dir": str(run_dir),
         "prepared_root": str(run_dir),
         "reference_organoid": reference_organoid,
         "scaled_organoids": scaling_rows,
-        "assumptions": assumptions,
+        "assumptions": list(
+            scaled_cfg.get("assumptions")
+            or [
+                "The same synthetic vasculature is replicated into each organoid well.",
+                "Only the reference organoid is solved with Darcy; wells 2..N reuse the reference fields with y-translation and 0D-based scaling.",
+                (
+                    "Scaled wells write p.xdmf, u.xdmf, and interface_bc.json but do not run an independent Darcy solve."
+                    if write_field_outputs
+                    else "Scaled wells write scaled interface_bc.json values only; p.xdmf/u.xdmf are intentionally omitted in minimal output mode."
+                ),
+            ]
+        ),
     }
     save_json(run_dir / "scaled_screening_summary.json", summary)
 
@@ -1297,19 +1321,10 @@ def write_terminal_resistance_summary(
         "Pd_relaxation_q_ref",
         "terminal_response_correction_gain",
         "terminal_response_correction_effective_gain",
-        "terminal_response_correction_effective_gain_cap",
         "terminal_response_correction_severity",
         "terminal_response_correction_active",
         "terminal_response_correction_target",
         "terminal_response_correction_error_rel",
-        "terminal_pressure_sensitivity_active",
-        "terminal_pressure_sensitivity_slope",
-        "terminal_pressure_sensitivity_recent_slope",
-        "terminal_pressure_sensitivity_effective_slope",
-        "terminal_pressure_sensitivity_sign_consistency",
-        "terminal_pressure_sensitivity_sample_count",
-        "terminal_pressure_sensitivity_correction",
-        "terminal_pressure_sensitivity_target",
         "stubborn_continuity_override_active",
         "stubborn_continuity_override_relaxation",
         "stubborn_continuity_override_target",
@@ -1323,6 +1338,11 @@ def write_terminal_resistance_summary(
         "adaptive_recommendation",
         "adaptive_recent_improvement_rel",
         "adaptive_recent_error_rel",
+        "terminal_pressure_match_active",
+        "terminal_pressure_match_slope",
+        "terminal_pressure_match_delta_pd",
+        "terminal_pressure_match_target",
+        "terminal_pressure_match_stable_r_count",
         "Q_0D",
         "Q_for_R",
         "Q_denominator",
@@ -1521,37 +1541,6 @@ def build_stubborn_terminal_response_map(
     return out
 
 
-def merge_adaptive_stubborn_response_map(
-    response_map: dict[tuple[int, str, int], dict[str, float]],
-    adaptive_state_map: dict[tuple[int, str, int], dict[str, Any]],
-    enabled: bool,
-    min_rel_error: float,
-    gain: float,
-) -> dict[tuple[int, str, int], dict[str, float]]:
-    if not enabled or gain <= 0.0:
-        return response_map
-    out = dict(response_map)
-    for key, info in adaptive_state_map.items():
-        state = str(info.get("state", ""))
-        if not any(tag in state for tag in ("plateaued", "late_stage_cleanup")):
-            continue
-        err = _safe_float(info.get("recent_error_rel"))
-        if not np.isfinite(err) or err < float(min_rel_error):
-            continue
-        improvement = _safe_float(info.get("recent_improvement_rel"))
-        if not np.isfinite(improvement):
-            improvement = 0.0
-        existing_gain = _safe_float(out.get(key, {}).get("gain"))
-        if np.isfinite(existing_gain) and existing_gain >= float(gain):
-            continue
-        out[key] = {
-            "gain": float(gain),
-            "error_rel": float(err),
-            "recent_improvement_rel": float(improvement),
-        }
-    return out
-
-
 def _terminal_key_from_row(row: dict[str, Any]) -> tuple[int, str, int] | None:
     try:
         return (int(row.get("organoid")), str(row.get("side")), int(row.get("branch_id")))
@@ -1572,11 +1561,6 @@ def build_adaptive_terminal_state_map(
     plateau_improvement_rel: float,
     release_rel_error: float,
     release_stable_runs: int,
-    late_stage_cleanup: bool = True,
-    cleanup_rel_error: float = 0.02,
-    cleanup_max_rel_error: float = 0.25,
-    cleanup_improvement_rel: float | None = None,
-    cleanup_improvement_fraction: float = 0.10,
 ) -> dict[tuple[int, str, int], dict[str, Any]]:
     if not bool(enabled):
         return {}
@@ -1632,28 +1616,6 @@ def build_adaptive_terminal_state_map(
             and (not np.isfinite(improvement) or improvement <= float(plateau_improvement_rel))
         ):
             states.append("plateaued")
-        cleanup_improvement_limit = (
-            float(plateau_improvement_rel)
-            if cleanup_improvement_rel is None
-            else float(cleanup_improvement_rel)
-        )
-        slow_cleanup_progress = (
-            not np.isfinite(improvement)
-            or improvement <= cleanup_improvement_limit
-            or (
-                np.isfinite(last_err)
-                and improvement <= max(float(cleanup_improvement_fraction), 0.0) * last_err
-            )
-        )
-        late_cleanup = (
-            bool(late_stage_cleanup)
-            and np.isfinite(last_err)
-            and last_err >= max(float(cleanup_rel_error), 0.0)
-            and last_err <= max(float(cleanup_max_rel_error), float(cleanup_rel_error))
-            and slow_cleanup_progress
-        )
-        if late_cleanup:
-            states.append("late_stage_cleanup")
         if len(rows) >= 2:
             prev_err = _safe_float(rows[-2].get("_error_rel"))
             if np.isfinite(prev_err) and np.isfinite(last_err) and last_err > prev_err * 1.25:
@@ -1666,8 +1628,6 @@ def build_adaptive_terminal_state_map(
         recommendation = ""
         if "diverging" in states:
             recommendation = "rollback_or_reject_worsening_candidates"
-        elif "late_stage_cleanup" in states:
-            recommendation = "pressure_response_cleanup"
         elif "plateaued" in states and key[1] == "venous":
             recommendation = "consider_increasing_venous_parent_margin"
         elif "plateaued" in states and key[1] == "arterial":
@@ -1724,28 +1684,6 @@ def write_adaptive_terminal_state_summary(
             })
 
 
-def build_previous_terminal_error_map(
-    coupled_root: Path,
-    current_run: int,
-) -> dict[tuple[int, str, int], float]:
-    prev_run = int(current_run) - 1
-    if prev_run < 1:
-        return {}
-    prev_rows = read_terminal_resistance_summary(
-        coupled_root / f"run_{prev_run}" / "terminal_resistance_bc_summary.csv"
-    )
-    out: dict[tuple[int, str, int], float] = {}
-    for row in prev_rows:
-        try:
-            key = (int(row.get("organoid")), str(row.get("side")), int(row.get("branch_id")))
-        except Exception:
-            continue
-        err_percent = 100.0 * _terminal_pressure_error_rel_from_row(row)
-        if np.isfinite(err_percent):
-            out[key] = float(err_percent)
-    return out
-
-
 def build_terminal_pressure_sensitivity_map(
     coupled_root: Path,
     current_run: int,
@@ -1753,6 +1691,7 @@ def build_terminal_pressure_sensitivity_map(
     history_window: int,
     min_pd_change: float,
     min_p0d_change: float,
+    stable_r_rel_threshold: float = 1.0e-2,
 ) -> dict[tuple[int, str, int], dict[str, float]]:
     if not bool(enabled):
         return {}
@@ -1786,6 +1725,7 @@ def build_terminal_pressure_sensitivity_map(
             pd_next = _safe_float(row.get("Pd_next"))
             p0d_result = _safe_float(result_by_key[key].get("P_0D_target"))
             p_darcy_result = _safe_float(result_by_key[key].get("P_Darcy"))
+            r_rel_change = _safe_float(row.get("R_rel_change"))
             if not (np.isfinite(pd_next) and np.isfinite(p0d_result)):
                 continue
             history.setdefault(key, []).append({
@@ -1793,11 +1733,13 @@ def build_terminal_pressure_sensitivity_map(
                 "pd_next": float(pd_next),
                 "p0d_result": float(p0d_result),
                 "p_darcy_result": float(p_darcy_result),
+                "r_rel_change": float(r_rel_change),
             })
 
     out: dict[tuple[int, str, int], dict[str, float]] = {}
     pd_tol = max(float(min_pd_change), 0.0)
     p0d_tol = max(float(min_p0d_change), 0.0)
+    stable_r_tol = max(float(stable_r_rel_threshold), 0.0)
     for key, items in history.items():
         items = sorted(items, key=lambda item: item["run"])
         slopes: list[float] = []
@@ -1818,6 +1760,12 @@ def build_terminal_pressure_sensitivity_map(
             continue
         signs = [1.0 if value > 0.0 else -1.0 if value < 0.0 else 0.0 for value in slopes]
         sign_consistency = abs(float(np.mean(signs))) if signs else 0.0
+        stable_r_count = 0
+        for item in reversed(items):
+            item_r_rel = _safe_float(item.get("r_rel_change"))
+            if not np.isfinite(item_r_rel) or abs(float(item_r_rel)) > stable_r_tol:
+                break
+            stable_r_count += 1
         out[key] = {
             "dp0d_dpd": float(np.median(np.asarray(slopes, dtype=float))),
             "recent_dp0d_dpd": float(slopes[-1]),
@@ -1825,7 +1773,32 @@ def build_terminal_pressure_sensitivity_map(
             "sample_count": float(len(slopes)),
             "median_pd_change": float(np.median(np.asarray(pd_changes, dtype=float))),
             "median_p0d_change": float(np.median(np.asarray(p0d_changes, dtype=float))),
+            "recent_r_rel_change": float(_safe_float(items[-1].get("r_rel_change"))),
+            "stable_r_run_count": float(stable_r_count),
+            "stable_r_rel_threshold": float(stable_r_tol),
         }
+    return out
+
+
+def build_previous_terminal_error_map(
+    coupled_root: Path,
+    current_run: int,
+) -> dict[tuple[int, str, int], float]:
+    prev_run = int(current_run) - 1
+    if prev_run < 1:
+        return {}
+    prev_rows = read_terminal_resistance_summary(
+        coupled_root / f"run_{prev_run}" / "terminal_resistance_bc_summary.csv"
+    )
+    out: dict[tuple[int, str, int], float] = {}
+    for row in prev_rows:
+        try:
+            key = (int(row.get("organoid")), str(row.get("side")), int(row.get("branch_id")))
+        except Exception:
+            continue
+        err_percent = 100.0 * _terminal_pressure_error_rel_from_row(row)
+        if np.isfinite(err_percent):
+            out[key] = float(err_percent)
     return out
 
 
@@ -1865,12 +1838,9 @@ def score_resistance_0d_trial(
     inverse_flow_pressure_gamma: float = 0.5,
     inverse_flow_pressure_weight_cap: float = 10.0,
     implied_alignment_weight: float = 2.0,
-    implied_alignment_score_cap: float = 100.0,
-    cleanup_implied_alignment_score_cap: float = 10.0,
     jump_weight: float = 0.05,
     max_pressure_error_weight: float = 2.0,
     stubborn_max_error_weight: float = 2.0,
-    cleanup_max_error_weight: float = 0.0,
     flow_guard_reject: bool = False,
     flow_guard_drive_tol: float = 1.0,
     flow_guard_q_floor: float = 1.0e-20,
@@ -1902,7 +1872,6 @@ def score_resistance_0d_trial(
     active_errors: list[float] = []
     errors_by_side: dict[str, list[float]] = {"arterial": [], "venous": []}
     stubborn_errors: list[float] = []
-    cleanup_errors: list[float] = []
     pressure_error_flow_samples: list[tuple[str, float, float]] = []
     proposed_implied_errors: list[float] = []
     proposed_implied_errors_by_side: dict[str, list[float]] = {"arterial": [], "venous": []}
@@ -1949,10 +1918,6 @@ def score_resistance_0d_trial(
                 active_errors.append(float(err))
             if str(row.get("stubborn_terminal", "")).lower() == "true":
                 stubborn_errors.append(float(err))
-            adaptive_state = str(row.get("adaptive_terminal_state", ""))
-            pd_reason = str(row.get("Pd_target_reason", ""))
-            if "late_stage_cleanup" in adaptive_state or "venous_pressure_cleanup" in pd_reason:
-                cleanup_errors.append(float(err))
             prev_err = (previous_terminal_errors or {}).get(
                 (int(organoid), str(side_label), int(branch_id)),
                 float("nan"),
@@ -2028,10 +1993,6 @@ def score_resistance_0d_trial(
             "arterial_inverse_flow_pressure_score": float("inf"),
             "venous_inverse_flow_pressure_score": float("inf"),
             "implied_interface_score": float("inf"),
-            "implied_interface_objective_score": float("inf"),
-            "implied_alignment_score_cap": float(implied_alignment_score_cap),
-            "cleanup_implied_alignment_score_cap": float(cleanup_implied_alignment_score_cap),
-            "cleanup_implied_alignment_cap_active": 0.0,
             "implied_median_percent": float("inf"),
             "implied_p90_percent": float("inf"),
             "implied_max_percent": float("inf"),
@@ -2055,9 +2016,6 @@ def score_resistance_0d_trial(
             "stubborn_max_error_percent": float("inf"),
             "stubborn_p90_error_percent": float("inf"),
             "stubborn_error_score": float("inf"),
-            "cleanup_max_error_percent": float("inf"),
-            "cleanup_p90_error_percent": float("inf"),
-            "cleanup_error_score": float("inf"),
             "pressure_bc_count": float(pressure_count),
             "resistance_bc_count": float(resistance_count),
         }
@@ -2078,10 +2036,6 @@ def score_resistance_0d_trial(
     stubborn_max_err = float(np.nanmax(stubborn_arr))
     stubborn_p90_err = float(np.nanpercentile(stubborn_arr, 90.0))
     stubborn_error_score = stubborn_max_err + 0.25 * stubborn_p90_err
-    cleanup_arr = np.array(cleanup_errors if cleanup_errors else [0.0], dtype=float)
-    cleanup_max_err = float(np.nanmax(cleanup_arr))
-    cleanup_p90_err = float(np.nanpercentile(cleanup_arr, 90.0))
-    cleanup_error_score = cleanup_max_err + 0.5 * cleanup_p90_err
     active_median = float(np.nanmedian(active_arr))
     jump_median = float(np.nanmedian(jump_arr))
     jump_p90 = float(np.nanpercentile(jump_arr, 90.0))
@@ -2224,27 +2178,12 @@ def score_resistance_0d_trial(
         # error, so subtracting it rewards worse implied-pressure alignment and
         # cancels the adaptive implied-alignment penalty.
         adaptive_implied_bonus = 0.0
-    implied_objective_score = float(implied_interface_score)
-    cleanup_implied_alignment_cap_active = False
-    if np.isfinite(implied_objective_score):
-        cap = float(implied_alignment_score_cap)
-        if cleanup_errors:
-            cleanup_cap = float(cleanup_implied_alignment_score_cap)
-            if np.isfinite(cleanup_cap) and cleanup_cap > 0.0:
-                cleanup_implied_alignment_cap_active = True
-                if np.isfinite(cap) and cap > 0.0:
-                    cap = min(cap, cleanup_cap)
-                else:
-                    cap = cleanup_cap
-        if np.isfinite(cap) and cap > 0.0:
-            implied_objective_score = min(implied_objective_score, cap)
     score = (
         effective_pressure_weight * pressure_score
-        + max(float(implied_alignment_weight), 0.0) * implied_objective_score
+        + max(float(implied_alignment_weight), 0.0) * implied_interface_score
         + max(float(jump_weight), 0.0) * jump_score
         + max(float(max_pressure_error_weight), 0.0) * outlier_error_score
         + max(float(stubborn_max_error_weight), 0.0) * stubborn_error_score
-        + max(float(cleanup_max_error_weight), 0.0) * cleanup_error_score
         + max(float(flow_guard_weight), 0.0) * flow_guard_score
         + max(float(outlier_guard_weight), 0.0) * outlier_guard_score
     )
@@ -2269,9 +2208,6 @@ def score_resistance_0d_trial(
         "stubborn_max_error_percent": float(stubborn_max_err),
         "stubborn_p90_error_percent": float(stubborn_p90_err),
         "stubborn_error_score": float(stubborn_error_score),
-        "cleanup_max_error_percent": float(cleanup_max_err),
-        "cleanup_p90_error_percent": float(cleanup_p90_err),
-        "cleanup_error_score": float(cleanup_error_score),
         "jump_median_percent": jump_median,
         "jump_p90_percent": jump_p90,
         "jump_max_percent": jump_max,
@@ -2281,10 +2217,6 @@ def score_resistance_0d_trial(
         "arterial_inverse_flow_pressure_score": float(arterial_inverse_flow_score),
         "venous_inverse_flow_pressure_score": float(venous_inverse_flow_score),
         "implied_interface_score": float(implied_interface_score),
-        "implied_interface_objective_score": float(implied_objective_score),
-        "implied_alignment_score_cap": float(implied_alignment_score_cap),
-        "cleanup_implied_alignment_score_cap": float(cleanup_implied_alignment_score_cap),
-        "cleanup_implied_alignment_cap_active": float(cleanup_implied_alignment_cap_active),
         "implied_median_percent": float(implied_median),
         "implied_p90_percent": float(implied_p90),
         "implied_max_percent": float(implied_max),
@@ -2335,10 +2267,6 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "arterial_inverse_flow_pressure_score",
         "venous_inverse_flow_pressure_score",
         "implied_interface_score",
-        "implied_interface_objective_score",
-        "implied_alignment_score_cap",
-        "cleanup_implied_alignment_score_cap",
-        "cleanup_implied_alignment_cap_active",
         "implied_median_percent",
         "implied_p90_percent",
         "implied_max_percent",
@@ -2359,9 +2287,6 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "stubborn_max_error_percent",
         "stubborn_p90_error_percent",
         "stubborn_error_score",
-        "cleanup_max_error_percent",
-        "cleanup_p90_error_percent",
-        "cleanup_error_score",
         "jump_median_percent",
         "active_jump_median_percent",
         "jump_p90_percent",
@@ -2373,8 +2298,6 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "flow_guard_increase_p90_percent",
         "flow_guard_increase_max_percent",
         "flow_guard_reduction_median_percent",
-        "outlier_guard_count",
-        "outlier_guard_score",
         "pressure_bc_count",
         "resistance_bc_count",
     ]
@@ -2446,18 +2369,17 @@ def apply_organoid_resistance_from_json(
     terminal_response_correction_error_scale: float = 0.10,
     terminal_response_correction_error_gamma: float = 1.0,
     terminal_response_correction_effective_gain_cap: float = 3.0,
-    terminal_cleanup_response_correction_effective_gain_cap: float = 5.0,
     terminal_response_correction_guarded_reasons: bool = False,
-    cleanup_min_pd_relaxation: float = 0.0,
-    cleanup_reopen_flow_fraction: float = 0.25,
     stubborn_terminal_response_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
     adaptive_terminal_state_map: dict[tuple[int, str, int], dict[str, Any]] | None = None,
     terminal_pressure_sensitivity_map: dict[tuple[int, str, int], dict[str, float]] | None = None,
-    terminal_sensitivity_rel_error_tol: float = 0.01,
+    terminal_sensitivity_rel_error_tol: float = 0.02,
     terminal_sensitivity_gain: float = 0.5,
     terminal_sensitivity_min_abs_slope: float = 0.01,
     terminal_sensitivity_sign_consistency: float = 0.75,
     terminal_sensitivity_max_multiplier: float = 3.0,
+    pressure_match_stable_r_rel_threshold: float = 1.0e-2,
+    pressure_match_min_stable_r_runs: int = 3,
     allow_missing_terminal_bcs: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -2522,12 +2444,7 @@ def apply_organoid_resistance_from_json(
         response_error_scale = max(float(terminal_response_correction_error_scale), response_rel_error_tol)
         response_error_gamma = max(float(terminal_response_correction_error_gamma), 0.0)
         response_effective_gain_cap = max(float(terminal_response_correction_effective_gain_cap), 0.0)
-        cleanup_response_effective_gain_cap = max(
-            response_effective_gain_cap,
-            float(terminal_cleanup_response_correction_effective_gain_cap),
-        )
         response_guarded_reasons = bool(terminal_response_correction_guarded_reasons)
-        cleanup_reopen_fraction = max(float(cleanup_reopen_flow_fraction), 0.0)
 
         def _effective_pd_relaxation(q_denominator: float) -> tuple[float, float]:
             if pd_relax_base <= 0.0 or inv_pd_fraction <= 0.0:
@@ -2581,6 +2498,7 @@ def apply_organoid_resistance_from_json(
             adaptive_state = str(adaptive_info.get("state", ""))
             adaptive_force_suppression = bool(adaptive_info.get("force_suppression", False))
             adaptive_recommendation = str(adaptive_info.get("recommendation", ""))
+            adaptive_last_reason = str(adaptive_info.get("last_reason", ""))
             adaptive_recent_improvement_rel = _safe_float(
                 adaptive_info.get("recent_improvement_rel")
             )
@@ -2589,11 +2507,13 @@ def apply_organoid_resistance_from_json(
                 terminal_pressure_sensitivity_map or {}
             ).get((int(organoid_idx), side_label, int(branch_id)), {})
             sensitivity_slope = _safe_float(sensitivity_info.get("dp0d_dpd"))
-            sensitivity_recent_slope = _safe_float(sensitivity_info.get("recent_dp0d_dpd"))
             sensitivity_sign_consistency_value = _safe_float(
                 sensitivity_info.get("sign_consistency")
             )
             sensitivity_sample_count = _safe_float(sensitivity_info.get("sample_count"))
+            sensitivity_stable_r_count = _safe_float(
+                sensitivity_info.get("stable_r_run_count")
+            )
             if not np.isfinite(p_darcy):
                 continue
             if not np.isfinite(p_0d):
@@ -2781,6 +2701,8 @@ def apply_organoid_resistance_from_json(
             arterial_parent_margin = max(float(arterial_suppression_parent_margin), 0.0)
             venous_parent_margin = max(float(venous_suppression_parent_margin), 0.0)
             suppression_parent_pressure_target = float("nan")
+            flow_suppression_target = False
+            venous_pressure_recovery = False
             pd_target_reason = "0d_calibration" if pd_mode == "0d" else "interface"
             if pd_mode == "0d":
                 pd_target = p_0d
@@ -2807,7 +2729,6 @@ def apply_organoid_resistance_from_json(
                     if aligned_drive > old_drive + drive_tol and unsupported_drive_direction:
                         interface_increases_drive = True
                         pressure_alignment_active = False
-                flow_suppression_target = False
                 if (
                     np.isfinite(p_parent)
                     and not pressure_alignment_active
@@ -2836,14 +2757,6 @@ def apply_organoid_resistance_from_json(
                     and venous_recovery_reference > 0.0
                     and p_darcy < venous_recovery_exit_fraction * venous_recovery_reference
                 )
-                venous_pressure_cleanup = (
-                    side == "outlet"
-                    and "late_stage_cleanup" in adaptive_state
-                    and np.isfinite(p_darcy)
-                    and np.isfinite(venous_recovery_reference)
-                    and venous_recovery_reference > 0.0
-                    and p_darcy < venous_recovery_reference - pressure_tol
-                )
                 if (
                     adaptive_force_suppression
                     and np.isfinite(p_parent)
@@ -2851,7 +2764,6 @@ def apply_organoid_resistance_from_json(
                     and not pressure_alignment_active
                     and not continuity_decay_active
                     and not venous_pressure_recovery
-                    and not venous_pressure_cleanup
                 ):
                     # Hysteresis should prevent chatter near the suppression
                     # boundary, not keep a terminal pinned to its parent after
@@ -2862,7 +2774,7 @@ def apply_organoid_resistance_from_json(
                     )
                     if suppression_still_compatible:
                         flow_suppression_target = True
-                if venous_pressure_recovery or venous_pressure_cleanup:
+                if venous_pressure_recovery:
                     # A venous outlet whose Darcy/interface pressure is far
                     # below the positive 0D/parent target is over-suppressed,
                     # not merely high-flow.  The usual parent-flow suppression
@@ -2870,48 +2782,18 @@ def apply_organoid_resistance_from_json(
                     # can leave Pd too low when RQ is large.  In this recovery
                     # regime, target Pd itself toward the parent until the
                     # Darcy outlet is close to the positive terminal target.
-                    # The late-stage cleanup variant uses the same target, but
-                    # only after the adaptive classifier sees a moderate
-                    # plateaued residual so one outlet is not sacrificed to
-                    # protect already-converged terminals.
                     suppression_parent_pressure_target = float(p_parent)
                     if venous_parent_margin > 0.0:
                         suppression_parent_pressure_target += venous_parent_margin
-                    if venous_pressure_cleanup:
-                        # Late-stage cleanup is a pressure-continuity repair.
-                        # If the outlet has collapsed to numerical-zero flow,
-                        # calibrating R with q_floor produces a huge resistance
-                        # and keeps P_0D pinned to the parent. Reopen the path
-                        # with a representative side flow, then target the
-                        # resistance-implied terminal pressure to Darcy.
-                        q_reopen = max(q_den, q_ref_side * cleanup_reopen_fraction)
-                        if q_reopen > q_den and np.isfinite(p_d_for_r):
-                            r_raw = abs(p_darcy - p_d_for_r) / max(
-                                q_reopen,
-                                float(q_floor),
-                                np.finfo(float).tiny,
-                            )
-                            r_next = max(float(r_raw), np.finfo(float).tiny)
-                            r_target_reason = "venous_pressure_cleanup_reopen"
-                        if np.isfinite(r_next) and np.isfinite(q_for_r):
-                            pd_target = p_darcy - r_next * q_for_r
-                        else:
-                            pd_target = p_darcy
-                    else:
-                        pd_target = suppression_parent_pressure_target
-                    pd_target_reason = (
-                        "venous_pressure_cleanup"
-                        if venous_pressure_cleanup and not venous_pressure_recovery
-                        else "venous_pressure_recovery"
-                    )
+                    pd_target = suppression_parent_pressure_target
+                    pd_target_reason = "venous_pressure_recovery"
                     adaptive_force_suppression = False
-                    adaptive_recommendation = str(pd_target_reason)
-                    adaptive_state_tag = str(pd_target_reason)
-                    if adaptive_state_tag not in adaptive_state:
+                    adaptive_recommendation = "venous_pressure_recovery"
+                    if "venous_pressure_recovery" not in adaptive_state:
                         adaptive_state = (
-                            f"{adaptive_state}|{adaptive_state_tag}"
+                            f"{adaptive_state}|venous_pressure_recovery"
                             if adaptive_state
-                            else adaptive_state_tag
+                            else "venous_pressure_recovery"
                         )
                     flow_suppression_target = False
                 elif flow_suppression_target:
@@ -2970,10 +2852,6 @@ def apply_organoid_resistance_from_json(
             response_active = False
             response_severity = 0.0
             response_effective_gain = 0.0
-            sensitivity_target = float("nan")
-            sensitivity_active = False
-            sensitivity_correction = 0.0
-            sensitivity_effective_slope = float("nan")
             response_gain = response_gain_base + max(float(stubborn_gain), 0.0)
             response_allowed_reasons = {
                 "resistance_implied_interface",
@@ -2989,8 +2867,6 @@ def apply_organoid_resistance_from_json(
                 response_allowed_reasons.update({
                     "drive_limited_hold",
                     "parent_flow_suppression",
-                    "venous_pressure_cleanup",
-                    "venous_pressure_recovery",
                 })
             if np.isfinite(response_error_rel) and response_error_rel > response_rel_error_tol:
                 severity_den = max(
@@ -3002,31 +2878,10 @@ def apply_organoid_resistance_from_json(
                     0.0,
                 )
                 response_severity = float(response_severity ** response_error_gamma)
-                terminal_response_cap = (
-                    cleanup_response_effective_gain_cap
-                    if "late_stage_cleanup" in adaptive_state
-                    else response_effective_gain_cap
-                )
                 response_effective_gain = min(
                     response_gain * response_severity,
-                    terminal_response_cap,
+                    response_effective_gain_cap,
                 )
-            else:
-                terminal_response_cap = (
-                    cleanup_response_effective_gain_cap
-                    if "late_stage_cleanup" in adaptive_state
-                    else response_effective_gain_cap
-                )
-            response_flow_weight_ok = (
-                pd_flow_weight_for_response >= response_min_flow_weight
-                or (
-                    max(float(stubborn_gain), 0.0) > 0.0
-                    and (
-                        "late_stage_cleanup" in adaptive_state
-                        or "plateaued" in adaptive_state
-                    )
-                )
-            )
             if (
                 response_effective_gain > 0.0
                 and pd_mode != "0d"
@@ -3034,7 +2889,7 @@ def apply_organoid_resistance_from_json(
                 and np.isfinite(q_for_r)
                 and np.isfinite(p_darcy)
                 and np.isfinite(p_0d)
-                and response_flow_weight_ok
+                and pd_flow_weight_for_response >= response_min_flow_weight
                 and np.isfinite(response_error_rel)
                 and response_error_rel >= response_rel_error_tol
                 and pd_target_reason in response_allowed_reasons
@@ -3048,66 +2903,102 @@ def apply_organoid_resistance_from_json(
                 pd_target = response_target - r_next * q_for_r
                 pd_target_reason = f"{pd_target_reason}_response_correction"
                 response_active = True
-            sensitivity_state_active = any(
-                tag in adaptive_state for tag in ("stubborn", "plateaued", "late_stage_cleanup")
-            )
+            if np.isfinite(old_pd):
+                w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
+                pd_next = (1.0 - w_pd) * old_pd + w_pd * pd_target
+            else:
+                w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
+                pd_next = pd_target
+
+            pressure_match_active = False
+            pressure_match_slope = float("nan")
+            pressure_match_delta_pd = 0.0
+            pressure_match_target = float("nan")
             sensitivity_consistency = (
                 1.0
                 if not np.isfinite(sensitivity_sign_consistency_value)
                 else float(sensitivity_sign_consistency_value)
             )
-            min_slope = max(float(terminal_sensitivity_min_abs_slope), np.finfo(float).tiny)
-            if (
+            sensitivity_state_active = any(
+                tag in adaptive_state for tag in ("stubborn", "plateaued")
+            ) or bool(stubborn_gain > 0.0)
+            arterial_suppression_pressure_match = (
+                side == "inlet"
+                and flow_suppression_target
+                and "suppression_hysteresis" in adaptive_state
+            )
+            arterial_pressure_match_hold = (
+                side == "inlet"
+                and adaptive_last_reason == "pressure_match_frozen_r"
+                and np.isfinite(response_error_rel)
+                and response_error_rel >= 0.5 * max(float(terminal_sensitivity_rel_error_tol), 0.0)
+                and "diverging" not in adaptive_state
+            )
+            sensitivity_base_eligible = (
                 sensitivity_state_active
-                and np.isfinite(p_darcy)
-                and np.isfinite(p_0d)
+                and (
+                    side == "outlet"
+                    or arterial_suppression_pressure_match
+                )
+                and (
+                    not flow_suppression_target
+                    or arterial_suppression_pressure_match
+                )
+                and not venous_pressure_recovery
                 and np.isfinite(response_error_rel)
                 and response_error_rel >= max(float(terminal_sensitivity_rel_error_tol), 0.0)
                 and np.isfinite(sensitivity_slope)
                 and np.isfinite(sensitivity_sample_count)
                 and sensitivity_sample_count >= 1.0
+                and np.isfinite(sensitivity_stable_r_count)
+                and sensitivity_stable_r_count >= max(int(pressure_match_min_stable_r_runs), 1)
                 and sensitivity_consistency >= max(float(terminal_sensitivity_sign_consistency), 0.0)
+            )
+            sensitivity_hold_eligible = (
+                arterial_pressure_match_hold
+                and np.isfinite(sensitivity_slope)
+                and not venous_pressure_recovery
+            )
+            if (
+                sensitivity_base_eligible
+                or sensitivity_hold_eligible
             ):
-                sensitivity_effective_slope = (
-                    float(np.sign(sensitivity_slope))
-                    * max(abs(float(sensitivity_slope)), min_slope)
-                )
-                raw_correction = (
+                # Keep the frozen-R sensitivity correction tail-only, but let
+                # stubborn arterial branches escape stable suppression
+                # hysteresis once their R history is calm enough. If an
+                # arterial branch was already in pressure_match_frozen_r on
+                # the previous run, hold it there while the residual is still
+                # meaningful to avoid one-run chatter back to suppression.
+                min_slope = max(float(terminal_sensitivity_min_abs_slope), np.finfo(float).tiny)
+                effective_slope = float(np.sign(sensitivity_slope)) * max(abs(float(sensitivity_slope)), min_slope)
+                desired_delta_pd = (
                     max(float(terminal_sensitivity_gain), 0.0)
                     * (p_darcy - p_0d)
-                    / sensitivity_effective_slope
+                    / effective_slope
                 )
                 base_step = max(
-                    abs(float(pd_target - old_pd))
-                    if np.isfinite(pd_target) and np.isfinite(old_pd)
-                    else 0.0,
-                    abs(float(p_darcy - p_0d)),
+                    abs(float(pd_target - old_pd)) if np.isfinite(pd_target) and np.isfinite(old_pd) else 0.0,
+                    abs(float(p_darcy - p_0d)) if np.isfinite(p_darcy) and np.isfinite(p_0d) else 0.0,
                     1.0,
                 )
                 correction_cap = max(float(terminal_sensitivity_max_multiplier), 0.0) * base_step
                 if np.isfinite(correction_cap) and correction_cap > 0.0:
-                    raw_correction = float(np.clip(raw_correction, -correction_cap, correction_cap))
-                sensitivity_correction = float(raw_correction)
-                if sensitivity_correction != 0.0:
-                    sensitivity_target = float(pd_target + sensitivity_correction)
-                    pd_target = sensitivity_target
-                    pd_target_reason = f"{pd_target_reason}_sensitivity"
-                    sensitivity_active = True
-            w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
-            pressure_response_cleanup = "late_stage_cleanup" in adaptive_state
-            cleanup_relaxation_reason = (
-                pd_target_reason in {"venous_pressure_cleanup", "venous_pressure_recovery"}
-                or pd_target_reason.startswith("venous_pressure_cleanup_")
-                or pd_target_reason.startswith("venous_pressure_recovery_")
-                or pressure_response_cleanup
-            )
-            cleanup_min_relax = min(max(float(cleanup_min_pd_relaxation), 0.0), 1.0)
-            if cleanup_relaxation_reason and cleanup_min_relax > 0.0:
-                w_pd = max(float(w_pd), cleanup_min_relax)
-            if np.isfinite(old_pd):
-                pd_next = (1.0 - w_pd) * old_pd + w_pd * pd_target
-            else:
-                pd_next = pd_target
+                    desired_delta_pd = float(np.clip(desired_delta_pd, -correction_cap, correction_cap))
+                if np.isfinite(old_pd):
+                    pd_next = float(old_pd + desired_delta_pd)
+                else:
+                    pd_next = float(pd_target)
+                pd_target = float(pd_next)
+                pd_target_reason = "pressure_match_frozen_r"
+                pressure_match_active = True
+                pressure_match_slope = float(effective_slope)
+                pressure_match_delta_pd = float(desired_delta_pd)
+                pressure_match_target = float(pd_target)
+                if np.isfinite(old_r) and old_r > 0.0:
+                    r_next = float(old_r)
+                    r_raw = float(old_r)
+                    r_target_reason = "pressure_match_frozen_r"
+
             pd_floor_applied = False
             if side == "outlet" and venous_pd_floor is not None:
                 if np.isfinite(pd_floor) and pd_next < pd_floor:
@@ -3200,19 +3091,10 @@ def apply_organoid_resistance_from_json(
                 "Pd_relaxation_q_ref": float(q_ref_side),
                 "terminal_response_correction_gain": float(response_gain),
                 "terminal_response_correction_effective_gain": float(response_effective_gain),
-                "terminal_response_correction_effective_gain_cap": float(terminal_response_cap),
                 "terminal_response_correction_severity": float(response_severity),
                 "terminal_response_correction_active": bool(response_active),
                 "terminal_response_correction_target": float(response_target),
                 "terminal_response_correction_error_rel": float(response_error_rel),
-                "terminal_pressure_sensitivity_active": bool(sensitivity_active),
-                "terminal_pressure_sensitivity_slope": float(sensitivity_slope),
-                "terminal_pressure_sensitivity_recent_slope": float(sensitivity_recent_slope),
-                "terminal_pressure_sensitivity_effective_slope": float(sensitivity_effective_slope),
-                "terminal_pressure_sensitivity_sign_consistency": float(sensitivity_consistency),
-                "terminal_pressure_sensitivity_sample_count": float(sensitivity_sample_count),
-                "terminal_pressure_sensitivity_correction": float(sensitivity_correction),
-                "terminal_pressure_sensitivity_target": float(sensitivity_target),
                 "stubborn_continuity_override_active": False,
                 "stubborn_continuity_override_relaxation": float("nan"),
                 "stubborn_continuity_override_target": float("nan"),
@@ -3226,6 +3108,11 @@ def apply_organoid_resistance_from_json(
                 "adaptive_recommendation": str(adaptive_recommendation),
                 "adaptive_recent_improvement_rel": float(adaptive_recent_improvement_rel),
                 "adaptive_recent_error_rel": float(adaptive_recent_error_rel),
+                "terminal_pressure_match_active": bool(pressure_match_active),
+                "terminal_pressure_match_slope": float(pressure_match_slope),
+                "terminal_pressure_match_delta_pd": float(pressure_match_delta_pd),
+                "terminal_pressure_match_target": float(pressure_match_target),
+                "terminal_pressure_match_stable_r_count": float(sensitivity_stable_r_count),
                 "Q_0D": float(q_0d),
                 "Q_for_R": float(q_for_r),
                 "Q_denominator": float(q_den),
@@ -3786,21 +3673,17 @@ def run_darcy_for_all(
         run(cmd)
 
     if scaled_cfg is not None:
-        minimal_darcy_outputs = str(getattr(args, "darcy_output_mode", "full")) == "minimal"
-        if replicate_reference_outputs:
-            replicate_reference_organoid_outputs(
-                run_dir,
-                int(args.n_organoids),
-                scaled_cfg,
-                copy_field_outputs=not minimal_darcy_outputs,
-            )
-        else:
+        if str(getattr(args, "darcy_output_mode", "full")) == "minimal":
             synthesize_scaled_screening_outputs(
                 run_dir,
                 int(args.n_organoids),
                 scaled_cfg,
-                write_field_outputs=not minimal_darcy_outputs,
+                write_field_outputs=False,
             )
+        elif replicate_reference_outputs:
+            replicate_reference_organoid_outputs(run_dir, int(args.n_organoids), scaled_cfg)
+        else:
+            synthesize_scaled_screening_outputs(run_dir, int(args.n_organoids), scaled_cfg)
 
 
 def _max_rel(a: np.ndarray, b: np.ndarray, floor: float = 1e-20) -> float:
@@ -4430,8 +4313,6 @@ def parse_args() -> argparse.Namespace:
                     help="Exponent for pressure-error severity weighting of response correction.")
     ap.add_argument("--terminal-response-correction-effective-gain-cap", type=float, default=3.0,
                     help="Maximum per-terminal effective response-correction gain after pressure-error severity weighting.")
-    ap.add_argument("--terminal-cleanup-response-correction-effective-gain-cap", type=float, default=5.0,
-                    help="Higher effective response-correction gain cap used only for terminals marked late_stage_cleanup; set near --terminal-response-correction-effective-gain-cap to preserve the older late-stage behavior.")
     ap.add_argument("--inner-response-correction-guarded-reasons", action=argparse.BooleanOptionalAction, default=True,
                     help="In inner 0D candidate search, allow positive response-correction candidates to test drive-limited/parent-suppressed terminals. The scored 0D trial decides whether to accept the move.")
     ap.add_argument("--stubborn-terminal-response-correction", action=argparse.BooleanOptionalAction, default=True,
@@ -4446,18 +4327,12 @@ def parse_args() -> argparse.Namespace:
                     help="Extra response-correction gain added only to stubborn terminals.")
     ap.add_argument("--inner-implied-alignment-weight", type=float, default=0.0,
                     help="Weight for candidate-proposed auxiliary P_implied versus Darcy interface alignment in the inner 0D score.")
-    ap.add_argument("--inner-implied-alignment-score-cap", type=float, default=100.0,
-                    help="Cap the auxiliary implied-pressure alignment score used in the inner 0D objective; <=0 disables the cap.")
-    ap.add_argument("--inner-cleanup-implied-alignment-score-cap", type=float, default=10.0,
-                    help="During late-stage cleanup, cap the auxiliary implied-pressure alignment score more tightly so the inner search prioritizes true terminal-pressure cleanup; <=0 disables this cleanup-specific cap.")
     ap.add_argument("--inner-jump-weight", type=float, default=0.0,
                     help="Weight for the temporary resistance pressure-jump penalty in the candidate score.")
     ap.add_argument("--inner-max-pressure-error-weight", type=float, default=2.0,
                     help="Weight for the global worst-terminal post-trial 0D pressure error in the inner candidate score.")
     ap.add_argument("--inner-stubborn-max-error-weight", type=float, default=2.0,
                     help="Weight for the max post-trial 0D pressure error among currently stubborn terminals in the inner candidate score.")
-    ap.add_argument("--inner-cleanup-max-error-weight", type=float, default=8.0,
-                    help="Weight for the max post-trial 0D pressure error among late-stage cleanup terminals in the inner candidate score.")
     ap.add_argument("--inner-flow-guard-reject", action=argparse.BooleanOptionalAction, default=False,
                     help="If enabled, reject any inner 0D candidate that increases guarded terminal |Q| beyond tolerance.")
     ap.add_argument("--inner-outlier-guard-weight", type=float, default=100.0,
@@ -4478,38 +4353,6 @@ def parse_args() -> argparse.Namespace:
                     help="Suppression hysteresis release threshold for terminal pressure error.")
     ap.add_argument("--adaptive-suppression-release-stable-runs", type=int, default=3,
                     help="Consecutive low-error runs required before releasing a previously suppressed terminal.")
-    ap.add_argument("--adaptive-late-stage-cleanup", action=argparse.BooleanOptionalAction, default=True,
-                    help="When adaptive coupling is enabled, mark moderate plateaued terminal-pressure residuals for pressure-prioritized cleanup.")
-    ap.add_argument("--adaptive-cleanup-rel-error", type=float, default=0.02,
-                    help="Minimum relative terminal-pressure error for late-stage cleanup.")
-    ap.add_argument("--adaptive-cleanup-max-rel-error", type=float, default=0.25,
-                    help="Maximum relative terminal-pressure error for late-stage cleanup; larger errors use the existing aggressive/recovery logic.")
-    ap.add_argument("--adaptive-cleanup-improvement", type=float, default=0.002,
-                    help="Maximum recent relative-error improvement for late-stage cleanup.")
-    ap.add_argument("--adaptive-cleanup-improvement-fraction", type=float, default=0.10,
-                    help="Also trigger late-stage cleanup when recent improvement is less than this fraction of the current terminal error.")
-    ap.add_argument("--adaptive-cleanup-min-pd-relaxation", type=float, default=0.5,
-                    help="Minimum effective Pd relaxation applied to late-stage cleanup/recovery terminals.")
-    ap.add_argument("--adaptive-cleanup-reopen-flow-fraction", type=float, default=0.25,
-                    help="Fraction of representative side flow used to recalibrate R for near-zero-flow recovery terminals.")
-    ap.add_argument("--terminal-sensitivity-correction", action=argparse.BooleanOptionalAction, default=True,
-                    help="Use prior coupling runs to estimate dP_0D/dPd and apply a bounded late-stage Pd correction for stubborn/cleanup terminals.")
-    ap.add_argument("--terminal-sensitivity-history-window", type=int, default=6,
-                    help="Number of previous runs used to estimate terminal-pressure sensitivity from commanded Pd versus realized post-0D pressure.")
-    ap.add_argument("--terminal-sensitivity-min-pd-change", type=float, default=1.0,
-                    help="Minimum |Delta Pd| between past runs required when estimating dP_0D/dPd.")
-    ap.add_argument("--terminal-sensitivity-min-p0d-change", type=float, default=0.05,
-                    help="Minimum |Delta P_0D| between past runs required when estimating dP_0D/dPd.")
-    ap.add_argument("--terminal-sensitivity-rel-error-tol", type=float, default=0.01,
-                    help="Only apply the sensitivity-based Pd correction when terminal pressure error exceeds this threshold.")
-    ap.add_argument("--terminal-sensitivity-gain", type=float, default=0.5,
-                    help="Gain applied to the sensitivity-predicted Pd correction for stubborn/cleanup terminals.")
-    ap.add_argument("--terminal-sensitivity-min-abs-slope", type=float, default=0.01,
-                    help="Lower bound on |dP_0D/dPd| used when converting terminal pressure residual into a Pd correction.")
-    ap.add_argument("--terminal-sensitivity-sign-consistency", type=float, default=0.75,
-                    help="Minimum sign consistency of historical dP_0D/dPd samples before using the sensitivity-based correction.")
-    ap.add_argument("--terminal-sensitivity-max-multiplier", type=float, default=3.0,
-                    help="Maximum multiple of the current Pd step/residual used to cap the sensitivity-based Pd correction.")
     ap.add_argument("--adaptive-candidate-actions", action=argparse.BooleanOptionalAction, default=True,
                     help="When --adaptive-coupling detects plateaued or very large venous errors, add candidate-scored aggressive Pd/implied-alignment trials.")
     ap.add_argument("--adaptive-aggressive-venous-rel-error", type=float, default=1.0,
@@ -4522,6 +4365,28 @@ def parse_args() -> argparse.Namespace:
                     help="Deprecated no-op kept for CLI compatibility. Adaptive implied alignment is controlled by --adaptive-implied-alignment-weight.")
     ap.add_argument("--adaptive-pressure-score-weight", type=float, default=0.75,
                     help="Multiplier on immediate 0D pressure score for adaptive candidates; lets slow P_0D response be guided by improved P_implied.")
+    ap.add_argument("--terminal-sensitivity-correction", action=argparse.BooleanOptionalAction, default=False,
+                    help="Enable a late-stage, sensitivity-based Pd correction for stubborn terminals after R has stabilized.")
+    ap.add_argument("--terminal-sensitivity-history-window", type=int, default=8,
+                    help="Number of previous runs used to estimate dP_0D/dPd for late-stage sensitivity correction.")
+    ap.add_argument("--terminal-sensitivity-min-pd-change", type=float, default=1.0,
+                    help="Minimum historical Pd change required when estimating terminal pressure sensitivity.")
+    ap.add_argument("--terminal-sensitivity-min-p0d-change", type=float, default=0.05,
+                    help="Minimum historical P_0D change required when estimating terminal pressure sensitivity.")
+    ap.add_argument("--terminal-sensitivity-rel-error-tol", type=float, default=0.02,
+                    help="Minimum relative terminal-pressure error before the late sensitivity correction can activate.")
+    ap.add_argument("--terminal-sensitivity-gain", type=float, default=0.6,
+                    help="Gain applied to the sensitivity-based late-stage Pd correction.")
+    ap.add_argument("--terminal-sensitivity-min-abs-slope", type=float, default=0.02,
+                    help="Minimum |dP_0D/dPd| used to regularize the late-stage sensitivity correction.")
+    ap.add_argument("--terminal-sensitivity-sign-consistency", type=float, default=0.8,
+                    help="Minimum sign consistency required in the historical dP_0D/dPd samples before activating the late sensitivity correction.")
+    ap.add_argument("--terminal-sensitivity-max-multiplier", type=float, default=2.0,
+                    help="Maximum multiple of the current Pd step/error scale allowed for the late sensitivity correction.")
+    ap.add_argument("--terminal-pressure-match-stable-r-rel-threshold", type=float, default=1.0e-2,
+                    help="Maximum recent R relative change for counting a run as stable before the late sensitivity correction can freeze R.")
+    ap.add_argument("--terminal-pressure-match-min-stable-r-runs", type=int, default=3,
+                    help="Minimum number of consecutive stable-R runs required before the late sensitivity correction can freeze R.")
 
     ap.add_argument("--channel-inlet-bc", default="INFLOW")
     ap.add_argument("--channel-inlet-Q0", type=float, default=6e-2)
@@ -4728,18 +4593,15 @@ def main() -> None:
             plateau_improvement_rel=float(args.adaptive_plateau_improvement),
             release_rel_error=float(args.adaptive_suppression_release_rel_error),
             release_stable_runs=int(args.adaptive_suppression_release_stable_runs),
-            late_stage_cleanup=bool(args.adaptive_late_stage_cleanup),
-            cleanup_rel_error=float(args.adaptive_cleanup_rel_error),
-            cleanup_max_rel_error=float(args.adaptive_cleanup_max_rel_error),
-            cleanup_improvement_rel=float(args.adaptive_cleanup_improvement),
-            cleanup_improvement_fraction=float(args.adaptive_cleanup_improvement_fraction),
         )
-        stubborn_terminal_response_map = merge_adaptive_stubborn_response_map(
-            stubborn_terminal_response_map,
-            adaptive_terminal_state_map,
-            enabled=bool(args.stubborn_terminal_response_correction),
-            min_rel_error=float(args.stubborn_terminal_min_rel_error),
-            gain=float(args.stubborn_terminal_extra_gain),
+        terminal_pressure_sensitivity_map = build_terminal_pressure_sensitivity_map(
+            coupled_root,
+            int(i),
+            enabled=bool(args.terminal_sensitivity_correction),
+            history_window=int(args.terminal_sensitivity_history_window),
+            min_pd_change=float(args.terminal_sensitivity_min_pd_change),
+            min_p0d_change=float(args.terminal_sensitivity_min_p0d_change),
+            stable_r_rel_threshold=float(args.terminal_pressure_match_stable_r_rel_threshold),
         )
         write_adaptive_terminal_state_summary(cur, adaptive_terminal_state_map)
         adaptive_forced = [
@@ -4769,14 +4631,6 @@ def main() -> None:
                 )
                 print(f"[adaptive-coupling] {preview_text}", flush=True)
         previous_terminal_error_map = build_previous_terminal_error_map(coupled_root, int(i))
-        terminal_pressure_sensitivity_map = build_terminal_pressure_sensitivity_map(
-            coupled_root,
-            int(i),
-            enabled=bool(args.terminal_sensitivity_correction),
-            history_window=int(args.terminal_sensitivity_history_window),
-            min_pd_change=float(args.terminal_sensitivity_min_pd_change),
-            min_p0d_change=float(args.terminal_sensitivity_min_p0d_change),
-        )
         if stubborn_terminal_response_map:
             preview = sorted(stubborn_terminal_response_map.items())[:8]
             preview_text = ", ".join(
@@ -4790,15 +4644,8 @@ def main() -> None:
                 flush=True,
             )
         if terminal_pressure_sensitivity_map:
-            preview = sorted(terminal_pressure_sensitivity_map.items())[:8]
-            preview_text = ", ".join(
-                f"org{key[0]}:{key[1]}:{key[2]} "
-                f"sens={value['dp0d_dpd']:.3e} sign={value['sign_consistency']:.2f}"
-                for key, value in preview
-            )
             print(
-                f"[terminal-sensitivity] using history-based dP_0D/dPd estimates for "
-                f"{len(terminal_pressure_sensitivity_map)} terminals: {preview_text}",
+                f"[terminal-sensitivity] built {len(terminal_pressure_sensitivity_map)} late-stage sensitivity estimates.",
                 flush=True,
             )
 
@@ -4937,22 +4784,13 @@ def main() -> None:
                         terminal_response_correction_effective_gain_cap=float(
                             args.terminal_response_correction_effective_gain_cap
                         ),
-                        terminal_cleanup_response_correction_effective_gain_cap=float(
-                            args.terminal_cleanup_response_correction_effective_gain_cap
-                        ),
                         terminal_response_correction_guarded_reasons=bool(
                             terminal_response_correction_guarded_reasons
-                        ),
-                        cleanup_min_pd_relaxation=float(args.adaptive_cleanup_min_pd_relaxation),
-                        cleanup_reopen_flow_fraction=float(
-                            args.adaptive_cleanup_reopen_flow_fraction
                         ),
                         stubborn_terminal_response_map=stubborn_terminal_response_map,
                         adaptive_terminal_state_map=adaptive_terminal_state_map,
                         terminal_pressure_sensitivity_map=terminal_pressure_sensitivity_map,
-                        terminal_sensitivity_rel_error_tol=float(
-                            args.terminal_sensitivity_rel_error_tol
-                        ),
+                        terminal_sensitivity_rel_error_tol=float(args.terminal_sensitivity_rel_error_tol),
                         terminal_sensitivity_gain=float(args.terminal_sensitivity_gain),
                         terminal_sensitivity_min_abs_slope=float(
                             args.terminal_sensitivity_min_abs_slope
@@ -4962,6 +4800,12 @@ def main() -> None:
                         ),
                         terminal_sensitivity_max_multiplier=float(
                             args.terminal_sensitivity_max_multiplier
+                        ),
+                        pressure_match_stable_r_rel_threshold=float(
+                            args.terminal_pressure_match_stable_r_rel_threshold
+                        ),
+                        pressure_match_min_stable_r_runs=int(
+                            args.terminal_pressure_match_min_stable_r_runs
                         ),
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
                     )
@@ -5007,10 +4851,7 @@ def main() -> None:
                     args.adaptive_coupling
                     and args.adaptive_candidate_actions
                     and any(
-                        (
-                            "plateaued" in str(value.get("state", ""))
-                            or "late_stage_cleanup" in str(value.get("state", ""))
-                        )
+                        "plateaued" in str(value.get("state", ""))
                         for value in adaptive_terminal_state_map.values()
                     )
                 )
@@ -5239,9 +5080,6 @@ def main() -> None:
                     "terminal_response_correction_effective_gain_cap": float(
                         args.terminal_response_correction_effective_gain_cap
                     ),
-                    "terminal_cleanup_response_correction_effective_gain_cap": float(
-                        args.terminal_cleanup_response_correction_effective_gain_cap
-                    ),
                     "inner_response_correction_guarded_reasons": bool(
                         args.inner_response_correction_guarded_reasons
                     ),
@@ -5265,14 +5103,9 @@ def main() -> None:
                         for key, value in sorted(stubborn_terminal_response_map.items())
                     ],
                     "implied_alignment_weight": float(args.inner_implied_alignment_weight),
-                    "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
-                    "cleanup_implied_alignment_score_cap": float(
-                        args.inner_cleanup_implied_alignment_score_cap
-                    ),
                     "jump_weight": float(args.inner_jump_weight),
                     "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                     "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
-                    "cleanup_max_error_weight": float(args.inner_cleanup_max_error_weight),
                     "flow_guard_reject": bool(args.inner_flow_guard_reject),
                     "outlier_guard_weight": float(args.inner_outlier_guard_weight),
                     "outlier_guard_rel_tol": float(args.inner_outlier_guard_rel_tol),
@@ -5291,33 +5124,6 @@ def main() -> None:
                     "adaptive_suppression_release_stable_runs": int(
                         args.adaptive_suppression_release_stable_runs
                     ),
-                    "adaptive_late_stage_cleanup": bool(args.adaptive_late_stage_cleanup),
-                    "adaptive_cleanup_rel_error": float(args.adaptive_cleanup_rel_error),
-                    "adaptive_cleanup_max_rel_error": float(args.adaptive_cleanup_max_rel_error),
-                    "adaptive_cleanup_improvement": float(args.adaptive_cleanup_improvement),
-                    "adaptive_cleanup_improvement_fraction": float(
-                        args.adaptive_cleanup_improvement_fraction
-                    ),
-                    "adaptive_cleanup_min_pd_relaxation": float(
-                        args.adaptive_cleanup_min_pd_relaxation
-                    ),
-                    "adaptive_cleanup_reopen_flow_fraction": float(
-                        args.adaptive_cleanup_reopen_flow_fraction
-                    ),
-                    "terminal_sensitivity_correction": bool(args.terminal_sensitivity_correction),
-                    "terminal_sensitivity_history_window": int(args.terminal_sensitivity_history_window),
-                    "terminal_sensitivity_min_pd_change": float(args.terminal_sensitivity_min_pd_change),
-                    "terminal_sensitivity_min_p0d_change": float(args.terminal_sensitivity_min_p0d_change),
-                    "terminal_sensitivity_rel_error_tol": float(args.terminal_sensitivity_rel_error_tol),
-                    "terminal_sensitivity_gain": float(args.terminal_sensitivity_gain),
-                    "terminal_sensitivity_min_abs_slope": float(args.terminal_sensitivity_min_abs_slope),
-                    "terminal_sensitivity_sign_consistency": float(
-                        args.terminal_sensitivity_sign_consistency
-                    ),
-                    "terminal_sensitivity_max_multiplier": float(
-                        args.terminal_sensitivity_max_multiplier
-                    ),
-                    "terminal_sensitivity_terminal_count": int(len(terminal_pressure_sensitivity_map)),
                     "candidate_count": int(len(candidate_specs)),
                     "candidate_specs": candidate_specs,
                 }
@@ -5373,14 +5179,9 @@ def main() -> None:
                                     args.inner_implied_alignment_weight,
                                 )
                             ),
-                            implied_alignment_score_cap=float(args.inner_implied_alignment_score_cap),
-                            cleanup_implied_alignment_score_cap=float(
-                                args.inner_cleanup_implied_alignment_score_cap
-                            ),
                             jump_weight=float(args.inner_jump_weight),
                             max_pressure_error_weight=float(args.inner_max_pressure_error_weight),
                             stubborn_max_error_weight=float(args.inner_stubborn_max_error_weight),
-                            cleanup_max_error_weight=float(args.inner_cleanup_max_error_weight),
                             flow_guard_reject=bool(args.inner_flow_guard_reject),
                             flow_guard_drive_tol=float(args.terminal_pressure_alignment_jump_tol),
                             flow_guard_q_floor=float(args.terminal_resistance_q_floor),
@@ -5397,12 +5198,6 @@ def main() -> None:
                             "score": float("inf"),
                             "pressure_score": float("inf"),
                             "implied_interface_score": float("inf"),
-                            "implied_interface_objective_score": float("inf"),
-                            "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
-                            "cleanup_implied_alignment_score_cap": float(
-                                args.inner_cleanup_implied_alignment_score_cap
-                            ),
-                            "cleanup_implied_alignment_cap_active": 0.0,
                             "implied_median_percent": float("inf"),
                             "implied_p90_percent": float("inf"),
                             "implied_max_percent": float("inf"),
@@ -5423,9 +5218,6 @@ def main() -> None:
                             "stubborn_max_error_percent": float("inf"),
                             "stubborn_p90_error_percent": float("inf"),
                             "stubborn_error_score": float("inf"),
-                            "cleanup_max_error_percent": float("inf"),
-                            "cleanup_p90_error_percent": float("inf"),
-                            "cleanup_error_score": float("inf"),
                             "jump_median_percent": float("inf"),
                             "jump_p90_percent": float("inf"),
                             "jump_max_percent": float("inf"),
@@ -5534,9 +5326,6 @@ def main() -> None:
                             "terminal_response_correction_effective_gain_cap": float(
                                 args.terminal_response_correction_effective_gain_cap
                             ),
-                            "terminal_cleanup_response_correction_effective_gain_cap": float(
-                                args.terminal_cleanup_response_correction_effective_gain_cap
-                            ),
                             "inner_response_correction_guarded_reasons": bool(
                                 args.inner_response_correction_guarded_reasons
                             ),
@@ -5551,60 +5340,10 @@ def main() -> None:
                             "stubborn_terminal_extra_gain": float(args.stubborn_terminal_extra_gain),
                             "stubborn_terminal_count": int(len(stubborn_terminal_response_map)),
                             "implied_alignment_weight": float(args.inner_implied_alignment_weight),
-                            "implied_alignment_score_cap": float(args.inner_implied_alignment_score_cap),
-                            "cleanup_implied_alignment_score_cap": float(
-                                args.inner_cleanup_implied_alignment_score_cap
-                            ),
                             "jump_weight": float(args.inner_jump_weight),
                             "max_pressure_error_weight": float(args.inner_max_pressure_error_weight),
                             "stubborn_max_error_weight": float(args.inner_stubborn_max_error_weight),
-                            "cleanup_max_error_weight": float(args.inner_cleanup_max_error_weight),
                             "flow_guard_reject": bool(args.inner_flow_guard_reject),
-                            "adaptive_coupling": bool(args.adaptive_coupling),
-                            "adaptive_history_window": int(args.adaptive_history_window),
-                            "adaptive_stubborn_rel_error": float(args.adaptive_stubborn_rel_error),
-                            "adaptive_plateau_improvement": float(args.adaptive_plateau_improvement),
-                            "adaptive_late_stage_cleanup": bool(args.adaptive_late_stage_cleanup),
-                            "adaptive_cleanup_rel_error": float(args.adaptive_cleanup_rel_error),
-                            "adaptive_cleanup_max_rel_error": float(args.adaptive_cleanup_max_rel_error),
-                            "adaptive_cleanup_improvement": float(args.adaptive_cleanup_improvement),
-                            "adaptive_cleanup_improvement_fraction": float(
-                                args.adaptive_cleanup_improvement_fraction
-                            ),
-                            "adaptive_cleanup_min_pd_relaxation": float(
-                                args.adaptive_cleanup_min_pd_relaxation
-                            ),
-                            "adaptive_cleanup_reopen_flow_fraction": float(
-                                args.adaptive_cleanup_reopen_flow_fraction
-                            ),
-                            "terminal_sensitivity_correction": bool(
-                                args.terminal_sensitivity_correction
-                            ),
-                            "terminal_sensitivity_history_window": int(
-                                args.terminal_sensitivity_history_window
-                            ),
-                            "terminal_sensitivity_min_pd_change": float(
-                                args.terminal_sensitivity_min_pd_change
-                            ),
-                            "terminal_sensitivity_min_p0d_change": float(
-                                args.terminal_sensitivity_min_p0d_change
-                            ),
-                            "terminal_sensitivity_rel_error_tol": float(
-                                args.terminal_sensitivity_rel_error_tol
-                            ),
-                            "terminal_sensitivity_gain": float(args.terminal_sensitivity_gain),
-                            "terminal_sensitivity_min_abs_slope": float(
-                                args.terminal_sensitivity_min_abs_slope
-                            ),
-                            "terminal_sensitivity_sign_consistency": float(
-                                args.terminal_sensitivity_sign_consistency
-                            ),
-                            "terminal_sensitivity_max_multiplier": float(
-                                args.terminal_sensitivity_max_multiplier
-                            ),
-                            "terminal_sensitivity_terminal_count": int(
-                                len(terminal_pressure_sensitivity_map)
-                            ),
                             "candidate_count": 0,
                         },
                     )
