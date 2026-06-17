@@ -102,3 +102,7 @@ src/coupling-output-run-8-high/
 src/coupling-output-run-8-low/
 src/coupling-output-run-8-medium/
 src/coupling-output-run-8-very-high/
+src/coupling-output-no-vasc-scaled/
+src/coupling-output-run-8-compare-low/
+src/coupling-output-run-8-compare-medium/
+src/coupling-output-run-8-hybrid-algebraic-ema-only/
