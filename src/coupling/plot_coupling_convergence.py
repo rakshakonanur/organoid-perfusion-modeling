@@ -144,6 +144,25 @@ def _terminal_stats(run_dir: Path) -> dict[str, Any]:
     return out
 
 
+def _concave_stats(run_dir: Path) -> dict[str, Any]:
+    rows = _read_csv(run_dir / "post_darcy_concave_convergence.csv")
+    out: dict[str, Any] = {}
+    for side in ("arterial", "venous", "all"):
+        side_rows = [row for row in rows if side == "all" or row.get("side") == side]
+        errs = [_safe_float(row.get("concave_flow_error_rel")) * 100.0 for row in side_rows]
+        q_darcy = [abs(_safe_float(row.get("Q_Darcy"))) for row in side_rows if math.isfinite(_safe_float(row.get("Q_Darcy")))]
+        q_0d = [abs(_safe_float(row.get("Q_0D_target"))) for row in side_rows if math.isfinite(_safe_float(row.get("Q_0D_target")))]
+        out[side] = {
+            "n": len(side_rows),
+            "flow_error_median_percent": _percentile(errs, 50.0),
+            "flow_error_p90_percent": _percentile(errs, 90.0),
+            "flow_error_max_percent": max(errs) if errs else float("nan"),
+            "q_darcy_sum": sum(q_darcy),
+            "q_0d_sum": sum(q_0d),
+        }
+    return out
+
+
 def collect_runs(root: Path) -> list[dict[str, Any]]:
     run_dirs = sorted(
         [path for path in root.glob("run_*") if path.is_dir() and _run_index(path) >= 0],
@@ -154,9 +173,10 @@ def collect_runs(root: Path) -> list[dict[str, Any]]:
         run = _run_index(run_dir)
         selected = _selected_inner_summary(run_dir)
         terminal = _terminal_stats(run_dir)
-        if not selected and terminal["all"]["n"] == 0:
+        concave = _concave_stats(run_dir)
+        if not selected and terminal["all"]["n"] == 0 and concave["all"]["n"] == 0:
             continue
-        records.append({"run": run, "selected": selected, "terminal": terminal})
+        records.append({"run": run, "selected": selected, "terminal": terminal, "concave": concave})
     return records
 
 
@@ -170,6 +190,10 @@ def _series(records: list[dict[str, Any]], key: str, default: float = float("nan
 
 def _terminal_series(records: list[dict[str, Any]], side: str, key: str) -> list[float]:
     return [_safe_float(record["terminal"][side].get(key, float("nan"))) for record in records]
+
+
+def _concave_series(records: list[dict[str, Any]], side: str, key: str) -> list[float]:
+    return [_safe_float(record["concave"][side].get(key, float("nan"))) for record in records]
 
 
 def _reason_series(records: list[dict[str, Any]], side: str, reason: str) -> list[int]:
@@ -325,6 +349,45 @@ def _plot_resistance(records: list[dict[str, Any]], outdir: Path, title_suffix: 
     return out
 
 
+def _plot_concave_flow(records: list[dict[str, Any]], outdir: Path, title_suffix: str) -> Path:
+    runs = [record["run"] for record in records]
+    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
+    fig.suptitle(f"Concave-Face Flow Convergence{title_suffix}", fontsize=14)
+
+    ax = axes[0]
+    ax.plot(runs, _concave_series(records, "all", "flow_error_median_percent"), marker="o", ms=3, label="all median")
+    ax.plot(runs, _concave_series(records, "all", "flow_error_p90_percent"), marker=".", label="all p90")
+    ax.plot(runs, _concave_series(records, "all", "flow_error_max_percent"), marker=".", label="all max")
+    ax.set_ylabel("flow mismatch (%)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", ncols=3)
+
+    ax = axes[1]
+    ax.plot(runs, _concave_series(records, "arterial", "flow_error_median_percent"), marker="o", ms=3, label="arterial median")
+    ax.plot(runs, _concave_series(records, "arterial", "flow_error_p90_percent"), marker=".", label="arterial p90")
+    ax.plot(runs, _concave_series(records, "venous", "flow_error_median_percent"), marker="o", ms=3, label="venous median")
+    ax.plot(runs, _concave_series(records, "venous", "flow_error_p90_percent"), marker=".", label="venous p90")
+    ax.set_ylabel("side flow mismatch (%)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", ncols=2)
+
+    ax = axes[2]
+    ax.plot(runs, _concave_series(records, "arterial", "q_darcy_sum"), marker="o", ms=3, label="arterial Darcy |Q| sum")
+    ax.plot(runs, _concave_series(records, "arterial", "q_0d_sum"), marker=".", label="arterial 0D |Q| sum")
+    ax.plot(runs, _concave_series(records, "venous", "q_darcy_sum"), marker="o", ms=3, label="venous Darcy |Q| sum")
+    ax.plot(runs, _concave_series(records, "venous", "q_0d_sum"), marker=".", label="venous 0D |Q| sum")
+    ax.set_xlabel("run")
+    ax.set_ylabel("concave |Q|")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", ncols=2)
+
+    fig.tight_layout()
+    out = outdir / "concave_flow_convergence.png"
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+    return out
+
+
 def _write_summary_csv(records: list[dict[str, Any]], outdir: Path) -> Path:
     out = outdir / "coupling_plot_summary.csv"
     fieldnames = [
@@ -353,6 +416,11 @@ def _write_summary_csv(records: list[dict[str, Any]], outdir: Path) -> Path:
         "venous_error_p90_percent",
         "all_pi_pd_mean_abs",
         "all_pd_interface_mean_abs",
+        "concave_flow_error_median_percent",
+        "concave_flow_error_p90_percent",
+        "concave_flow_error_max_percent",
+        "arterial_concave_flow_error_p90_percent",
+        "venous_concave_flow_error_p90_percent",
     ]
     with out.open("w", newline="") as fp:
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
@@ -386,6 +454,11 @@ def _write_summary_csv(records: list[dict[str, Any]], outdir: Path) -> Path:
                 "venous_error_p90_percent": terminal["venous"]["pi_interface_rel_p90"],
                 "all_pi_pd_mean_abs": terminal["all"]["pi_pd_mean_abs"],
                 "all_pd_interface_mean_abs": terminal["all"]["pd_interface_mean_abs"],
+                "concave_flow_error_median_percent": record["concave"]["all"]["flow_error_median_percent"],
+                "concave_flow_error_p90_percent": record["concave"]["all"]["flow_error_p90_percent"],
+                "concave_flow_error_max_percent": record["concave"]["all"]["flow_error_max_percent"],
+                "arterial_concave_flow_error_p90_percent": record["concave"]["arterial"]["flow_error_p90_percent"],
+                "venous_concave_flow_error_p90_percent": record["concave"]["venous"]["flow_error_p90_percent"],
             })
     return out
 
@@ -413,6 +486,7 @@ def main() -> None:
         _plot_summary(records, outdir, title_suffix),
         _plot_late(records, outdir, max(1, int(args.late_count)), title_suffix),
         _plot_resistance(records, outdir, title_suffix),
+        _plot_concave_flow(records, outdir, title_suffix),
         _write_summary_csv(records, outdir),
     ]
     print("[plots] wrote:")
