@@ -368,6 +368,8 @@ def _scale_nonpressure_value(value: Any, scale_factor: float) -> Any:
 
 def _shift_coords_value(value: Any, shift: tuple[float, float, float]) -> Any:
     arr = np.asarray(value, dtype=float)
+    if arr.size == 0:
+        return [] if isinstance(value, list) else value
     return (arr + np.asarray(shift, dtype=float)).tolist()
 
 
@@ -1230,6 +1232,13 @@ def _pressure_continuity_rel_error(a: float, b: float, floor: float = 1.0) -> fl
     return float(abs(a - b) / denominator)
 
 
+def _bounded_pressure_mismatch(a: float, b: float, floor: float = 1.0) -> float:
+    if not (np.isfinite(a) and np.isfinite(b)):
+        return float("nan")
+    denominator = max(abs(a), abs(b), float(floor))
+    return float(abs(a - b) / denominator)
+
+
 def _parse_float_list(value: Any, default: list[float]) -> list[float]:
     raw = str(value or "").strip()
     if not raw:
@@ -1292,6 +1301,7 @@ def write_terminal_resistance_summary(
         "P_interface",
         "P_0D",
         "terminal_pressure_error_rel",
+        "terminal_pressure_error_bounded",
         "P_parent_0D",
         "P_ref_diagnostic",
         "P_d_for_R",
@@ -1341,20 +1351,117 @@ def write_terminal_resistance_summary(
         "terminal_pressure_match_active",
         "terminal_pressure_match_slope",
         "terminal_pressure_match_delta_pd",
+        "terminal_pressure_match_direct_descent_delta_pd",
+        "terminal_pressure_match_bounded_gap",
         "terminal_pressure_match_target",
         "terminal_pressure_match_stable_r_count",
         "Q_0D",
         "Q_for_R",
         "Q_denominator",
+        "parent_relative_q_drive",
+        "parent_relative_flow_action",
+        "parent_relative_flow_scale",
+        "parent_relative_target_flow_factor",
+        "parent_relative_target_flow",
+        "parent_relative_target_flow_raw",
+        "parent_relative_pd_seed",
+        "parent_relative_r_trial",
+        "parent_relative_controller_mode",
+        "parent_relative_algebraic_mode",
+        "parent_relative_algebraic_residual_linf",
+        "parent_relative_algebraic_iterations",
+        "parent_relative_pd_fraction",
+        "hybrid_controller_mode",
+        "hybrid_target_flow",
+        "hybrid_target_flow_raw",
+        "hybrid_q_drive",
+        "hybrid_action",
+        "hybrid_delta_log10_q",
+        "hybrid_relative_pressure_error",
+        "hybrid_adaptive_log10_cap",
+        "hybrid_r_trial",
+        "hybrid_venous_dominant_damped",
+        "hybrid_venous_median_error",
+        "hybrid_arterial_median_error",
+        "hybrid_previous_principle_applied",
+        "hybrid_previous_principle_mode",
+        "hybrid_previous_principle_multiplier",
+        "hybrid_q_error_sensitivity_applied",
+        "hybrid_q_error_sensitivity_slope",
+        "hybrid_q_error_sensitivity_sign_consistency",
+        "hybrid_q_error_sensitivity_sample_count",
+        "hybrid_q_error_sensitivity_multiplier",
+        "hybrid_branch_trust_region_cap",
+        "hybrid_postsolve_relaxation_alpha",
+        "hybrid_predicted_bounded_error",
+        "hybrid_sensitivity_applied",
+        "hybrid_sensitivity_multiplier",
+        "hybrid_sensitivity_slope",
+        "hybrid_sensitivity_sign_consistency",
+        "hybrid_sensitivity_sample_count",
+        "hybrid_sensitivity_stable_r_count",
+        "hybrid_algebraic_mode",
+        "hybrid_algebraic_residual_linf",
+        "hybrid_algebraic_iterations",
+        "P_predicted_terminal_from_algebraic",
         "R_previous",
         "R_raw",
         "R_target_reason",
         "R_next",
         "R_rel_change",
     ]
+    slim_fieldnames = [
+        "run",
+        "organoid",
+        "side",
+        "branch_id",
+        "bc_name",
+        "bc_type",
+        "P_interface",
+        "P_0D",
+        "terminal_pressure_error_rel",
+        "terminal_pressure_error_bounded",
+        "P_parent_0D",
+        "Pd_target",
+        "Pd_target_reason",
+        "Pd_next",
+        "Q_0D",
+        "Q_for_R",
+        "hybrid_controller_mode",
+        "hybrid_target_flow",
+        "hybrid_target_flow_raw",
+        "hybrid_q_drive",
+        "hybrid_action",
+        "hybrid_delta_log10_q",
+        "hybrid_relative_pressure_error",
+        "hybrid_adaptive_log10_cap",
+        "hybrid_r_trial",
+        "hybrid_q_error_sensitivity_applied",
+        "hybrid_q_error_sensitivity_slope",
+        "hybrid_q_error_sensitivity_sign_consistency",
+        "hybrid_q_error_sensitivity_sample_count",
+        "hybrid_q_error_sensitivity_multiplier",
+        "hybrid_branch_trust_region_cap",
+        "hybrid_postsolve_relaxation_alpha",
+        "hybrid_predicted_bounded_error",
+        "hybrid_sensitivity_applied",
+        "hybrid_sensitivity_multiplier",
+        "hybrid_sensitivity_slope",
+        "hybrid_sensitivity_sign_consistency",
+        "hybrid_sensitivity_sample_count",
+        "hybrid_sensitivity_stable_r_count",
+        "hybrid_algebraic_mode",
+        "hybrid_algebraic_residual_linf",
+        "hybrid_algebraic_iterations",
+        "P_predicted_terminal_from_algebraic",
+        "R_previous",
+        "R_raw",
+        "R_target_reason",
+        "R_next",
+    ]
     summary_path = run_dir / "terminal_resistance_bc_summary.csv"
     with summary_path.open("w", newline="") as fp:
-        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer = csv.DictWriter(fp, fieldnames=slim_fieldnames)
         writer.writeheader()
         for row in rows:
             if row.get("terminal_pressure_error_rel", "") == "":
@@ -1364,7 +1471,15 @@ def write_terminal_resistance_summary(
                     _safe_float(row.get("P_interface")),
                     floor=1.0,
                 )
-            writer.writerow({key: row.get(key, "") for key in fieldnames})
+            if row.get("terminal_pressure_error_bounded", "") == "":
+                if not isinstance(row, dict):
+                    row = dict(row)
+                row["terminal_pressure_error_bounded"] = _bounded_pressure_mismatch(
+                    _safe_float(row.get("P_0D")),
+                    _safe_float(row.get("P_interface")),
+                    floor=1.0,
+                )
+            writer.writerow({key: row.get(key, "") for key in slim_fieldnames})
 
     if not bool(write_cumulative):
         return
@@ -1376,7 +1491,7 @@ def write_terminal_resistance_summary(
     if cumulative_rows:
         cumulative_path = run_dir.parent / "terminal_pd_convergence.csv"
         with cumulative_path.open("w", newline="") as fp:
-            writer = csv.DictWriter(fp, fieldnames=fieldnames)
+            writer = csv.DictWriter(fp, fieldnames=slim_fieldnames)
             writer.writeheader()
             for row in cumulative_rows:
                 if row.get("terminal_pressure_error_rel", "") == "":
@@ -1386,7 +1501,22 @@ def write_terminal_resistance_summary(
                         _safe_float(row.get("P_interface")),
                         floor=1.0,
                     )
-                writer.writerow({key: row.get(key, "") for key in fieldnames})
+                if row.get("terminal_pressure_error_bounded", "") == "":
+                    if not isinstance(row, dict):
+                        row = dict(row)
+                    row["terminal_pressure_error_bounded"] = _bounded_pressure_mismatch(
+                        _safe_float(row.get("P_0D")),
+                        _safe_float(row.get("P_interface")),
+                        floor=1.0,
+                    )
+                writer.writerow({key: row.get(key, "") for key in slim_fieldnames})
+
+
+def remove_run_geometry_dirs(run_dir: Path, n_organoids: int) -> None:
+    for organoid_idx in range(1, int(n_organoids) + 1):
+        geom_dir = run_dir / f"organoid_{organoid_idx}" / "geometry"
+        if geom_dir.exists():
+            shutil.rmtree(geom_dir, ignore_errors=True)
 
 
 def _terminal_pressure_error_rel_from_row(row: dict[str, Any]) -> float:
@@ -1454,7 +1584,11 @@ def write_post_darcy_terminal_convergence(
             for j, p_raw in enumerate(p_darcy_values):
                 p_darcy = _safe_float(p_raw)
                 p_0d = _safe_float(p_0d_values[j]) if j < len(p_0d_values) else float("nan")
-                branch_id = int(branch_ids[j]) if j < len(branch_ids) else j
+                branch_id = j
+                if j < len(branch_ids):
+                    branch_id_raw = _safe_float(branch_ids[j])
+                    if np.isfinite(branch_id_raw):
+                        branch_id = int(branch_id_raw)
                 rows.append({
                     "run": int(run_idx),
                     "organoid": int(organoid_idx),
@@ -1484,6 +1618,80 @@ def write_post_darcy_terminal_convergence(
             cumulative_rows.extend(csv.DictReader(fp))
     if cumulative_rows:
         cumulative_path = run_dir.parent / "post_darcy_terminal_convergence.csv"
+        with cumulative_path.open("w", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(cumulative_rows)
+
+
+def write_post_darcy_concave_convergence(
+    run_dir: Path,
+    n_organoids: int,
+    write_cumulative: bool = True,
+    q_floor: float = 1.0e-20,
+) -> None:
+    run_idx = _run_index_from_path(run_dir)
+    output_csv = run_dir / "output.csv"
+    rows: list[dict[str, Any]] = []
+    fieldnames = [
+        "run",
+        "organoid",
+        "side",
+        "Q_Darcy",
+        "Q_0D_target",
+        "concave_flow_error_rel",
+        "concave_pressure_bc",
+    ]
+    for organoid_idx in range(1, int(n_organoids) + 1):
+        iface_path = run_dir / f"organoid_{organoid_idx}" / "out_darcy" / "interface_bc.json"
+        if not iface_path.exists():
+            continue
+        iface = load_json(iface_path)
+        q_0d_art, q_0d_ven = read_leak_flows_from_output(output_csv, organoid_idx)
+        specs = [
+            (
+                "arterial",
+                _safe_float(iface.get("q_artery_leak")),
+                _safe_float(q_0d_art),
+                _safe_float(iface.get("p_concave_inlet_bc")),
+            ),
+            (
+                "venous",
+                _safe_float(iface.get("q_venous_leak")),
+                _safe_float(q_0d_ven),
+                _safe_float(iface.get("p_concave_outlet_bc")),
+            ),
+        ]
+        for side, q_darcy, q_0d, p_bc in specs:
+            if not (np.isfinite(q_darcy) and np.isfinite(q_0d)):
+                err = float("nan")
+            else:
+                err = float(abs(abs(q_darcy) - abs(q_0d)) / max(abs(q_0d), float(q_floor)))
+            rows.append({
+                "run": int(run_idx),
+                "organoid": int(organoid_idx),
+                "side": side,
+                "Q_Darcy": float(q_darcy) if np.isfinite(q_darcy) else float("nan"),
+                "Q_0D_target": float(q_0d) if np.isfinite(q_0d) else float("nan"),
+                "concave_flow_error_rel": err,
+                "concave_pressure_bc": float(p_bc) if np.isfinite(p_bc) else float("nan"),
+            })
+    path = run_dir / "post_darcy_concave_convergence.csv"
+    with path.open("w", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    if not bool(write_cumulative):
+        return
+    cumulative_rows: list[dict[str, Any]] = []
+    for path in sorted(
+        run_dir.parent.glob("run_*/post_darcy_concave_convergence.csv"),
+        key=lambda p: _run_index_from_path(p.parent),
+    ):
+        with path.open("r", newline="") as fp:
+            cumulative_rows.extend(csv.DictReader(fp))
+    if cumulative_rows:
+        cumulative_path = run_dir.parent / "post_darcy_concave_convergence.csv"
         with cumulative_path.open("w", newline="") as fp:
             writer = csv.DictWriter(fp, fieldnames=fieldnames)
             writer.writeheader()
@@ -1871,6 +2079,7 @@ def score_resistance_0d_trial(
     errors: list[float] = []
     active_errors: list[float] = []
     errors_by_side: dict[str, list[float]] = {"arterial": [], "venous": []}
+    bounded_errors_by_side: dict[str, list[float]] = {"arterial": [], "venous": []}
     stubborn_errors: list[float] = []
     pressure_error_flow_samples: list[tuple[str, float, float]] = []
     proposed_implied_errors: list[float] = []
@@ -1883,6 +2092,9 @@ def score_resistance_0d_trial(
     outlier_guard_violations: list[float] = []
     pressure_count = 0
     resistance_count = 0
+    venous_terminal_count = 0
+    venous_cleanup_reason_count = 0
+    venous_pressure_match_reason_count = 0
     for row in rows:
         organoid = int(row.get("organoid", 0))
         if organoid < 1 or organoid > int(n_organoids):
@@ -1892,6 +2104,17 @@ def score_resistance_0d_trial(
         p_interface = _safe_float(row.get("P_interface"))
         if not np.isfinite(p_interface):
             continue
+        pd_target_reason = str(row.get("Pd_target_reason", ""))
+        if side_label == "venous":
+            venous_terminal_count += 1
+            if pd_target_reason in {
+                "resistance_implied_interface",
+                "resistance_implied_interface_release_blend",
+                "pressure_match_frozen_r",
+            }:
+                venous_cleanup_reason_count += 1
+            if pd_target_reason == "pressure_match_frozen_r":
+                venous_pressure_match_reason_count += 1
         p_proposed_implied = _safe_float(row.get("P_implied_resistance"))
         if np.isfinite(p_proposed_implied):
             proposed_err = abs(p_proposed_implied - p_interface) / pressure_span * 100.0
@@ -1909,9 +2132,12 @@ def score_resistance_0d_trial(
             # the post-trial 0D terminal pressure should approach the Darcy
             # interface pressure.  Pd + RQ is only an auxiliary BC diagnostic.
             err = abs(p_0d - p_interface) / pressure_span * 100.0
+            bounded_err = _bounded_pressure_mismatch(p_0d, p_interface, floor=1.0) * 100.0
             errors.append(float(err))
             if side_label in errors_by_side:
                 errors_by_side[side_label].append(float(err))
+            if side_label in bounded_errors_by_side and np.isfinite(bounded_err):
+                bounded_errors_by_side[side_label].append(float(bounded_err))
             if np.isfinite(q_0d):
                 pressure_error_flow_samples.append((side_label, float(err), abs(float(q_0d))))
             if row.get("R_target_reason") != "frozen_side":
@@ -1992,6 +2218,7 @@ def score_resistance_0d_trial(
             "inverse_flow_pressure_score": float("inf"),
             "arterial_inverse_flow_pressure_score": float("inf"),
             "venous_inverse_flow_pressure_score": float("inf"),
+            "venous_bounded_pressure_score": float("inf"),
             "implied_interface_score": float("inf"),
             "implied_median_percent": float("inf"),
             "implied_p90_percent": float("inf"),
@@ -2018,6 +2245,8 @@ def score_resistance_0d_trial(
             "stubborn_error_score": float("inf"),
             "pressure_bc_count": float(pressure_count),
             "resistance_bc_count": float(resistance_count),
+            "late_stage_venous_cleanup": 0.0,
+            "effective_jump_weight": float("inf"),
         }
 
     errors_arr = np.array(errors, dtype=float)
@@ -2082,6 +2311,33 @@ def score_resistance_0d_trial(
 
     arterial_pressure_score, _, _ = _side_pressure_score("arterial")
     venous_pressure_score, _, _ = _side_pressure_score("venous")
+
+    def _side_bounded_pressure_score(side: str) -> tuple[float, float, float]:
+        vals = bounded_errors_by_side.get(side, [])
+        if not vals:
+            return float("inf"), float("inf"), float("inf")
+        arr = np.array(vals, dtype=float)
+        med = float(np.nanmedian(arr))
+        p90 = float(np.nanpercentile(arr, 90.0))
+        maxv = float(np.nanmax(arr))
+        return med + 0.5 * p90 + 0.25 * maxv, med, p90
+
+    venous_bounded_pressure_score, _, _ = _side_bounded_pressure_score("venous")
+    venous_cleanup_fraction = (
+        float(venous_cleanup_reason_count / venous_terminal_count)
+        if venous_terminal_count > 0
+        else 0.0
+    )
+    venous_pressure_match_fraction = (
+        float(venous_pressure_match_reason_count / venous_terminal_count)
+        if venous_terminal_count > 0
+        else 0.0
+    )
+    late_stage_venous_cleanup = (
+        venous_terminal_count > 0
+        and venous_cleanup_fraction >= 0.75
+        and venous_pressure_match_fraction >= 0.25
+    )
     finite_pressure_scores = [
         value for value in (arterial_pressure_score, venous_pressure_score) if np.isfinite(value)
     ]
@@ -2139,6 +2395,14 @@ def score_resistance_0d_trial(
         )
     else:
         pressure_score = float(unweighted_pressure_score)
+    if late_stage_venous_cleanup and np.isfinite(venous_bounded_pressure_score):
+        # Once the venous side has settled into late-stage cleanup, candidate
+        # selection should target the actual Darcy-vs-0D pressure residual much
+        # more directly and care less about globally smooth parameter motion.
+        pressure_score = (
+            0.5 * float(pressure_score)
+            + 5.0 * float(venous_bounded_pressure_score)
+        )
     jump_score = jump_median + 0.25 * jump_p90 + 0.05 * jump_max
     positive_arr = np.array(flow_guard_positive_increases if flow_guard_positive_increases else [0.0], dtype=float)
     reduction_arr = np.array(flow_guard_reductions if flow_guard_reductions else [0.0], dtype=float)
@@ -2178,10 +2442,13 @@ def score_resistance_0d_trial(
         # error, so subtracting it rewards worse implied-pressure alignment and
         # cancels the adaptive implied-alignment penalty.
         adaptive_implied_bonus = 0.0
+    effective_jump_weight = max(float(jump_weight), 0.0)
+    if late_stage_venous_cleanup:
+        effective_jump_weight *= 0.2
     score = (
         effective_pressure_weight * pressure_score
         + max(float(implied_alignment_weight), 0.0) * implied_interface_score
-        + max(float(jump_weight), 0.0) * jump_score
+        + effective_jump_weight * jump_score
         + max(float(max_pressure_error_weight), 0.0) * outlier_error_score
         + max(float(stubborn_max_error_weight), 0.0) * stubborn_error_score
         + max(float(flow_guard_weight), 0.0) * flow_guard_score
@@ -2216,6 +2483,7 @@ def score_resistance_0d_trial(
         "inverse_flow_pressure_score": float(inverse_flow_pressure_score),
         "arterial_inverse_flow_pressure_score": float(arterial_inverse_flow_score),
         "venous_inverse_flow_pressure_score": float(venous_inverse_flow_score),
+        "venous_bounded_pressure_score": float(venous_bounded_pressure_score),
         "implied_interface_score": float(implied_interface_score),
         "implied_median_percent": float(implied_median),
         "implied_p90_percent": float(implied_p90),
@@ -2227,6 +2495,7 @@ def score_resistance_0d_trial(
         "arterial_implied_p90_percent": float(arterial_implied_p90),
         "venous_implied_p90_percent": float(venous_implied_p90),
         "jump_score": float(jump_score),
+        "effective_jump_weight": float(effective_jump_weight),
         "flow_guard_score": float(flow_guard_score),
         "flow_guard_count": float(flow_guard_count),
         "flow_guard_increase_count": float(flow_guard_increase_count),
@@ -2239,6 +2508,7 @@ def score_resistance_0d_trial(
         "outlier_guard_score": float(outlier_guard_score),
         "pressure_bc_count": float(pressure_count),
         "resistance_bc_count": float(resistance_count),
+        "late_stage_venous_cleanup": float(bool(late_stage_venous_cleanup)),
     }
 
 
@@ -2266,6 +2536,7 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "inverse_flow_pressure_score",
         "arterial_inverse_flow_pressure_score",
         "venous_inverse_flow_pressure_score",
+        "venous_bounded_pressure_score",
         "implied_interface_score",
         "implied_median_percent",
         "implied_p90_percent",
@@ -2277,6 +2548,7 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "arterial_implied_p90_percent",
         "venous_implied_p90_percent",
         "jump_score",
+        "effective_jump_weight",
         "flow_guard_score",
         "median_error_percent",
         "active_median_error_percent",
@@ -2300,6 +2572,7 @@ def write_inner_resistance_search_summary(run_dir: Path, rows: list[dict[str, An
         "flow_guard_reduction_median_percent",
         "pressure_bc_count",
         "resistance_bc_count",
+        "late_stage_venous_cleanup",
     ]
     path = run_dir / "inner_resistance_0d_search_summary.csv"
     with path.open("w", newline="") as fp:
@@ -2381,6 +2654,7 @@ def apply_organoid_resistance_from_json(
     pressure_match_stable_r_rel_threshold: float = 1.0e-2,
     pressure_match_min_stable_r_runs: int = 3,
     allow_missing_terminal_bcs: bool = False,
+    current_run_idx: int | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     skip_1d = bool(iface.get("skip_1d", False))
@@ -2460,7 +2734,11 @@ def apply_organoid_resistance_from_json(
         refs = _terminal_reference_values(iface, "inlet" if side == "inlet" else "outlet", len(p_interface))
         bc_by_name = {str(bc.get("bc_name", "")): bc for bc in bcs}
         for j, p_raw in enumerate(p_interface):
-            branch_id = int(branch_ids[j]) if j < len(branch_ids) else j
+            branch_id = j
+            if j < len(branch_ids):
+                branch_id_raw = _safe_float(branch_ids[j])
+                if np.isfinite(branch_id_raw):
+                    branch_id = int(branch_id_raw)
             bc_name = f"{bc_prefix}{branch_id}"
             bc = bc_by_name.get(bc_name)
             if bc is None:
@@ -2729,6 +3007,44 @@ def apply_organoid_resistance_from_json(
                     if aligned_drive > old_drive + drive_tol and unsupported_drive_direction:
                         interface_increases_drive = True
                         pressure_alignment_active = False
+                state_parts = [part for part in adaptive_state.split("|") if part]
+                state_tags = set(state_parts)
+                venous_hysteresis_active = (
+                    side == "outlet"
+                    and current_run_idx is not None
+                    and int(current_run_idx) >= 7
+                )
+                last_was_venous_suppression = (
+                    venous_hysteresis_active
+                    and (
+                        adaptive_last_reason == "parent_flow_suppression"
+                        or adaptive_last_reason == "parent_flow_suppression_mismatch_guard"
+                    )
+                )
+                last_was_venous_hold = (
+                    venous_hysteresis_active
+                    and adaptive_last_reason == "drive_limited_hold"
+                )
+                venous_watch_tag = "venous_suppression_watch"
+                venous_release_lock_tag = "venous_suppression_release_lockout"
+                venous_hold_watch_tag = "venous_hold_watch"
+                venous_hold_release_lock_tag = "venous_hold_release_lockout"
+                venous_guard_reentry_lockout = (
+                    venous_hysteresis_active
+                    and (
+                        adaptive_last_reason == "parent_flow_suppression_mismatch_guard"
+                        or "guard_reentry_lockout" in adaptive_state
+                    )
+                )
+                if venous_hysteresis_active:
+                    if interface_increases_drive and not last_was_venous_hold:
+                        if venous_hold_watch_tag in state_tags:
+                            state_tags.discard(venous_hold_watch_tag)
+                        else:
+                            interface_increases_drive = False
+                            state_tags.add(venous_hold_watch_tag)
+                    elif not interface_increases_drive and venous_hold_watch_tag in state_tags:
+                        state_tags.discard(venous_hold_watch_tag)
                 if (
                     np.isfinite(p_parent)
                     and not pressure_alignment_active
@@ -2743,20 +3059,28 @@ def apply_organoid_resistance_from_json(
                         # Venous drainage is unsupported when tissue pressure falls
                         # below its parent pressure; chasing that lower pressure would
                         # increase suction, so target the parent instead.
-                        flow_suppression_target = p_darcy < p_parent - pressure_tol
-                venous_recovery_reference = (
-                    min(p_0d, p_parent)
-                    if np.isfinite(p_0d) and np.isfinite(p_parent)
-                    else float("nan")
-                )
-                venous_recovery_exit_fraction = 0.90
-                venous_pressure_recovery = (
+                        flow_suppression_target = (
+                            p_darcy < p_parent - pressure_tol
+                            and not venous_guard_reentry_lockout
+                        )
+                        if flow_suppression_target and venous_hysteresis_active and not last_was_venous_suppression:
+                            if venous_watch_tag in state_tags:
+                                state_tags.discard(venous_watch_tag)
+                            else:
+                                flow_suppression_target = False
+                                state_tags.add(venous_watch_tag)
+                        elif venous_hysteresis_active and not flow_suppression_target and venous_watch_tag in state_tags:
+                            state_tags.discard(venous_watch_tag)
+                venous_negative_pressure_recovery = (
                     side == "outlet"
                     and np.isfinite(p_darcy)
-                    and np.isfinite(venous_recovery_reference)
-                    and venous_recovery_reference > 0.0
-                    and p_darcy < venous_recovery_exit_fraction * venous_recovery_reference
+                    and np.isfinite(p_0d)
+                    and np.isfinite(p_parent)
+                    and p_darcy < -pressure_tol
+                    and p_0d > pressure_tol
+                    and p_parent > pressure_tol
                 )
+                venous_pressure_recovery = False
                 if (
                     adaptive_force_suppression
                     and np.isfinite(p_parent)
@@ -2764,6 +3088,7 @@ def apply_organoid_resistance_from_json(
                     and not pressure_alignment_active
                     and not continuity_decay_active
                     and not venous_pressure_recovery
+                    and not venous_negative_pressure_recovery
                 ):
                     # Hysteresis should prevent chatter near the suppression
                     # boundary, not keep a terminal pinned to its parent after
@@ -2772,29 +3097,46 @@ def apply_organoid_resistance_from_json(
                         (side == "inlet" and p_darcy >= p_parent - pressure_tol)
                         or (side == "outlet" and p_darcy <= p_parent + pressure_tol)
                     )
-                    if suppression_still_compatible:
+                    if suppression_still_compatible and not venous_guard_reentry_lockout:
                         flow_suppression_target = True
-                if venous_pressure_recovery:
-                    # A venous outlet whose Darcy/interface pressure is far
-                    # below the positive 0D/parent target is over-suppressed,
-                    # not merely high-flow.  The usual parent-flow suppression
-                    # targets the implied pressure, Pd + RQ = P_parent, which
-                    # can leave Pd too low when RQ is large.  In this recovery
-                    # regime, target Pd itself toward the parent until the
-                    # Darcy outlet is close to the positive terminal target.
+                if venous_hysteresis_active and last_was_venous_suppression:
+                    if flow_suppression_target:
+                        if venous_release_lock_tag in state_tags:
+                            state_tags.discard(venous_release_lock_tag)
+                        else:
+                            state_tags.add(venous_release_lock_tag)
+                    elif venous_release_lock_tag in state_tags:
+                        flow_suppression_target = True
+                if venous_hysteresis_active and last_was_venous_hold:
+                    if interface_increases_drive:
+                        if venous_hold_release_lock_tag in state_tags:
+                            state_tags.discard(venous_hold_release_lock_tag)
+                        else:
+                            state_tags.add(venous_hold_release_lock_tag)
+                    elif venous_hold_release_lock_tag in state_tags:
+                        interface_increases_drive = True
+                if venous_negative_pressure_recovery:
+                    # If Darcy has crossed into a clearly negative-pressure
+                    # venous state while the 0D terminal and its parent remain
+                    # positive, do not continue chasing the negative Darcy
+                    # interface directly. Instead, add backpressure smoothly
+                    # toward the venous parent to escape the reversed-flow
+                    # basin before ordinary implied-interface updates resume.
                     suppression_parent_pressure_target = float(p_parent)
                     if venous_parent_margin > 0.0:
                         suppression_parent_pressure_target += venous_parent_margin
-                    pd_target = suppression_parent_pressure_target
-                    pd_target_reason = "venous_pressure_recovery"
-                    adaptive_force_suppression = False
-                    adaptive_recommendation = "venous_pressure_recovery"
-                    if "venous_pressure_recovery" not in adaptive_state:
-                        adaptive_state = (
-                            f"{adaptive_state}|venous_pressure_recovery"
-                            if adaptive_state
-                            else "venous_pressure_recovery"
+                    if np.isfinite(old_pd):
+                        recovery_blend = 0.35
+                        pd_target = float(
+                            old_pd
+                            + recovery_blend
+                            * (suppression_parent_pressure_target - old_pd)
                         )
+                    else:
+                        pd_target = suppression_parent_pressure_target
+                    pd_target_reason = "negative_venous_pressure_recovery"
+                    adaptive_force_suppression = False
+                    adaptive_recommendation = "negative_venous_pressure_recovery"
                     flow_suppression_target = False
                 elif flow_suppression_target:
                     suppression_parent_pressure_target = float(p_parent)
@@ -2842,6 +3184,55 @@ def apply_organoid_resistance_from_json(
                         pd_target = p_darcy
                     if pressure_alignment_active:
                         pd_target_reason = "pressure_alignment"
+                venous_release_from_brake = (
+                    side == "outlet"
+                    and pd_target_reason == "resistance_implied_interface"
+                    and adaptive_last_reason in {
+                        "parent_flow_suppression",
+                        "parent_flow_suppression_mismatch_guard",
+                        "drive_limited_hold",
+                    }
+                    and np.isfinite(old_pd)
+                    and np.isfinite(pd_target)
+                )
+                if venous_release_from_brake:
+                    release_blend = 0.35
+                    pd_target = float(old_pd + release_blend * (pd_target - old_pd))
+                    pd_target_reason = "resistance_implied_interface_release_blend"
+                if (
+                    venous_hysteresis_active
+                    and venous_guard_reentry_lockout
+                    and pd_target_reason == "resistance_implied_interface"
+                    and "guard_reentry_lockout" not in adaptive_state
+                ):
+                    adaptive_state = (
+                        f"{adaptive_state}|guard_reentry_lockout"
+                        if adaptive_state
+                        else "guard_reentry_lockout"
+                    )
+                elif (
+                    venous_hysteresis_active
+                    and not venous_guard_reentry_lockout
+                    and "guard_reentry_lockout" in adaptive_state
+                ):
+                    adaptive_state = "|".join(
+                        part for part in adaptive_state.split("|") if part != "guard_reentry_lockout"
+                    )
+                current_state_parts = [part for part in adaptive_state.split("|") if part]
+                base_state_parts = [
+                    part
+                    for part in current_state_parts
+                    if part not in {
+                        venous_watch_tag,
+                        venous_release_lock_tag,
+                        venous_hold_watch_tag,
+                        venous_hold_release_lock_tag,
+                    }
+                ]
+                adaptive_state = "|".join(
+                    base_state_parts
+                    + [tag for tag in state_tags if tag not in base_state_parts]
+                )
             _, pd_flow_weight_for_response = _effective_pd_relaxation(q_den)
             response_error_rel = (
                 abs(p_darcy - p_0d) / max(abs(p_darcy), 1.0)
@@ -2882,9 +3273,23 @@ def apply_organoid_resistance_from_json(
                     response_gain * response_severity,
                     response_effective_gain_cap,
                 )
+            venous_response_correction_allowed = (
+                side == "outlet"
+                and np.isfinite(stubborn_gain)
+                and stubborn_gain > 0.0
+                and current_run_idx is not None
+                and int(current_run_idx) >= 8
+                and pd_target_reason == "resistance_implied_interface"
+                and adaptive_last_reason == "resistance_implied_interface"
+                and np.isfinite(adaptive_recent_improvement_rel)
+                and adaptive_recent_improvement_rel >= 0.0
+                and np.isfinite(adaptive_recent_error_rel)
+                and adaptive_recent_error_rel >= max(float(response_rel_error_tol), 1.0)
+            )
             if (
                 response_effective_gain > 0.0
                 and pd_mode != "0d"
+                and (side != "outlet" or venous_response_correction_allowed)
                 and np.isfinite(r_next)
                 and np.isfinite(q_for_r)
                 and np.isfinite(p_darcy)
@@ -2905,14 +3310,80 @@ def apply_organoid_resistance_from_json(
                 response_active = True
             if np.isfinite(old_pd):
                 w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
+                if (
+                    side == "outlet"
+                    and current_run_idx is not None
+                    and int(current_run_idx) <= 6
+                ):
+                    w_pd = min(float(w_pd), 0.4)
+                monotone_venous_acceleration_active = (
+                    side == "outlet"
+                    and current_run_idx is not None
+                    and int(current_run_idx) >= 8
+                    and pd_target_reason == "resistance_implied_interface"
+                    and adaptive_last_reason == "resistance_implied_interface"
+                    and np.isfinite(adaptive_recent_improvement_rel)
+                    and adaptive_recent_improvement_rel >= 0.02
+                    and np.isfinite(adaptive_recent_error_rel)
+                    and adaptive_recent_error_rel >= 1.0
+                )
+                if monotone_venous_acceleration_active:
+                    w_pd = min(max(float(w_pd) * 1.4, 0.4), 1.0)
                 pd_next = (1.0 - w_pd) * old_pd + w_pd * pd_target
             else:
                 w_pd, pd_flow_weight = _effective_pd_relaxation(q_den)
+                if (
+                    side == "outlet"
+                    and current_run_idx is not None
+                    and int(current_run_idx) <= 6
+                ):
+                    w_pd = min(float(w_pd), 0.4)
                 pd_next = pd_target
+
+            venous_pd_step_cap_active = (
+                side == "outlet"
+                and np.isfinite(old_pd)
+                and np.isfinite(pd_next)
+                and "parent_flow_suppression" in pd_target_reason
+            )
+            if venous_pd_step_cap_active:
+                venous_pd_step_fraction = 0.10
+                venous_pd_step_floor = 1.0e3
+                pd_step_cap = venous_pd_step_fraction * max(
+                    abs(float(old_pd)),
+                    float(venous_pd_step_floor),
+                )
+                proposed_delta_pd = float(pd_next - old_pd)
+                pd_next = float(
+                    old_pd + np.clip(proposed_delta_pd, -pd_step_cap, pd_step_cap)
+                )
+
+            venous_mismatch_guard_active = (
+                side == "outlet"
+                and np.isfinite(old_pd)
+                and np.isfinite(pd_next)
+                and np.isfinite(r_next)
+                and np.isfinite(q_for_r)
+                and np.isfinite(p_darcy)
+                and pd_target_reason in {
+                    "resistance_implied_interface",
+                    "parent_flow_suppression",
+                }
+            )
+            if venous_mismatch_guard_active:
+                old_implied = float(old_pd + r_next * q_for_r)
+                new_implied = float(pd_next + r_next * q_for_r)
+                old_implied_gap = float(abs(old_implied - p_darcy))
+                new_implied_gap = float(abs(new_implied - p_darcy))
+                if new_implied_gap > old_implied_gap:
+                    pd_next = float(0.5 * (old_pd + pd_next))
+                    pd_target_reason = f"{pd_target_reason}_mismatch_guard"
 
             pressure_match_active = False
             pressure_match_slope = float("nan")
             pressure_match_delta_pd = 0.0
+            pressure_match_direct_descent_delta_pd = 0.0
+            pressure_match_bounded_gap = float("nan")
             pressure_match_target = float("nan")
             sensitivity_consistency = (
                 1.0
@@ -2982,6 +3453,35 @@ def apply_organoid_resistance_from_json(
                     1.0,
                 )
                 correction_cap = max(float(terminal_sensitivity_max_multiplier), 0.0) * base_step
+                if np.isfinite(p_darcy) and np.isfinite(p_0d):
+                    signed_bounded_gap = float(
+                        (p_darcy - p_0d) / max(abs(p_darcy), abs(p_0d), 1.0)
+                    )
+                    pressure_match_bounded_gap = float(abs(signed_bounded_gap))
+                else:
+                    signed_bounded_gap = float("nan")
+                if (
+                    side == "outlet"
+                    and np.isfinite(signed_bounded_gap)
+                    and np.isfinite(correction_cap)
+                    and correction_cap > 0.0
+                ):
+                    # The stiff venous tail is where the local dP0D/dPd slope is
+                    # least informative. Blend the slope-based correction with a
+                    # direct bounded-mismatch descent step so the worst branches
+                    # target the actual Darcy-vs-0D residual instead of only the
+                    # weak sensitivity surrogate.
+                    stubborn_scale = 0.0
+                    if np.isfinite(adaptive_recent_error_rel):
+                        stubborn_scale = min(max(float(adaptive_recent_error_rel), 0.0) / 25.0, 1.0)
+                    bounded_scale = min(abs(float(signed_bounded_gap)), 1.0)
+                    descent_blend = min(0.85, 0.35 + 0.35 * bounded_scale + 0.15 * stubborn_scale)
+                    correction_cap *= 1.0 + 0.75 * bounded_scale + 0.25 * stubborn_scale
+                    pressure_match_direct_descent_delta_pd = float(signed_bounded_gap * correction_cap)
+                    desired_delta_pd = float(
+                        (1.0 - descent_blend) * desired_delta_pd
+                        + descent_blend * pressure_match_direct_descent_delta_pd
+                    )
                 if np.isfinite(correction_cap) and correction_cap > 0.0:
                     desired_delta_pd = float(np.clip(desired_delta_pd, -correction_cap, correction_cap))
                 if np.isfinite(old_pd):
@@ -3058,6 +3558,11 @@ def apply_organoid_resistance_from_json(
                 "bc_type": bc_type,
                 "P_interface": float(p_darcy),
                 "P_0D": float(p_0d),
+                "terminal_pressure_error_bounded": _bounded_pressure_mismatch(
+                    float(p_0d),
+                    float(p_darcy),
+                    floor=1.0,
+                ),
                 "P_parent_0D": float(p_parent),
                 "P_ref_diagnostic": float(p_ref),
                 "P_d_for_R": float(p_d_for_r),
@@ -3111,6 +3616,10 @@ def apply_organoid_resistance_from_json(
                 "terminal_pressure_match_active": bool(pressure_match_active),
                 "terminal_pressure_match_slope": float(pressure_match_slope),
                 "terminal_pressure_match_delta_pd": float(pressure_match_delta_pd),
+                "terminal_pressure_match_direct_descent_delta_pd": float(
+                    pressure_match_direct_descent_delta_pd
+                ),
+                "terminal_pressure_match_bounded_gap": float(pressure_match_bounded_gap),
                 "terminal_pressure_match_target": float(pressure_match_target),
                 "terminal_pressure_match_stable_r_count": float(sensitivity_stable_r_count),
                 "Q_0D": float(q_0d),
@@ -3147,11 +3656,11 @@ def copy_seed_geometry(
     required_geometry_files = [
         "bioreactor.xdmf",
         "mesh_tags.xdmf",
-        "tagged_branches_inlet.bp",
-        "tagged_branches_outlet.bp",
     ]
     if not no_synthetic_vasculature:
         required_geometry_files.extend([
+            "tagged_branches_inlet.bp",
+            "tagged_branches_outlet.bp",
             "pressure_checkpoint_inlet.bp",
             "pressure_checkpoint_outlet.bp",
             "flow_checkpoint_inlet.bp",
@@ -3364,6 +3873,18 @@ def _read_pressure_column(row: Optional[dict], column: str) -> Optional[float]:
         return None
 
 
+def _read_float_column(row: Optional[dict], column: str) -> Optional[float]:
+    if row is None:
+        return None
+    raw = row.get(column, None)
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
 def read_leak_pressures_from_output(
     output_csv: Path,
     organoid_idx: int,
@@ -3371,6 +3892,15 @@ def read_leak_pressures_from_output(
     art_row = _latest_named_row(output_csv, f"leak_art_{organoid_idx}")
     ven_row = _latest_named_row(output_csv, f"leak_ven_{organoid_idx}")
     return _read_pressure_column(art_row, "pressure_out"), _read_pressure_column(ven_row, "pressure_out")
+
+
+def read_leak_flows_from_output(
+    output_csv: Path,
+    organoid_idx: int,
+) -> tuple[Optional[float], Optional[float]]:
+    art_row = _latest_named_row(output_csv, f"leak_art_{organoid_idx}")
+    ven_row = _latest_named_row(output_csv, f"leak_ven_{organoid_idx}")
+    return _read_float_column(art_row, "flow_out"), _read_float_column(ven_row, "flow_out")
 
 def resolve_leak_pressures_for_darcy(
     primary_output_csv: Path,
@@ -3512,11 +4042,11 @@ def required_darcy_geometry_inputs(no_synthetic_vasculature: bool = False) -> li
     required = [
         "bioreactor.xdmf",
         "mesh_tags.xdmf",
-        "tagged_branches_inlet.bp",
-        "tagged_branches_outlet.bp",
     ]
     if not no_synthetic_vasculature:
         required.extend([
+            "tagged_branches_inlet.bp",
+            "tagged_branches_outlet.bp",
             "pressure_checkpoint_inlet.bp",
             "pressure_checkpoint_outlet.bp",
             "flow_checkpoint_inlet.bp",
@@ -4145,19 +4675,36 @@ def convergence_for_organoid(
 ) -> tuple[bool, float, float]:
     iface = load_json(iface_path)
     if bool(iface.get("skip_1d", False)):
+        run_dir = iface_path.parents[2]
+        q_0d_art, q_0d_ven = read_leak_flows_from_output(run_dir / "output.csv", int(organoid_idx or 0))
+        q_d = np.asarray(
+            [
+                abs(_safe_float(iface.get("q_artery_leak"))),
+                abs(_safe_float(iface.get("q_venous_leak"))),
+            ],
+            dtype=float,
+        )
+        q_t = np.asarray(
+            [
+                abs(_safe_float(q_0d_art)),
+                abs(_safe_float(q_0d_ven)),
+            ],
+            dtype=float,
+        )
+        rq = _max_pressure_continuity_rel(q_d, q_t, floor=1.0e-20)
         p = np.asarray(
             [iface.get("p_concave_inlet_bc", 0.0), iface.get("p_concave_outlet_bc", 0.0)],
             dtype=float,
         )
         if prev_iface_path is None or not prev_iface_path.exists():
-            return False, float("inf"), float("inf")
+            return False, rq, float("inf")
         prev = load_json(prev_iface_path)
         p_t = np.asarray(
             [prev.get("p_concave_inlet_bc", 0.0), prev.get("p_concave_outlet_bc", 0.0)],
             dtype=float,
         )
         rp = _max_pressure_continuity_rel(p, p_t, floor=1.0)
-        return (rp <= tol_p), float("nan"), rp
+        return (rq <= tol_q), rq, rp
 
     p_in = np.asarray(iface.get("p_inlet_nodes_raw", iface.get("p_inlet_nodes", [])), dtype=float)
     p_out = np.asarray(iface.get("p_outlet_nodes_raw", iface.get("p_outlet_nodes", [])), dtype=float)
@@ -4553,6 +5100,11 @@ def main() -> None:
         int(args.n_organoids),
         write_cumulative=bool(args.terminal_pd_convergence_csv),
     )
+    write_post_darcy_concave_convergence(
+        run0,
+        int(args.n_organoids),
+        write_cumulative=bool(args.terminal_pd_convergence_csv),
+    )
 
     # Coupling loop: ramp then iterate to convergence
     total_steps = int(args.n_ramp) + int(args.max_iter)
@@ -4808,6 +5360,7 @@ def main() -> None:
                             args.terminal_pressure_match_min_stable_r_runs
                         ),
                         allow_missing_terminal_bcs=bool(args.no_synthetic_vasculature),
+                        current_run_idx=int(i),
                     )
                 )
             for row in rows:
@@ -4897,6 +5450,39 @@ def main() -> None:
                         pd_relaxation_candidates.append(0.9)
                     decay_candidates = [1.0, 0.85, 0.7]
                     response_correction_gains = [0.0, 1.0]
+                if int(i) <= 6:
+                    early_venous_pd_cap = 0.4
+                    pd_relaxation_candidates = [
+                        float(v)
+                        for v in pd_relaxation_candidates
+                        if float(v) <= early_venous_pd_cap + 1.0e-12
+                    ] or [early_venous_pd_cap]
+                venous_brake_reasons = {
+                    "parent_flow_suppression",
+                    "parent_flow_suppression_mismatch_guard",
+                    "drive_limited_hold",
+                }
+                venous_terminal_count = 0
+                venous_brake_count = 0
+                for key, value in adaptive_terminal_state_map.items():
+                    if key[1] != "venous":
+                        continue
+                    venous_terminal_count += 1
+                    if str(value.get("last_reason", "")) in venous_brake_reasons:
+                        venous_brake_count += 1
+                venous_brake_fraction = (
+                    float(venous_brake_count) / float(venous_terminal_count)
+                    if venous_terminal_count > 0
+                    else 0.0
+                )
+                if venous_brake_fraction >= 0.50:
+                    pd_relaxation_candidates = [
+                        float(v) for v in pd_relaxation_candidates if float(v) <= 0.2 + 1.0e-12
+                    ] or [0.2]
+                elif venous_brake_fraction >= 0.25:
+                    pd_relaxation_candidates = [
+                        float(v) for v in pd_relaxation_candidates if float(v) <= 0.4 + 1.0e-12
+                    ] or [0.4]
                 if bool(args.permanent_resistance_controls):
                     # In control mode, R/Pd are allowed to remain as numerical
                     # coupling controls. Do not spend candidates on decaying R
@@ -5198,6 +5784,7 @@ def main() -> None:
                             "score": float("inf"),
                             "pressure_score": float("inf"),
                             "implied_interface_score": float("inf"),
+                            "venous_bounded_pressure_score": float("inf"),
                             "implied_median_percent": float("inf"),
                             "implied_p90_percent": float("inf"),
                             "implied_max_percent": float("inf"),
@@ -5208,6 +5795,7 @@ def main() -> None:
                             "arterial_implied_p90_percent": float("inf"),
                             "venous_implied_p90_percent": float("inf"),
                             "jump_score": float("inf"),
+                            "effective_jump_weight": float("inf"),
                             "flow_guard_score": float("inf"),
                             "median_error_percent": float("inf"),
                             "p90_error_percent": float("inf"),
@@ -5233,6 +5821,7 @@ def main() -> None:
                             "outlier_guard_score": float("inf"),
                             "pressure_bc_count": 0.0,
                             "resistance_bc_count": 0.0,
+                            "late_stage_venous_cleanup": 0.0,
                         }
                     summary_row = {
                         "run": int(i),
@@ -5444,6 +6033,12 @@ def main() -> None:
             int(args.n_organoids),
             write_cumulative=bool(args.terminal_pd_convergence_csv),
         )
+        write_post_darcy_concave_convergence(
+            cur,
+            int(args.n_organoids),
+            write_cumulative=bool(args.terminal_pd_convergence_csv),
+        )
+        remove_run_geometry_dirs(cur, int(args.n_organoids))
         update_convergence_plots(args, coupled_root, i)
 
         # convergence after ramp
@@ -5467,7 +6062,13 @@ def main() -> None:
                     pressure_compare_mode="target",
                 )
                 all_ok = all_ok and ok
-                print(f"  organoid_{k}: rel_p={rp:.3e}, converged={ok}")
+                if args.no_synthetic_vasculature:
+                    print(
+                        f"  organoid_{k}: rel_q_concave={rq:.3e}, rel_p_bc_change={rp:.3e}, converged={ok}",
+                        flush=True,
+                    )
+                else:
+                    print(f"  organoid_{k}: rel_p={rp:.3e}, converged={ok}")
             if all_ok:
                 print(f"\n[done] converged at run_{i}.")
                 return
