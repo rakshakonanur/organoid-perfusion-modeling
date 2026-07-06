@@ -194,6 +194,16 @@ def _parse_wrapper_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]
         ),
     )
     ap.add_argument(
+        "--hybrid-q-sensitivity-start-run",
+        type=int,
+        default=6,
+        help=(
+            "First run index where the secant-style sensitivity controller is "
+            "allowed to modify the bounded base update. Earlier runs use only "
+            "the base bounded controller."
+        ),
+    )
+    ap.add_argument(
         "--hybrid-q-sensitivity-history-window",
         type=int,
         default=6,
@@ -255,6 +265,15 @@ def _parse_wrapper_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]
         help=(
             "EMA weight used to smooth the per-branch normalized sensitivity "
             "magnitude |dE/dlog10|Q|| over recent iterations."
+        ),
+    )
+    ap.add_argument(
+        "--hybrid-q-sensitivity-active-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Estimate branchwise sensitivity only from runs where that side "
+            "was actively updated, excluding alternate-side-damped samples."
         ),
     )
     ap.add_argument(
@@ -427,8 +446,13 @@ def _pressure_error(side_label: str, p_darcy: float, p_0d: float) -> float:
 def _signed_bounded_pressure_error(side_label: str, p_darcy: float, p_0d: float) -> float:
     if not (_finite(p_darcy) and _finite(p_0d)):
         return 0.0
-    scale = max(abs(float(p_darcy)), abs(float(p_0d)), 1.0)
-    return float(_pressure_error(side_label, p_darcy, p_0d) / scale)
+    p_darcy = float(p_darcy)
+    p_0d = float(p_0d)
+    error = _pressure_error(side_label, p_darcy, p_0d)
+    # Normalize by the reduced-model pressure so the branchwise controller is
+    # measuring Darcy/0D mismatch against the same reference on both sides.
+    scale = max(abs(p_0d), 1.0)
+    return float(error / scale)
 
 
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -453,10 +477,16 @@ def _physical_q_from_summary_row(row: dict[str, str], side_label: str) -> float:
 def _q0d_magnitude_from_summary_row(row: dict[str, str]) -> float:
     q_0d = row.get("Q_0D", "")
     if _finite(q_0d):
-        return abs(float(q_0d))
+        q_mag = abs(float(q_0d))
+        if q_mag > 0.0:
+            return q_mag
+        return float("nan")
     q_phys = _physical_q_from_summary_row(row, str(row.get("side", "")).strip().lower())
     if _finite(q_phys):
-        return abs(float(q_phys))
+        q_mag = abs(float(q_phys))
+        if q_mag > 0.0:
+            return q_mag
+        return float("nan")
     return float("nan")
 
 
@@ -467,12 +497,16 @@ def _build_q_error_sensitivity_map(
     min_logq_change: float,
     min_error_change: float,
     ema_alpha: float,
+    active_only: bool,
 ) -> dict[tuple[int, str, int], dict[str, float]]:
     prev_run = int(current_run) - 1
     if prev_run < 2:
         return {}
 
-    start_run = max(1, prev_run - max(int(history_window), 2) + 1)
+    # Do not seed the Jacobian estimate from run_1. The first updated run can
+    # contain zero/placeholder terminal flows, which makes log(Q) secants blow
+    # up and then freeze later updates.
+    start_run = max(2, prev_run - max(int(history_window), 2) + 1)
     history: dict[tuple[int, str, int], list[dict[str, float]]] = {}
     for run_idx in range(start_run, prev_run + 1):
         run_dir = coupled_root / f"run_{run_idx}"
@@ -504,12 +538,19 @@ def _build_q_error_sensitivity_map(
             if not (_finite(p_darcy) and _finite(p_0d)):
                 continue
             error = _signed_bounded_pressure_error(str(key[1]), p_darcy, p_0d)
+            active_raw = row.get("hybrid_alternate_side_active", "")
+            if str(active_raw).strip():
+                is_active = _safe_bool(active_raw)
+            else:
+                is_active = "alternate_damped" not in str(row.get("hybrid_action", ""))
             history.setdefault(key, []).append({
                 "run": float(run_idx),
                 "logq": float(logq),
                 "p_darcy": float(p_darcy),
+                "p_0d": float(p_0d),
                 "error": float(error),
                 "abs_error": float(abs(error)),
+                "active": float(1.0 if is_active else 0.0),
             })
 
     out: dict[tuple[int, str, int], dict[str, float]] = {}
@@ -521,15 +562,21 @@ def _build_q_error_sensitivity_map(
         abs_error_slopes: list[float] = []
         improvement_ratios: list[float] = []
         ema_abs_slope = float("nan")
-        for prev_item, cur_item in zip(items[:-1], items[1:]):
+        if bool(active_only):
+            pair_items = [
+                item for item in items
+                if float(item.get("active", 1.0)) >= 0.5
+            ]
+        else:
+            pair_items = items
+        for prev_item, cur_item in zip(pair_items[:-1], pair_items[1:]):
             dx = float(cur_item["logq"] - prev_item["logq"])
             de = float(cur_item["error"] - prev_item["error"])
             if not (_finite(dx) and _finite(de)):
                 continue
-            if abs(dx) <= sys.float_info.min:
+            if abs(dx) < min_dx:
                 continue
-            dx_eff = math.copysign(max(abs(dx), min_dx), dx)
-            slope = de / dx_eff
+            slope = de / dx
             if not _finite(slope):
                 continue
             slope_abs = abs(float(slope))
@@ -805,32 +852,46 @@ def _apply_q_error_sensitivity_scaling(
             continue
         delta_secant = max(-adaptive_cap, min(adaptive_cap, delta_secant))
         new_delta = float(delta_secant)
+        plan["hybrid_q_error_sensitivity_slope"] = float(slope_mag)
+        plan["hybrid_q_error_sensitivity_sign_consistency"] = float(sign_consistency)
+        plan["hybrid_q_error_sensitivity_sample_count"] = float(sample_count)
+        plan["hybrid_q_error_sensitivity_source"] = str(sensitivity_source)
+        plan["hybrid_sensitivity_slope"] = float(slope_mag)
+        plan["hybrid_sensitivity_sign_consistency"] = float(sign_consistency)
+        plan["hybrid_sensitivity_sample_count"] = float(sample_count)
         if abs(new_delta) <= 1.0e-12:
+            plan["hybrid_q_error_sensitivity_applied"] = False
+            plan["hybrid_q_error_sensitivity_status"] = "evaluated_zero_move"
+            plan["hybrid_q_error_sensitivity_multiplier"] = float("nan")
+            plan["hybrid_sensitivity_applied"] = False
+            plan["hybrid_sensitivity_status"] = "evaluated_zero_move"
+            plan["hybrid_sensitivity_multiplier"] = float("nan")
             continue
         if abs(new_delta - old_delta) <= 1.0e-12:
+            plan["hybrid_q_error_sensitivity_applied"] = False
+            plan["hybrid_q_error_sensitivity_status"] = "evaluated_same_as_base"
+            plan["hybrid_q_error_sensitivity_multiplier"] = 1.0
+            plan["hybrid_sensitivity_applied"] = False
+            plan["hybrid_sensitivity_status"] = "evaluated_same_as_base"
+            plan["hybrid_sensitivity_multiplier"] = 1.0
             continue
 
         _retarget_plan_q(plan, float(new_delta), "branch_secant")
         plan["hybrid_sensitivity_applied"] = True
+        plan["hybrid_sensitivity_status"] = "evaluated_changed_move"
         plan["hybrid_sensitivity_multiplier"] = (
             float(abs(new_delta) / abs(old_delta))
             if abs(old_delta) > 1.0e-12
             else float("nan")
         )
-        plan["hybrid_sensitivity_slope"] = float(slope_mag)
-        plan["hybrid_sensitivity_sign_consistency"] = float(sign_consistency)
-        plan["hybrid_sensitivity_sample_count"] = float(sample_count)
         plan["hybrid_sensitivity_stable_r_count"] = float("nan")
         plan["hybrid_q_error_sensitivity_applied"] = True
-        plan["hybrid_q_error_sensitivity_slope"] = float(slope_mag)
-        plan["hybrid_q_error_sensitivity_sign_consistency"] = float(sign_consistency)
-        plan["hybrid_q_error_sensitivity_sample_count"] = float(sample_count)
+        plan["hybrid_q_error_sensitivity_status"] = "evaluated_changed_move"
         plan["hybrid_q_error_sensitivity_multiplier"] = (
             float(abs(new_delta) / abs(old_delta))
             if abs(old_delta) > 1.0e-12
             else float("nan")
         )
-        plan["hybrid_q_error_sensitivity_source"] = str(sensitivity_source)
 
 
 def _solve_r_for_target_flows(
@@ -957,7 +1018,7 @@ def _build_hybrid_override(config: argparse.Namespace):
             if (
                 bool(config.hybrid_q_sensitivity_control)
                 and current_run_idx is not None
-                and int(current_run_idx) >= start_run
+                and int(current_run_idx) >= max(start_run, int(config.hybrid_q_sensitivity_start_run))
             ):
                 pending_state["q_error_sensitivity_map"] = _build_q_error_sensitivity_map(
                     coupled_root=Path(str(config._coupled_root)).expanduser().resolve(),
@@ -966,6 +1027,7 @@ def _build_hybrid_override(config: argparse.Namespace):
                     min_logq_change=float(config.hybrid_q_sensitivity_min_logq_change),
                     min_error_change=float(config.hybrid_q_sensitivity_min_error_change),
                     ema_alpha=float(config.hybrid_q_sensitivity_ema_alpha),
+                    active_only=bool(config.hybrid_q_sensitivity_active_only),
                 )
                 pending_state["q_error_sensitivity_fallback_map"] = _build_q_error_sensitivity_fallbacks(
                     pending_state["q_error_sensitivity_map"]
@@ -1233,6 +1295,9 @@ def _build_hybrid_override(config: argparse.Namespace):
             row["hybrid_q_error_sensitivity_applied"] = bool(
                 plan.get("hybrid_q_error_sensitivity_applied", False)
             )
+            row["hybrid_q_error_sensitivity_status"] = str(
+                plan.get("hybrid_q_error_sensitivity_status", "")
+            )
             row["hybrid_q_error_sensitivity_slope"] = float(
                 plan.get("hybrid_q_error_sensitivity_slope", float("nan"))
             )
@@ -1258,6 +1323,9 @@ def _build_hybrid_override(config: argparse.Namespace):
                 row.get("hybrid_predicted_bounded_error", float("nan"))
             )
             row["hybrid_sensitivity_applied"] = bool(plan.get("hybrid_sensitivity_applied", False))
+            row["hybrid_sensitivity_status"] = str(
+                plan.get("hybrid_sensitivity_status", "")
+            )
             row["hybrid_sensitivity_multiplier"] = float(
                 plan.get("hybrid_sensitivity_multiplier", float("nan"))
             )
