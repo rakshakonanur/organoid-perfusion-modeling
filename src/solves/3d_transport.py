@@ -123,6 +123,7 @@ def import_flow_data(mesh_obj, bp_file: str):
     out = []
     for t in ts:
         adios4dolfinx.read_function(bp_file, q_src, name="f", time=t)
+        q_src.x.array[:] = (10/3)*q_src.x.array[:]
         q_src.x.scatter_forward()
         out.append(q_src.copy())
     return out
@@ -150,15 +151,6 @@ def _vtk_output_path(path: str | Path) -> Path:
     """Use a ParaView-friendly PVD path next to a requested output path."""
     p = Path(path)
     return p if p.suffix.lower() == ".pvd" else p.with_suffix(".pvd")
-
-
-def _final_xdmf_output_path(path: str | Path) -> Path:
-    """Avoid confusing a final-only XDMF with the live time-series path."""
-    p = Path(path)
-    stem = p.stem
-    if stem.endswith("_final"):
-        return p.with_suffix(".xdmf")
-    return p.with_name(f"{stem}_final.xdmf")
 
 
 def _remove_vtk_series(pvd_path: str | Path) -> None:
@@ -189,26 +181,23 @@ def _remove_vtk_series(pvd_path: str | Path) -> None:
 
 
 class TransportSolver:
-    # Magliaro et al., Scientific Reports 2019, converted to cgs.
-    # Paper units:
-    #   D_org = 1.07e-9 m^2/s, D_M = 1.0e-9 m^2/s, D_water = 3.0e-9 m^2/s
-    #   C_in = 0.2 mol/m^3, C_crit = 0.04 mol/m^3, k_m = 0.201 mol/m^3
-    #   rho = 2.52e14 cells/m^3, OCR = 2.75e-17 mol/(cell s)
+    # Literature-based defaults, converted to cgs.
+    # Paper/SI units:
+    #   D_org = 1.0e-9 m^2/s, D_M = 1.0e-9 m^2/s, D_water = 3.0e-9 m^2/s
+    #   C_in = 0.2 mol/m^3, C_crit = 4.0e-2 mol/m^3, k_m = 5.0e-3 mol/m^3
+    #   V_max = 2.0e-3 mol/(m^3 s)
     # cgs conversions used here:
     #   m^2/s -> cm^2/s: multiply by 1e4
     #   mol/m^3 -> mol/cm^3: divide by 1e6
-    #   cells/m^3 -> cells/cm^3: divide by 1e6
-    PAPER_D_ORG_CM2_PER_S = 1.07e-5
-    PAPER_D_GEL_CM2_PER_S = 1.0e-5
+    PAPER_D_ORG_CM2_PER_S = 1.0e-8
+    PAPER_D_GEL_CM2_PER_S = 1.0e-8
     PAPER_D_WATER_CM2_PER_S = 3.0e-5
     PAPER_C_IN_MOL_PER_CM3 = 2.0e-7
     PAPER_C_CRIT_MOL_PER_CM3 = 4.0e-8
-    PAPER_KM_MOL_PER_CM3 = 2.01e-7
-    PAPER_RHO_CELLS_PER_CM3 = 2.52e8
-    PAPER_SINGLE_CELL_OCR_MOL_PER_CELL_S = 2.75e-17
-    PAPER_VMAX_MOL_PER_CM3_S = (
-        PAPER_RHO_CELLS_PER_CM3 * PAPER_SINGLE_CELL_OCR_MOL_PER_CELL_S
-    )
+    PAPER_KM_MOL_PER_CM3 = 5.0e-9
+    PAPER_VMAX_MOL_PER_CM3_S = 2.0e-9
+    PAPER_CRITICAL_TRANSITION_WIDTH_MOL_PER_CM3 = 0.5 * PAPER_C_CRIT_MOL_PER_CM3
+    VELOCITY_SCALE_FACTOR = 1.0
 
     def __init__(
         self,
@@ -235,6 +224,7 @@ class TransportSolver:
         mm_km=None,
         mm_vmax=None,
         critical_oxygen_concentration=None,
+        critical_transition_width=None,
         critical_output_file="",
         consumption_output_file="",
         critical_summary_file="",
@@ -329,6 +319,11 @@ class TransportSolver:
             if critical_oxygen_concentration is None
             else critical_oxygen_concentration
         )
+        self.critical_transition_width = float(
+            self.PAPER_CRITICAL_TRANSITION_WIDTH_MOL_PER_CM3
+            if critical_transition_width is None
+            else critical_transition_width
+        )
         self.critical_output_file = str(critical_output_file).strip()
         self.consumption_output_file = str(consumption_output_file).strip()
         self.critical_summary_file = str(critical_summary_file).strip()
@@ -342,6 +337,34 @@ class TransportSolver:
     ###########################################################################
     # Organoid mask + cgs oxygen constants
     ###########################################################################
+    @staticmethod
+    def _smooth_cutoff_numpy(values, threshold, half_width):
+        vals = np.asarray(values, dtype=float)
+        if half_width <= 0.0:
+            return (vals >= threshold).astype(float)
+
+        s = (vals - threshold) / float(half_width)
+        out = np.zeros_like(s, dtype=float)
+        out[s >= 1.0] = 1.0
+        mid = np.abs(s) < 1.0
+        sm = s[mid]
+        # COMSOL-style flc2hs quintic transition: C^2-continuous at +/-1.
+        out[mid] = 0.5 + (15.0 / 16.0) * sm - (5.0 / 8.0) * sm**3 + (3.0 / 16.0) * sm**5
+        return out
+
+    @staticmethod
+    def _smooth_cutoff_ufl(c_value, threshold, half_width):
+        if half_width <= 0.0:
+            return ufl.conditional(ufl.ge(c_value, threshold), 1.0, 0.0)
+
+        s = (c_value - threshold) / float(half_width)
+        poly = 0.5 + (15.0 / 16.0) * s - (5.0 / 8.0) * s**3 + (3.0 / 16.0) * s**5
+        return ufl.conditional(
+            ufl.ge(s, 1.0),
+            1.0,
+            ufl.conditional(ufl.le(s, -1.0), 0.0, poly),
+        )
+
     @staticmethod
     def _assign_dg0_cell_values(fun, cell_values):
         V0 = fun.function_space
@@ -488,6 +511,7 @@ class TransportSolver:
                 f"D_water={self.D_water:.6e} cm^2/s, "
                 f"C_in={self.c_in_value:.6e} mol/cm^3, "
                 f"Ccrit={self.critical_oxygen_concentration:.6e} mol/cm^3, "
+                f"Ccrit_width={self.critical_transition_width:.6e} mol/cm^3, "
                 f"km={self.mm_km:.6e} mol/cm^3, "
                 f"Vmax={self.mm_vmax:.6e} mol/(cm^3 s)",
                 flush=True,
@@ -511,6 +535,7 @@ class TransportSolver:
             "D_water_cm2_per_s": float(self.D_water),
             "c_in_mol_per_cm3": float(self.c_in_value),
             "critical_oxygen_mol_per_cm3": float(self.critical_oxygen_concentration),
+            "critical_transition_width_mol_per_cm3": float(self.critical_transition_width),
             "michaelis_menten_km_mol_per_cm3": float(self.mm_km),
             "michaelis_menten_vmax_mol_per_cm3_s": float(self.mm_vmax),
             "michaelis_menten_enabled": bool(self.enable_mm_consumption),
@@ -552,9 +577,15 @@ class TransportSolver:
                 "Velocity field size does not match the transport mesh. "
                 f"Expected {u.x.array.size} values, found {flat.size}."
             )
-        u.x.array[:] = flat
+        u.x.array[:] = self._scale_velocity_flat(flat)
         u.x.scatter_forward()
         return u
+
+    def _scale_velocity_flat(self, flat_values: np.ndarray) -> np.ndarray:
+        return self.VELOCITY_SCALE_FACTOR * np.asarray(flat_values, dtype=np.float64)
+
+    def _scale_flow_values(self, flow_values: np.ndarray) -> np.ndarray:
+        return self.VELOCITY_SCALE_FACTOR * np.asarray(flow_values, dtype=np.float64)
 
     def _read_vtu_velocity_point_data(self, vtu_file: str):
         reader = vtk.vtkXMLUnstructuredGridReader()
@@ -593,7 +624,7 @@ class TransportSolver:
                 "Velocity field size does not match the transport mesh. "
                 f"Expected {u.x.array.size} values, found {flat.size}."
             )
-        u.x.array[:] = flat
+        u.x.array[:] = self._scale_velocity_flat(flat)
         u.x.scatter_forward()
         return u
 
@@ -629,7 +660,7 @@ class TransportSolver:
             # Serial fast path when the VTU point ordering already matches the mesh ordering.
             self._velocity_point_coords = coords
             self._velocity_local_point_ids = None
-            u.x.array[:] = values.reshape(-1)
+            u.x.array[:] = self._scale_velocity_flat(values.reshape(-1))
             u.x.scatter_forward()
             return u
 
@@ -638,7 +669,7 @@ class TransportSolver:
         self._velocity_point_coords = coords
         self._velocity_local_point_ids = np.asarray(nn, dtype=int)
         mapped = values[np.asarray(nn, dtype=int)]
-        u.x.array[:] = mapped.reshape(-1)
+        u.x.array[:] = self._scale_velocity_flat(mapped.reshape(-1))
         u.x.scatter_forward()
         return u
 
@@ -888,7 +919,7 @@ class TransportSolver:
                 "Mapped velocity field size does not match the local transport vector. "
                 f"Expected {self.velocity.x.array.size} values, found {arr.size}."
             )
-        self.velocity.x.array[:] = arr
+        self.velocity.x.array[:] = self._scale_velocity_flat(arr)
         self.velocity.x.scatter_forward()
         return True
 
@@ -928,8 +959,12 @@ class TransportSolver:
 
         self.x_inlet = extract_terminal_coords(self.inlet_mesh, self.inlet_tags)
         self.x_outlet = extract_terminal_coords(self.outlet_mesh, self.outlet_tags)
-        self.q_inlet_vals = sample_field_at_points(self.q_inlet_fun, self.x_inlet)
-        self.q_outlet_vals = sample_field_at_points(self.q_outlet_fun, self.x_outlet)
+        self.q_inlet_vals = self._scale_flow_values(
+            sample_field_at_points(self.q_inlet_fun, self.x_inlet)
+        )
+        self.q_outlet_vals = self._scale_flow_values(
+            sample_field_at_points(self.q_outlet_fun, self.x_outlet)
+        )
 
         if self.mesh.comm.rank == 0:
             print(f"Found {len(self.x_inlet)} inlet terminals")
@@ -1154,12 +1189,12 @@ class TransportSolver:
             (
                 "arterial_concave",
                 int(self.arterial_concave_marker),
-                float(iface_data.get("q_artery_leak", 0.0)),
+                float(self._scale_flow_values([iface_data.get("q_artery_leak", 0.0)])[0]),
             ),
             (
                 "venous_concave",
                 int(self.venous_concave_marker),
-                float(iface_data.get("q_venous_leak", 0.0)),
+                float(self._scale_flow_values([iface_data.get("q_venous_leak", 0.0)])[0]),
             ),
         ]
 
@@ -1352,7 +1387,12 @@ class TransportSolver:
         chi = np.asarray(organoid_indicator.x.array, dtype=float)
         denom = float(self.mm_km) + c_prev
         denom = np.maximum(denom, np.finfo(float).tiny)
-        rate_fun.x.array[:] = float(self.mm_vmax) * chi / denom
+        cutoff = self._smooth_cutoff_numpy(
+            c_prev,
+            float(self.critical_oxygen_concentration),
+            float(self.critical_transition_width),
+        )
+        rate_fun.x.array[:] = float(self.mm_vmax) * chi * cutoff / denom
         rate_fun.x.scatter_forward()
 
     def _compute_consumption_rate(self, c_h, organoid_indicator, dx):
@@ -1361,7 +1401,12 @@ class TransportSolver:
         km = fem.Constant(self.mesh, dfx.default_scalar_type(self.mm_km))
         vmax = fem.Constant(self.mesh, dfx.default_scalar_type(self.mm_vmax))
         c_pos = ufl.max_value(c_h, 0.0)
-        rate_expr = organoid_indicator * vmax * c_pos / (km + c_pos)
+        cutoff = self._smooth_cutoff_ufl(
+            c_pos,
+            float(self.critical_oxygen_concentration),
+            float(self.critical_transition_width),
+        )
+        rate_expr = organoid_indicator * cutoff * vmax * c_pos / (km + c_pos)
         return self._global_scalar(rate_expr * dx)
 
     def _critical_oxygen_stats(self, c_h, organoid_indicator, critical_mask, dx):
@@ -1505,14 +1550,14 @@ class TransportSolver:
             if requested_consumption_path is not None
             else None
         )
-        xdmf_final_output_path = _final_xdmf_output_path(requested_out_path)
-        xdmf_critical_final_output_path = (
-            _final_xdmf_output_path(requested_critical_path)
+        xdmf_output_path = requested_out_path
+        xdmf_critical_output_path = (
+            requested_critical_path
             if requested_critical_path is not None
             else None
         )
-        xdmf_consumption_final_output_path = (
-            _final_xdmf_output_path(requested_consumption_path)
+        xdmf_consumption_output_path = (
+            requested_consumption_path
             if requested_consumption_path is not None
             else None
         )
@@ -1534,11 +1579,11 @@ class TransportSolver:
                 if vtk_consumption_output_path is not None and write_consumption_visualization:
                     _remove_vtk_series(vtk_consumption_output_path)
             if write_xdmf:
-                _remove_xdmf_with_sidecar(xdmf_final_output_path)
-                if xdmf_critical_final_output_path is not None and write_critical_visualization:
-                    _remove_xdmf_with_sidecar(xdmf_critical_final_output_path)
-                if xdmf_consumption_final_output_path is not None and write_consumption_visualization:
-                    _remove_xdmf_with_sidecar(xdmf_consumption_final_output_path)
+                _remove_xdmf_with_sidecar(xdmf_output_path)
+                if xdmf_critical_output_path is not None and write_critical_visualization:
+                    _remove_xdmf_with_sidecar(xdmf_critical_output_path)
+                if xdmf_consumption_output_path is not None and write_consumption_visualization:
+                    _remove_xdmf_with_sidecar(xdmf_consumption_output_path)
         mesh.comm.barrier()
 
         c_out.name = "oxygen_concentration"
@@ -1548,6 +1593,9 @@ class TransportSolver:
         vtk_out = None
         vtk_critical_out = None
         vtk_consumption_out = None
+        xdmf_out = None
+        xdmf_critical_out = None
+        xdmf_consumption_out = None
         if write_vtk:
             vtk_out = io.VTKFile(mesh.comm, str(vtk_output_path), "w")
             if write_critical_visualization and vtk_critical_output_path is not None:
@@ -1561,16 +1609,21 @@ class TransportSolver:
                 if vtk_consumption_out is not None:
                     msg += f" and {vtk_consumption_output_path}"
                 print(msg, flush=True)
+        if write_xdmf:
+            xdmf_out = io.XDMFFile(mesh.comm, str(xdmf_output_path), "w")
+            xdmf_out.write_mesh(mesh)
+            if write_critical_visualization and xdmf_critical_output_path is not None:
+                xdmf_critical_out = io.XDMFFile(mesh.comm, str(xdmf_critical_output_path), "w")
+                xdmf_critical_out.write_mesh(mesh)
+            if write_consumption_visualization and xdmf_consumption_output_path is not None:
+                xdmf_consumption_out = io.XDMFFile(mesh.comm, str(xdmf_consumption_output_path), "w")
+                xdmf_consumption_out.write_mesh(mesh)
         if write_xdmf and mesh.comm.rank == 0:
-            msg = (
-                "[transport] XDMF output is written as final-only snapshots to avoid "
-                "ParaView/HDF5 time-series crashes: "
-                f"{xdmf_final_output_path}"
-            )
-            if write_critical_visualization and xdmf_critical_final_output_path is not None:
-                msg += f" and {xdmf_critical_final_output_path}"
-            if write_consumption_visualization and xdmf_consumption_final_output_path is not None:
-                msg += f" and {xdmf_consumption_final_output_path}"
+            msg = f"[transport] Writing XDMF time series: {xdmf_output_path}"
+            if write_critical_visualization and xdmf_critical_output_path is not None:
+                msg += f" and {xdmf_critical_output_path}"
+            if write_consumption_visualization and xdmf_consumption_output_path is not None:
+                msg += f" and {xdmf_consumption_output_path}"
             print(msg, flush=True)
 
         t = 0.0
@@ -1615,8 +1668,17 @@ class TransportSolver:
                 km = max(float(self.mm_km), np.finfo(float).tiny)
                 c_pos_vals = np.maximum(np.asarray(c_h.x.array, dtype=float), 0.0)
                 chi_vals = np.asarray(organoid_indicator.x.array, dtype=float)
+                cutoff_vals = self._smooth_cutoff_numpy(
+                    c_pos_vals,
+                    float(self.critical_oxygen_concentration),
+                    float(self.critical_transition_width),
+                )
                 consumption_field.x.array[:] = (
-                    float(self.mm_vmax) * chi_vals * c_pos_vals / (km + c_pos_vals)
+                    float(self.mm_vmax)
+                    * chi_vals
+                    * cutoff_vals
+                    * c_pos_vals
+                    / (km + c_pos_vals)
                 )
             else:
                 consumption_field.x.array[:] = 0.0
@@ -1629,6 +1691,12 @@ class TransportSolver:
                 vtk_critical_out.write_function(critical_out, t)
             if vtk_consumption_out is not None:
                 vtk_consumption_out.write_function(consumption_out, t)
+            if xdmf_out is not None:
+                xdmf_out.write_function(c_out, t)
+            if xdmf_critical_out is not None:
+                xdmf_critical_out.write_function(critical_out, t)
+            if xdmf_consumption_out is not None:
+                xdmf_consumption_out.write_function(consumption_out, t)
 
             inlet_rates, outlet_rates = self._compute_exchange_rates(
                 c_h, c_in, ds_tagged, dS_tagged
@@ -1676,25 +1744,15 @@ class TransportSolver:
             vtk_out.close()
         if vtk_critical_out is not None:
             vtk_critical_out.close()
+        if vtk_consumption_out is not None:
+            vtk_consumption_out.close()
 
         if write_xdmf:
-            # Write only the final state to XDMF/HDF5. Temporal XDMF from DOLFINx
-            # can leave the XML index ahead of the HDF5 sidecar while a run is
-            # active, and some ParaView builds crash on those incomplete pairs.
-            xdmf_out = io.XDMFFile(mesh.comm, str(xdmf_final_output_path), "w")
-            xdmf_out.write_mesh(mesh)
-            xdmf_out.write_function(c_out, float(t))
-            xdmf_out.close()
-
-            if write_critical_visualization and xdmf_critical_final_output_path is not None:
-                xdmf_critical_out = io.XDMFFile(mesh.comm, str(xdmf_critical_final_output_path), "w")
-                xdmf_critical_out.write_mesh(mesh)
-                xdmf_critical_out.write_function(critical_out, float(t))
+            if xdmf_out is not None:
+                xdmf_out.close()
+            if xdmf_critical_out is not None:
                 xdmf_critical_out.close()
-            if write_consumption_visualization and xdmf_consumption_final_output_path is not None:
-                xdmf_consumption_out = io.XDMFFile(mesh.comm, str(xdmf_consumption_final_output_path), "w")
-                xdmf_consumption_out.write_mesh(mesh)
-                xdmf_consumption_out.write_function(consumption_out, float(t))
+            if xdmf_consumption_out is not None:
                 xdmf_consumption_out.close()
 
         summary_path = (
@@ -1719,15 +1777,15 @@ class TransportSolver:
                     if write_vtk and write_consumption_visualization and vtk_consumption_output_path is not None
                     else ""
                 ),
-                "oxygen_final_xdmf": str(xdmf_final_output_path) if write_xdmf else "",
-                "critical_mask_final_xdmf": (
-                    str(xdmf_critical_final_output_path)
-                    if write_xdmf and write_critical_visualization and xdmf_critical_final_output_path is not None
+                "oxygen_xdmf": str(xdmf_output_path) if write_xdmf else "",
+                "critical_mask_xdmf": (
+                    str(xdmf_critical_output_path)
+                    if write_xdmf and write_critical_visualization and xdmf_critical_output_path is not None
                     else ""
                 ),
-                "consumption_final_xdmf": (
-                    str(xdmf_consumption_final_output_path)
-                    if write_xdmf and write_consumption_visualization and xdmf_consumption_final_output_path is not None
+                "consumption_xdmf": (
+                    str(xdmf_consumption_output_path)
+                    if write_xdmf and write_consumption_visualization and xdmf_consumption_output_path is not None
                     else ""
                 ),
             }
@@ -1818,6 +1876,7 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
             mm_km=args.mm_km,
             mm_vmax=args.mm_vmax,
             critical_oxygen_concentration=args.critical_oxygen_concentration,
+            critical_transition_width=args.critical_transition_width,
             critical_output_file=args.critical_output_file,
             consumption_output_file=args.consumption_output_file,
             critical_summary_file=args.critical_summary_file,
@@ -1850,6 +1909,7 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
         mm_km=args.mm_km,
         mm_vmax=args.mm_vmax,
         critical_oxygen_concentration=args.critical_oxygen_concentration,
+        critical_transition_width=args.critical_transition_width,
         critical_output_file=_resolve_output_path(args.critical_output_file, organoid_id, batch_mode)
         if args.critical_output_file
         else "",
@@ -1918,7 +1978,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable synthetic terminal exchange and run transport using only concave-wall exchange.",
     )
-    ap.add_argument("--T", type=float, default=10000.0)
+    ap.add_argument("--T", type=float, default=5000.0)
     ap.add_argument("--dt", type=float, default=100.0)
     ap.add_argument(
         "--D-value",
@@ -1947,7 +2007,7 @@ if __name__ == "__main__":
         "--D-organoid",
         type=float,
         default=None,
-        help="Oxygen diffusion in organoid tissue in cm^2/s. Paper value: 1.07e-5.",
+        help="Oxygen diffusion in organoid tissue in cm^2/s. Paper value: 1.0e-5.",
     )
     ap.add_argument(
         "--D-background",
@@ -1970,22 +2030,28 @@ if __name__ == "__main__":
         "--mm-km",
         type=float,
         default=None,
-        help="Michaelis-Menten k_m in mol/cm^3. Paper value: 2.01e-7.",
+        help="Michaelis-Menten k_m in mol/cm^3. Paper value: 5.0e-9.",
     )
     ap.add_argument(
         "--mm-vmax",
         type=float,
         default=None,
-        help=(
-            "Volumetric maximal oxygen consumption in mol/(cm^3 s). "
-            "Paper-derived value: 2.52e8 cells/cm^3 * 2.75e-17 mol/(cell s) = 6.93e-9."
-        ),
+        help="Volumetric maximal oxygen consumption in mol/(cm^3 s). Paper value: 2.0e-9.",
     )
     ap.add_argument(
         "--critical-oxygen-concentration",
         type=float,
         default=None,
         help="Critical oxygen concentration in mol/cm^3. Paper value: 4.0e-8.",
+    )
+    ap.add_argument(
+        "--critical-transition-width",
+        type=float,
+        default=None,
+        help=(
+            "Half-width of the smooth step-down around the critical oxygen "
+            "concentration, in mol/cm^3. Use 0 for a hard cutoff. Default: 5%% of C_crit."
+        ),
     )
     ap.add_argument(
         "--critical-output-file",
@@ -2008,7 +2074,7 @@ if __name__ == "__main__":
         default="vtk",
         help=(
             "Visualization format. 'vtk' writes ParaView-safe .pvd/.vtu time "
-            "series. 'xdmf' writes final-only XDMF snapshots. 'both' writes both."
+            "series. 'xdmf' writes XDMF time series. 'both' writes both."
         ),
     )
     ap.add_argument("--out-file", default="transport_c_no_vasc.xdmf")
