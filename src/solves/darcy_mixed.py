@@ -1,8 +1,11 @@
 import argparse
 import json
 import glob
+import hashlib
 from pathlib import Path
 import os
+import time
+import tempfile
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import numpy as np
@@ -46,6 +49,7 @@ class PerfusionSolver(CGPerfusionSolver):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self._mesh_source_path = str(args[0]) if args else ""
         self.perm_region_path = str(perm_region_path).strip()
         self.perm_low = float(perm_low)
         self.perm_high = float(perm_high)
@@ -87,6 +91,7 @@ class PerfusionSolver(CGPerfusionSolver):
         surface = reader.GetOutput()
         if surface is None or surface.GetNumberOfPoints() == 0:
             raise ValueError(f"Failed to read STL surface from {stl_file}")
+        bounds = tuple(float(v) for v in surface.GetBounds())
 
         enclosed = vtk.vtkSelectEnclosedPoints()
         enclosed.SetTolerance(float(tol))
@@ -108,7 +113,7 @@ class PerfusionSolver(CGPerfusionSolver):
             except Exception:
                 pass
 
-        return _inside, _signed_distance, _cleanup
+        return _inside, _signed_distance, _cleanup, bounds
 
     @staticmethod
     def _smooth_transition_alpha(signed_distance: float, width: float) -> float:
@@ -121,6 +126,32 @@ class PerfusionSolver(CGPerfusionSolver):
         t = (signed_distance + width) / (2.0 * width)
         smooth = 3.0 * t * t - 2.0 * t * t * t
         return float(1.0 - smooth)
+
+    def _perm_cache_file(self, mesh, stl_files, transition_width: float) -> Path:
+        tdim = mesh.topology.dim
+        nloc = int(mesh.topology.index_map(tdim).size_local)
+        nglob = int(mesh.topology.index_map(tdim).size_global)
+        parts = [
+            str(Path(self._mesh_source_path).expanduser().resolve()) if self._mesh_source_path else "",
+            str(mesh.comm.size),
+            str(mesh.comm.rank),
+            str(nloc),
+            str(nglob),
+            f"{float(self.perm_low):.16e}",
+            f"{float(self.perm_high):.16e}",
+            f"{float(transition_width):.16e}",
+        ]
+        for stl in stl_files:
+            p = Path(stl).expanduser().resolve()
+            try:
+                stat = p.stat()
+                parts.extend([str(p), str(int(stat.st_size)), str(int(stat.st_mtime_ns))])
+            except FileNotFoundError:
+                parts.extend([str(p), "missing"])
+        digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:20]
+        cache_dir = Path(tempfile.gettempdir()) / "darcy_perm_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / f"perm_rank{mesh.comm.rank}_{digest}.npy"
 
     def make_K_from_stl_regions_DG0(self, mesh, stl_files, K_low, K_high, transition_width=0.0):
         V0 = fem.functionspace(mesh, ("DG", 0))
@@ -137,17 +168,43 @@ class PerfusionSolver(CGPerfusionSolver):
         nloc = mesh.topology.index_map(tdim).size_local
         cell_ids = np.arange(nloc, dtype=np.int32)
         K_local = np.full(nloc, float(K_low), dtype=np.float64)
+        cache_file = self._perm_cache_file(mesh, stl_files, transition_width)
+        if cache_file.exists():
+            try:
+                cached = np.load(cache_file, allow_pickle=False)
+                if cached.shape == K_local.shape:
+                    K_local[:] = np.asarray(cached, dtype=np.float64)
+                    self._assign_dg0_cell_values(Kfun, K_local)
+                    if mesh.comm.rank == 0:
+                        print(f"[perm] Loaded cached STL permeability field from {cache_file}", flush=True)
+                    return Kfun
+            except Exception:
+                pass
 
         testers = []
         try:
             for stl_file in stl_files:
                 testers.append(self._build_stl_distance_tester(Path(stl_file)))
 
+            progress_stride = max(nloc // 10, 1)
+            bbox_pad = max(float(transition_width), 0.0)
             for c in cell_ids:
                 pts = self._cell_geometry_points(mesh, int(c), gdim)
                 midpoint = np.mean(pts, axis=0)
+                cell_min = np.min(pts, axis=0)
+                cell_max = np.max(pts, axis=0)
                 signed_dist = np.inf
-                for inside_fn, dist_fn, _cleanup in testers:
+                for inside_fn, dist_fn, _cleanup, bounds in testers:
+                    xmin, xmax, ymin, ymax, zmin, zmax = bounds
+                    if (
+                        cell_max[0] < xmin - bbox_pad
+                        or cell_min[0] > xmax + bbox_pad
+                        or cell_max[1] < ymin - bbox_pad
+                        or cell_min[1] > ymax + bbox_pad
+                        or cell_max[2] < zmin - bbox_pad
+                        or cell_min[2] > zmax + bbox_pad
+                    ):
+                        continue
                     d_mid = dist_fn(midpoint)
                     if inside_fn(midpoint):
                         signed_dist = min(signed_dist, d_mid)
@@ -163,10 +220,27 @@ class PerfusionSolver(CGPerfusionSolver):
                         )
                 alpha = self._smooth_transition_alpha(float(signed_dist), float(transition_width))
                 K_local[c] = float(K_low) + alpha * (float(K_high) - float(K_low))
+                if (
+                    mesh.comm.rank == 0
+                    and nloc >= 1000
+                    and ((int(c) + 1) % progress_stride == 0 or int(c) + 1 == nloc)
+                ):
+                    pct = 100.0 * float(int(c) + 1) / float(nloc)
+                    print(
+                        f"[perm] STL permeability assignment progress: {pct:.0f}% "
+                        f"({int(c) + 1}/{nloc} local cells on rank 0)",
+                        flush=True,
+                    )
         finally:
-            for _inside, _dist, cleanup in testers:
+            for _inside, _dist, cleanup, _bounds in testers:
                 cleanup()
 
+        try:
+            np.save(cache_file, K_local, allow_pickle=False)
+            if mesh.comm.rank == 0:
+                print(f"[perm] Cached STL permeability field at {cache_file}", flush=True)
+        except Exception:
+            pass
         self._assign_dg0_cell_values(Kfun, K_local)
         return Kfun
 
@@ -1707,8 +1781,8 @@ class PerfusionSolver(CGPerfusionSolver):
         L = q_src * v * dx + Lp
 
         bcs = self._build_flux_bcs_mixed(M, zero_flux_markers)
-        A, b, _ = self._assemble_system(a, L, bcs)
-        bc_dofs = self._collect_bc_dofs(bcs)
+        # A, b, _ = self._assemble_system(a, L, bcs)
+        # bc_dofs = self._collect_bc_dofs(bcs)
 
         q_target = np.zeros(len(inlet_marks), dtype=float)
         for j, _m in enumerate(inlet_marks):
@@ -1745,9 +1819,18 @@ class PerfusionSolver(CGPerfusionSolver):
         q_out_target_int = np.asarray(q_out_target_out, dtype=float)[outlet_int_mask]
 
         L += self._build_embedded_port_flow_rhs(v, inlet_marks_int, q_in_target_int, outlet_marks_int, q_out_target_int)
+        if mesh.comm.rank == 0:
+            print("[solve] Assembling mixed Darcy system", flush=True)
+        t0 = time.perf_counter()
         A, b, _ = self._assemble_system(a, L, bcs)
         bc_dofs = self._collect_bc_dofs(bcs)
         c_vecs = self._build_constraint_vectors(M, inlet_marks_ext, bc_dofs)
+        if mesh.comm.rank == 0:
+            print(
+                f"[solve] Assembly complete in {time.perf_counter() - t0:.2f}s; "
+                f"{len(c_vecs)} constraint solves pending",
+                flush=True,
+            )
 
         ksp = PETSc.KSP().create(mesh.comm)
         ksp.setOperators(A)
@@ -1755,8 +1838,22 @@ class PerfusionSolver(CGPerfusionSolver):
         ksp.getPC().setType("lu")
         ksp.getPC().setFactorSolverType("mumps")
 
+        if mesh.comm.rank == 0:
+            print("[solve] Solving base system with LU/MUMPS", flush=True)
+        t0 = time.perf_counter()
         z0 = self._solve_linear(ksp, b)
+        if mesh.comm.rank == 0:
+            print(f"[solve] Base solve complete in {time.perf_counter() - t0:.2f}s", flush=True)
+
+        if mesh.comm.rank == 0 and c_vecs:
+            print(f"[solve] Solving {len(c_vecs)} constraint systems with reused LU/MUMPS factors", flush=True)
+        t0 = time.perf_counter()
         z_list = [self._solve_linear(ksp, c) for c in c_vecs]
+        if mesh.comm.rank == 0 and c_vecs:
+            print(
+                f"[solve] Constraint solves complete in {time.perf_counter() - t0:.2f}s",
+                flush=True,
+            )
 
         nt = len(inlet_marks_ext)
         S = np.zeros((nt, nt), dtype=float)
@@ -1776,6 +1873,9 @@ class PerfusionSolver(CGPerfusionSolver):
         for j, lj in enumerate(lam):
             x.axpy(float(lj), z_list[j])
 
+        if mesh.comm.rank == 0:
+            print("[post] Splitting mixed solution into velocity/pressure fields", flush=True)
+        t0 = time.perf_counter()
         x_h = fem.Function(M)
         x.copy(result=x_h.x.petsc_vec)
         x_h.x.scatter_forward()
@@ -1783,8 +1883,13 @@ class PerfusionSolver(CGPerfusionSolver):
         u_sub, p_sub = x_h.split()
         u_h = u_sub.collapse()
         p_h = p_sub.collapse()
+        if mesh.comm.rank == 0:
+            print(f"[post] Field split/collapse complete in {time.perf_counter() - t0:.2f}s", flush=True)
 
         # --- total leak flux across concave facet markers ---
+        if mesh.comm.rank == 0:
+            print("[post] Computing leak fluxes and boundary diagnostics", flush=True)
+        t0 = time.perf_counter()
         Q_art_leak = fem.assemble_scalar(fem.form(ufl.dot(u_h, n) * ds(int(self.arterial_concave_marker))))
         Q_ven_leak = fem.assemble_scalar(fem.form(ufl.dot(u_h, n) * ds(int(self.venous_concave_marker))))
         Q_art_leak = mesh.comm.allreduce(Q_art_leak, op=MPI.SUM)
@@ -1794,29 +1899,47 @@ class PerfusionSolver(CGPerfusionSolver):
             if self.diagnostics_mode == "full"
             else {}
         )
+        if mesh.comm.rank == 0:
+            print(f"[post] Leak flux/diagnostics complete in {time.perf_counter() - t0:.2f}s", flush=True)
 
         # write outputs
         out_dir = current_dir / "out_darcy"
         out_dir.mkdir(exist_ok=True)
+        if mesh.comm.rank == 0:
+            print("[io] Writing permeability outputs", flush=True)
+        t0 = time.perf_counter()
         self._write_permeability_outputs(out_dir, Kfun, Kx_fun)
+        if mesh.comm.rank == 0:
+            print(f"[io] Permeability outputs complete in {time.perf_counter() - t0:.2f}s", flush=True)
 
         if self.output_mode in {"full", "fields"}:
+            if mesh.comm.rank == 0:
+                print("[io] Writing pressure field XDMF", flush=True)
             with io.XDMFFile(mesh.comm, out_dir / "p.xdmf", "w") as f:
                 f.write_mesh(mesh)
                 f.write_function(p_h)
 
             # Project H(div) velocity to P1 vector space for robust IO/visualization.
+            if mesh.comm.rank == 0:
+                print("[io] Projecting velocity to P1 for visualization", flush=True)
+            t0 = time.perf_counter()
             P1vec = fem.functionspace(
                 mesh,
                 element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,)),
             )
             u_P1 = Projector(P1vec)(u_h)
+            if mesh.comm.rank == 0:
+                print(f"[io] Velocity projection complete in {time.perf_counter() - t0:.2f}s", flush=True)
 
+            if mesh.comm.rank == 0:
+                print("[io] Writing velocity field XDMF", flush=True)
             with io.XDMFFile(mesh.comm, out_dir / "u.xdmf", "w") as f:
                 f.write_mesh(mesh)
                 f.write_function(u_P1)
 
             if self.output_mode == "full":
+                if mesh.comm.rank == 0:
+                    print("[io] Writing VTU outputs", flush=True)
                 vtkfile_u = VTKFile(MPI.COMM_WORLD, out_dir / "u.vtu", "w")
                 vtkfile_u.write_function(u_P1)
 
@@ -1828,6 +1951,9 @@ class PerfusionSolver(CGPerfusionSolver):
         if hasattr(self, "K_tensor"):
             delattr(self, "K_tensor")
 
+        if mesh.comm.rank == 0:
+            print("[post] Computing interface_bc payload", flush=True)
+        t0 = time.perf_counter()
         interface_bc = self._compute_interface_bc(p_h, u_h, q_src, Q_art_leak, Q_ven_leak)
         p_ref, p_ref_model = self._compute_pressure_reference(p_h, Kfun)
         interface_bc["p_reference_model"] = p_ref_model
@@ -1849,6 +1975,7 @@ class PerfusionSolver(CGPerfusionSolver):
         if mesh.comm.rank == 0:
             with open(out_dir / "interface_bc.json", "w") as fp:
                 json.dump(interface_bc, fp, indent=2)
+            print(f"[post] interface_bc payload complete in {time.perf_counter() - t0:.2f}s", flush=True)
 
         print("Darcy mixed solve complete.")
         return interface_bc
