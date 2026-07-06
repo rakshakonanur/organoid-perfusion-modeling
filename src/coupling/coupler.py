@@ -1235,7 +1235,10 @@ def _pressure_continuity_rel_error(a: float, b: float, floor: float = 1.0) -> fl
 def _bounded_pressure_mismatch(a: float, b: float, floor: float = 1.0) -> float:
     if not (np.isfinite(a) and np.isfinite(b)):
         return float("nan")
-    denominator = max(abs(a), abs(b), float(floor))
+    # Use the first argument as the reference pressure. For terminal coupling
+    # summaries this is the 0D pressure, so the reported mismatch matches the
+    # hybrid controller's 0D-normalized error.
+    denominator = max(abs(a), float(floor))
     return float(abs(a - b) / denominator)
 
 
@@ -1387,14 +1390,17 @@ def write_terminal_resistance_summary(
         "hybrid_previous_principle_mode",
         "hybrid_previous_principle_multiplier",
         "hybrid_q_error_sensitivity_applied",
+        "hybrid_q_error_sensitivity_status",
         "hybrid_q_error_sensitivity_slope",
         "hybrid_q_error_sensitivity_sign_consistency",
         "hybrid_q_error_sensitivity_sample_count",
         "hybrid_q_error_sensitivity_multiplier",
+        "hybrid_q_error_sensitivity_source",
         "hybrid_branch_trust_region_cap",
         "hybrid_postsolve_relaxation_alpha",
         "hybrid_predicted_bounded_error",
         "hybrid_sensitivity_applied",
+        "hybrid_sensitivity_status",
         "hybrid_sensitivity_multiplier",
         "hybrid_sensitivity_slope",
         "hybrid_sensitivity_sign_consistency",
@@ -1437,14 +1443,17 @@ def write_terminal_resistance_summary(
         "hybrid_adaptive_log10_cap",
         "hybrid_r_trial",
         "hybrid_q_error_sensitivity_applied",
+        "hybrid_q_error_sensitivity_status",
         "hybrid_q_error_sensitivity_slope",
         "hybrid_q_error_sensitivity_sign_consistency",
         "hybrid_q_error_sensitivity_sample_count",
         "hybrid_q_error_sensitivity_multiplier",
+        "hybrid_q_error_sensitivity_source",
         "hybrid_branch_trust_region_cap",
         "hybrid_postsolve_relaxation_alpha",
         "hybrid_predicted_bounded_error",
         "hybrid_sensitivity_applied",
+        "hybrid_sensitivity_status",
         "hybrid_sensitivity_multiplier",
         "hybrid_sensitivity_slope",
         "hybrid_sensitivity_sign_consistency",
@@ -3235,7 +3244,7 @@ def apply_organoid_resistance_from_json(
                 )
             _, pd_flow_weight_for_response = _effective_pd_relaxation(q_den)
             response_error_rel = (
-                abs(p_darcy - p_0d) / max(abs(p_darcy), 1.0)
+                abs(p_darcy - p_0d) / max(abs(p_0d), 1.0)
                 if np.isfinite(p_darcy) and np.isfinite(p_0d)
                 else float("nan")
             )
@@ -3455,7 +3464,7 @@ def apply_organoid_resistance_from_json(
                 correction_cap = max(float(terminal_sensitivity_max_multiplier), 0.0) * base_step
                 if np.isfinite(p_darcy) and np.isfinite(p_0d):
                     signed_bounded_gap = float(
-                        (p_darcy - p_0d) / max(abs(p_darcy), abs(p_0d), 1.0)
+                        (p_darcy - p_0d) / max(abs(p_0d), 1.0)
                     )
                     pressure_match_bounded_gap = float(abs(signed_bounded_gap))
                 else:
@@ -4983,15 +4992,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--coords-outlet", nargs=3, type=float, default=[0.30, 0.9, .5375])
     ap.add_argument("--perm-region-root", default=str(Path(__file__).resolve().parents[2] / "files" / "stl" / "organoid-growth-domains" / "sphere"),
                     help="Directory, STL path, or pattern for organoid permeability regions. If a directory is given, organoid-k uses organoid-k.stl. You can also use a path containing 'X' as the organoid index placeholder.")
-    ap.add_argument("--perm-low", type=float, default=1.0e-13)
-    ap.add_argument("--perm-high", type=float, default=2.0e-11)
+    ap.add_argument("--perm-low", type=float, default=1.0e-11)
+    ap.add_argument("--perm-high", type=float, default=2.0e-9)
     
     # ap.add_argument("--perm-low", type=float, default=5.0e-11)
     # ap.add_argument("--perm-high", type=float, default=1.0e-8)
 
     # ap.add_argument("--perm-low", type=float, default=1.0e-9)
     # ap.add_argument("--perm-high", type=float, default=2.0e-7)
-    ap.add_argument("--perm-transition-width", type=float, default=0.01)
+    ap.add_argument("--perm-transition-width", type=float, default=0.05)
 
     ap.add_argument("--concave-bc-mode", choices=["dirichlet", "robin"], default="dirichlet")
     ap.add_argument("--lp-arterial", type=float, default=0.0)
