@@ -56,7 +56,7 @@ class Generate:
         self.parameters['outdir'] = kwargs.get('outdir',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation")
         self.parameters['folder'] = kwargs.get('folder','tmp')
         self.parameters['implicit_geometry'] = kwargs.get('implicit_geometry', 'stl')
-        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere/organoid-1.stl")
+        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/different-shaped-domains/actual.stl")
         self.parameters['sphere_center'] = np.asarray(kwargs.get('sphere_center', [0.0, 0.9, 0.55]), dtype=float)
         self.parameters['sphere_radius'] = float(kwargs.get('sphere_radius', 0.06))
         self.parameters['sphere_theta_resolution'] = int(kwargs.get('sphere_theta_resolution', 60))
@@ -79,11 +79,129 @@ class Generate:
         self.parameters['mesh_minratio'] = kwargs.get('mesh_minratio', 1.4)
         self.parameters['mesh_mindihedral'] = kwargs.get('mesh_mindihedral', 18.0)
         self.parameters['mesh_remesh_vol'] = kwargs.get('mesh_remesh_vol', True)
+        self.parameters['export_watertight'] = bool(kwargs.get('export_watertight', True))
+        self.parameters['export_shell_thickness'] = float(kwargs.get('export_shell_thickness', 0.0))
+        # Reproducibility and growth controls
+        self.parameters['random_seed'] = kwargs.get('random_seed', None)
+        self.parameters['physical_clearance'] = float(kwargs.get('physical_clearance', 1e-4))
+        self.parameters['compete'] = bool(kwargs.get('compete', True))
+        self.parameters['decay_probability'] = float(kwargs.get('decay_probability', 0.9))
+        self.parameters['tree_threshold'] = kwargs.get('tree_threshold', 1e-1)
+        self.parameters['forest_threshold'] = kwargs.get('forest_threshold', 2.5e-3)
+        self.parameters['threshold_exponent'] = float(kwargs.get('threshold_exponent', 1.5))
+        self.parameters['threshold_adjuster'] = float(kwargs.get('threshold_adjuster', 0.9))
+        self.parameters['n_points'] = int(kwargs.get('n_points', 50))
+        self.parameters['n_closest_vessels'] = int(kwargs.get('n_closest_vessels', 2))
+        self.parameters['flow_ratio'] = kwargs.get('flow_ratio', 20)
+        self.parameters['max_iter'] = int(kwargs.get('max_iter', 20))
+        self.parameters['use_brute'] = bool(kwargs.get('use_brute', False))
+        self.parameters['nonconvex_sampling'] = int(kwargs.get('nonconvex_sampling', 10))
+        # Root placement controls
+        self.parameters['root_volume_fraction'] = float(kwargs.get('root_volume_fraction', 1.0))
+        self.parameters['root_threshold_adjuster'] = float(kwargs.get('root_threshold_adjuster', 0.9))
+        self.parameters['root_max_attempts'] = int(kwargs.get('root_max_attempts', 20))
+        self.parameters['root_attempts'] = int(kwargs.get('root_attempts', 100))
+        self.parameters['root_start_on'] = kwargs.get('root_start_on', 'boundary')
+        # Tree hemodynamic controls
+        self.parameters['tree_terminal_pressure'] = float(kwargs.get('tree_terminal_pressure', 50.0 * 1333.22))
+        self.parameters['tree_root_pressure'] = float(kwargs.get('tree_root_pressure', 120.0 * 1333.22))
+        self.parameters['tree_total_flow'] = float(kwargs.get('tree_total_flow', 0.03 / 60.0))
+        self.parameters['tree_fluid_density'] = kwargs.get('tree_fluid_density', None)
+        self.parameters['tree_kinematic_viscosity'] = kwargs.get('tree_kinematic_viscosity', None)
+        self.parameters['tree_murray_exponent'] = kwargs.get('tree_murray_exponent', None)
+        self.parameters['tree_radius_exponent'] = kwargs.get('tree_radius_exponent', None)
+        self.parameters['tree_length_exponent'] = kwargs.get('tree_length_exponent', None)
+        # Forest inlet hemodynamic controls
+        self.parameters['forest_inlet_terminal_pressure'] = float(kwargs.get('forest_inlet_terminal_pressure', 101.0))
+        self.parameters['forest_inlet_root_pressure'] = float(kwargs.get('forest_inlet_root_pressure', 181.0))
+        self.parameters['forest_inlet_total_flow'] = float(kwargs.get('forest_inlet_total_flow', 6e-3 / 60.0))
+        self.parameters['forest_inlet_fluid_density'] = float(kwargs.get('forest_inlet_fluid_density', 1.0))
+        self.parameters['forest_inlet_kinematic_viscosity'] = float(kwargs.get('forest_inlet_kinematic_viscosity', 0.007))
+        self.parameters['forest_inlet_murray_exponent'] = kwargs.get('forest_inlet_murray_exponent', None)
+        self.parameters['forest_inlet_radius_exponent'] = kwargs.get('forest_inlet_radius_exponent', None)
+        self.parameters['forest_inlet_length_exponent'] = kwargs.get('forest_inlet_length_exponent', None)
+        # Forest outlet hemodynamic controls
+        self.parameters['forest_outlet_terminal_pressure'] = float(kwargs.get('forest_outlet_terminal_pressure', 21.0))
+        self.parameters['forest_outlet_root_pressure'] = float(kwargs.get('forest_outlet_root_pressure', 101.0))
+        self.parameters['forest_outlet_total_flow'] = float(kwargs.get('forest_outlet_total_flow', 6e-3 / 60.0))
+        self.parameters['forest_outlet_fluid_density'] = float(kwargs.get('forest_outlet_fluid_density', 1.0))
+        self.parameters['forest_outlet_kinematic_viscosity'] = float(kwargs.get('forest_outlet_kinematic_viscosity', 0.007))
+        self.parameters['forest_outlet_murray_exponent'] = kwargs.get('forest_outlet_murray_exponent', None)
+        self.parameters['forest_outlet_radius_exponent'] = kwargs.get('forest_outlet_radius_exponent', None)
+        self.parameters['forest_outlet_length_exponent'] = kwargs.get('forest_outlet_length_exponent', None)
 
 
     def set_assumptions(self,**kwargs):
         self.homogeneous = kwargs.get('homogeneous',True)
         self.convex      = kwargs.get('convex',False)
+
+    def _root_kwargs(self):
+        return {
+            'volume_fraction': self.parameters['root_volume_fraction'],
+            'threshold_adjuster': self.parameters['root_threshold_adjuster'],
+            'max_attempts': self.parameters['root_max_attempts'],
+            'attempts': self.parameters['root_attempts'],
+            'start_on': self.parameters['root_start_on'],
+        }
+
+    def _growth_kwargs(self, mode: str):
+        threshold_key = 'tree_threshold' if mode == 'tree' else 'forest_threshold'
+        return {
+            'threshold': self.parameters[threshold_key],
+            'threshold_exponent': self.parameters['threshold_exponent'],
+            'threshold_adjuster': self.parameters['threshold_adjuster'],
+            'n_points': self.parameters['n_points'],
+            'n_closest_vessels': self.parameters['n_closest_vessels'],
+            'flow_ratio': self.parameters['flow_ratio'],
+            'max_iter': self.parameters['max_iter'],
+            'use_brute': self.parameters['use_brute'],
+            'nonconvex_sampling': self.parameters['nonconvex_sampling'],
+            'decay_probability': self.parameters['decay_probability'],
+        }
+
+    def _terminal_flow_from_total(self, total_flow, num_branches):
+        return float(total_flow) / max(int(num_branches) + 1, 1)
+
+    def _tree_parameter_kwargs(self, prefix: str, num_branches: int):
+        params = {
+            'terminal_pressure': self.parameters[f'{prefix}_terminal_pressure'],
+            'root_pressure': self.parameters[f'{prefix}_root_pressure'],
+            'terminal_flow': self._terminal_flow_from_total(self.parameters[f'{prefix}_total_flow'], num_branches),
+        }
+        optional_fields = (
+            ('fluid_density', f'{prefix}_fluid_density'),
+            ('kinematic_viscosity', f'{prefix}_kinematic_viscosity'),
+            ('murray_exponent', f'{prefix}_murray_exponent'),
+            ('radius_exponent', f'{prefix}_radius_exponent'),
+            ('length_exponent', f'{prefix}_length_exponent'),
+        )
+        for attr_name, key in optional_fields:
+            value = self.parameters.get(key)
+            if value is not None:
+                params[attr_name] = value
+        return params
+
+    def _apply_random_seed(self, domain):
+        seed = self.parameters.get('random_seed')
+        if seed is None:
+            return
+        domain.set_random_seed(int(seed))
+        domain.set_random_generator()
+
+    def _save_generation_config(self, filename="generation_config.json"):
+        serializable = {}
+        for key, value in self.parameters.items():
+            if isinstance(value, np.ndarray):
+                serializable[key] = value.tolist()
+            elif isinstance(value, np.generic):
+                serializable[key] = value.item()
+            else:
+                serializable[key] = value
+        serializable['homogeneous'] = bool(getattr(self, 'homogeneous', True))
+        serializable['convex'] = bool(getattr(self, 'convex', False))
+        serializable['svvascularize_path'] = str(Path("../../clones/svVascularize").resolve())
+        outpath = Path(self.parameters['outdir']) / filename
+        outpath.write_text(json.dumps(serializable, indent=2))
 
     def _build_cylinder(self, side: str):
         base_point = np.asarray(self.parameters[f'{side}_cylinder_center'], dtype=float).reshape(3,)
@@ -145,6 +263,7 @@ class Generate:
             plotter.show()
         cermSurf = Domain()
         cermSurf.set_data(mesh)
+        self._apply_random_seed(cermSurf)
         cermSurf.create()
         cermSurf.solve()
         cermSurf.build()
@@ -156,18 +275,20 @@ class Generate:
         root = self.parameters['inlet'].reshape(1,-1)
         direction = self.parameters['inlet_normal']
         num_branches = self.parameters['num_branches']
-        params = self._make_tree_parameters(terminal_pressure=50.0*1333.22,
-                        root_pressure=120.0*1333.22,
-                        terminal_flow=0.03/60/num_branches)
+        params = self._make_tree_parameters(**self._tree_parameter_kwargs('tree', num_branches))
         cerm_tree = Tree()
         cerm_tree.parameters = params
+        cerm_tree.physical_clearance = self.parameters['physical_clearance']
+        cerm_tree.random_seed = self.parameters['random_seed']
         cerm_tree.set_domain(cermSurf)
         cerm_tree.convex = self.convex
-        cerm_tree.set_root(start=root, direction=direction)
-        cerm_tree.n_add(num_branches, threshold = 1e-1)
+        cerm_tree.set_root(start=root, direction=direction, **self._root_kwargs())
+        cerm_tree.n_add(num_branches, **self._growth_kwargs('tree'))
+        print("Tree growth debug:", cerm_tree.growth_debug_summary())
         cerm_tree.show(plot_domain=True)
         self.cerm_tree = cerm_tree
         self.data = cerm_tree.data
+        self._save_generation_config()
         self.save_data()
 
     def forest_build(self, number_of_networks,trees_per_network): # build vascular forest
@@ -182,25 +303,30 @@ class Generate:
         num_branches = self.parameters['num_branches']
         outdir = self.parameters['outdir']
         folder = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep
-        cerm_forest = Forest(n_networks=number_of_networks, n_trees_per_network=trees_per_network,physical_clearance=1e-4,compete=True) 
+        cerm_forest = Forest(
+            n_networks=number_of_networks,
+            n_trees_per_network=trees_per_network,
+            physical_clearance=self.parameters['physical_clearance'],
+            compete=self.parameters['compete'],
+        )
         cerm_forest.set_domain(cermSurf)
-        params_inlet = self._make_tree_parameters(terminal_pressure=0.01*1333.22,
-                        root_pressure=0.02*1333.22,
-                        terminal_flow=1e-5/60/num_branches,
-                        fluid_density = 1.0,
-                        kinematic_viscosity = 0.007)
-        params_outlet = self._make_tree_parameters(terminal_pressure=0.0*1333.22,
-                        root_pressure=0.01*1333.22,
-                        terminal_flow=1e-5/60/num_branches,
-                        fluid_density = 1.0,
-                        kinematic_viscosity = 0.007)
+        params_inlet = self._make_tree_parameters(**self._tree_parameter_kwargs('forest_inlet', num_branches))
+        params_outlet = self._make_tree_parameters(**self._tree_parameter_kwargs('forest_outlet', num_branches))
         # for i in range(number_of_networks):
         #     for j in range(trees_per_network[i]):
         #         cerm_forest.networks[i][j].parameters = params
         cerm_forest.networks[0][0].parameters = params_inlet
         cerm_forest.networks[0][1].parameters = params_outlet
-        cerm_forest.set_roots(start_points,directions)
-        networks = cerm_forest.add(num_branches, threshold = 2.5e-3) # threshold controls the length of the appended vessels
+        for network in cerm_forest.networks:
+            for tree in network:
+                tree.random_seed = self.parameters['random_seed']
+                tree.physical_clearance = self.parameters['physical_clearance']
+        cerm_forest.set_roots(start_points, directions, **self._root_kwargs())
+        cerm_forest.add(num_branches, **self._growth_kwargs('forest'))
+        networks = cerm_forest.networks
+        for i in range(number_of_networks):
+            for j in range(trees_per_network[i]):
+                print(f"Forest tree {i}-{j} growth debug:", networks[i][j].growth_debug_summary())
         # cerm_forest.show(plot_domain=True)
         for i in range(number_of_networks):
             for j in range(trees_per_network[i]): # currently only writes the first network, can be modified to write all networks
@@ -208,7 +334,11 @@ class Generate:
                 self.save_data(filename="branchingData_{}.csv".format(j))
                 solid_outdir = outdir + os.sep + "3d_tmp"
                 os.makedirs(solid_outdir, exist_ok=True)
-                merged_model = networks[0][j].export_solid(outdir=solid_outdir, watertight=False) # use watertight = True for 3d models
+                merged_model = networks[0][j].export_solid(
+                    outdir=solid_outdir,
+                    shell_thickness=self.parameters['export_shell_thickness'],
+                    watertight=self.parameters['export_watertight'],
+                )
                 merged_model.save(solid_outdir + os.sep + "geom3D_{}.vtp".format(j))
 
         # cerm_forest.connect() # suppressed for now
@@ -265,6 +395,7 @@ class Generate:
 
         # # Result: meshes + XML under sim.file_path (e.g. ./simulations/example/)
         self.cerm_forest = cerm_forest
+        self._save_generation_config()
 
     def export_tree_0d_files(self, num_cardiac_cycles = 1, num_time_pts_per_cycle = 5, distal_pressure = 0.0, modify_bc = False,
                             treeID = 1,
@@ -383,7 +514,10 @@ class Generate:
         folder = self.parameters['folder']  
         print("Directory for 1D files: ", outdir)
         cerm_tree = self.cerm_tree
-        merged_model = cerm_tree.export_solid(watertight=False) # use watertight = True for 3d models
+        merged_model = cerm_tree.export_solid(
+            shell_thickness=self.parameters['export_shell_thickness'],
+            watertight=self.parameters['export_watertight'],
+        )
         os.makedirs(outdir+os.sep+"3d_tmp", exist_ok=True)
         merged_model.save(outdir+os.sep+"3d_tmp"+os.sep+"geom3D.vtp")
     
