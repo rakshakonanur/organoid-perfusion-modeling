@@ -131,8 +131,25 @@ class PerfusionSolver(CGPerfusionSolver):
         tdim = mesh.topology.dim
         nloc = int(mesh.topology.index_map(tdim).size_local)
         nglob = int(mesh.topology.index_map(tdim).size_global)
+
+        # Coupling runs copy the same mesh into a different run_N directory.
+        # Using the absolute XDMF path in the key therefore missed the cache on
+        # every new run even though the loaded mesh was unchanged.  Fingerprint
+        # the actual local mesh data instead: this is stable across those
+        # copies, but still invalidates the cache for a different geometry or
+        # geometry-to-cell layout.
+        geometry_x = np.ascontiguousarray(mesh.geometry.x)
+        geometry_dofmap = np.ascontiguousarray(mesh.geometry.dofmap)
+        mesh_digest = hashlib.sha256()
+        mesh_digest.update(geometry_x.view(np.uint8))
+        mesh_digest.update(geometry_dofmap.view(np.uint8))
         parts = [
-            str(Path(self._mesh_source_path).expanduser().resolve()) if self._mesh_source_path else "",
+            "mesh-content-v1",
+            str(geometry_x.dtype),
+            str(geometry_x.shape),
+            str(geometry_dofmap.dtype),
+            str(geometry_dofmap.shape),
+            mesh_digest.hexdigest(),
             str(mesh.comm.size),
             str(mesh.comm.rank),
             str(nloc),
