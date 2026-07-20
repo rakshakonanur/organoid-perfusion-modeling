@@ -189,8 +189,8 @@ class TransportSolver:
     # cgs conversions used here:
     #   m^2/s -> cm^2/s: multiply by 1e4
     #   mol/m^3 -> mol/cm^3: divide by 1e6
-    PAPER_D_ORG_CM2_PER_S = 1.0e-8
-    PAPER_D_GEL_CM2_PER_S = 1.0e-8
+    PAPER_D_ORG_CM2_PER_S = 1.0e-5
+    PAPER_D_GEL_CM2_PER_S = 1.0e-5
     PAPER_D_WATER_CM2_PER_S = 3.0e-5
     PAPER_C_IN_MOL_PER_CM3 = 2.0e-7
     PAPER_C_CRIT_MOL_PER_CM3 = 4.0e-8
@@ -1978,8 +1978,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable synthetic terminal exchange and run transport using only concave-wall exchange.",
     )
-    ap.add_argument("--T", type=float, default=5000.0)
-    ap.add_argument("--dt", type=float, default=100.0)
+    ap.add_argument("--T", type=float, default=50000.0)
+    ap.add_argument("--dt", type=float, default=1000.0)
     ap.add_argument(
         "--D-value",
         type=float,

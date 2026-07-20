@@ -110,3 +110,4 @@ files/stl/organoid-growth-domains/different-shaped-domains/
 src/Results/
 src/prep/scaled-screening-comparison/
 tmp/
+tests/
