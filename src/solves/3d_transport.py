@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,163 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
 from vtk.util.numpy_support import vtk_to_numpy
+
+
+class TransportProgressReporter:
+    """Write timestep diagnostics to CSV and refresh progress plots."""
+
+    def __init__(self, output_file: str):
+        output_path = Path(output_file).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        stem = output_path.stem
+
+        self.csv_path = output_path.with_name(f"{stem}_time_history.csv")
+        self.rates_path = output_path.with_name(f"{stem}_rates.png")
+        self.cumulative_path = output_path.with_name(f"{stem}_cumulative.png")
+        self.below_critical_path = output_path.with_name(
+            f"{stem}_organoid_below_critical.png"
+        )
+
+        # Import matplotlib only on the reporting rank. Agg works both on local
+        # machines and on headless cluster nodes.
+        cache_root = Path(os.environ.get("TMPDIR", "/tmp")) / "transport_matplotlib_cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache_root))
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        self._plt = plt
+        self._rows = []
+        self._csv_file = self.csv_path.open("w", newline="")
+        self._csv_writer = None
+
+        self._rates_fig, self._rates_ax = plt.subplots(figsize=(8.0, 5.0))
+        self._rate_lines = {
+            "injection_rate_mol_per_s": self._rates_ax.plot(
+                [], [], label="Injection", linewidth=2.0
+            )[0],
+            "consumption_rate_mol_per_s": self._rates_ax.plot(
+                [], [], label="Consumption", linewidth=2.0
+            )[0],
+            "outflow_rate_mol_per_s": self._rates_ax.plot(
+                [], [], label="Outflow", linewidth=2.0
+            )[0],
+        }
+        self._style_axis(
+            self._rates_ax,
+            "Oxygen rates",
+            "Rate (mol/s)",
+        )
+        self._rates_ax.legend()
+        self._rates_ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+
+        self._cumulative_fig, self._cumulative_ax = plt.subplots(figsize=(8.0, 5.0))
+        self._cumulative_lines = {
+            "injected_cumulative_mol": self._cumulative_ax.plot(
+                [], [], label="Injected", linewidth=2.0
+            )[0],
+            "consumed_cumulative_mol": self._cumulative_ax.plot(
+                [], [], label="Consumed", linewidth=2.0
+            )[0],
+            "removed_cumulative_mol": self._cumulative_ax.plot(
+                [], [], label="Removed", linewidth=2.0
+            )[0],
+        }
+        self._style_axis(
+            self._cumulative_ax,
+            "Cumulative oxygen quantities",
+            "Amount (mol)",
+        )
+        self._cumulative_ax.legend()
+        self._cumulative_ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+
+        self._critical_fig, self._critical_ax = plt.subplots(figsize=(8.0, 5.0))
+        self._critical_line = self._critical_ax.plot(
+            [], [], color="tab:red", label="Organoid below critical", linewidth=2.0
+        )[0]
+        self._style_axis(
+            self._critical_ax,
+            "Organoid below critical oxygen concentration",
+            "Organoid volume below critical (%)",
+        )
+        self._critical_ax.set_ylim(0.0, 100.0)
+        self._critical_ax.legend()
+
+    @staticmethod
+    def _style_axis(ax, title: str, ylabel: str) -> None:
+        ax.set_title(title)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+
+    @staticmethod
+    def _set_positive_limits(ax, times, values) -> None:
+        xmax = max(float(times[-1]), 1.0)
+        ymax = max((float(v) for series in values for v in series), default=0.0)
+        ax.set_xlim(0.0, xmax)
+        ax.set_ylim(0.0, 1.08 * ymax if ymax > 0.0 else 1.0)
+
+    @staticmethod
+    def _save_atomic(fig, path: Path) -> None:
+        temporary = path.with_name(f".{path.stem}.tmp{path.suffix}")
+        fig.savefig(temporary, format=path.suffix.lstrip("."), dpi=150, bbox_inches="tight")
+        os.replace(temporary, path)
+
+    def update(self, row: dict) -> None:
+        row_copy = dict(row)
+        if self._csv_writer is None:
+            self._csv_writer = csv.DictWriter(
+                self._csv_file, fieldnames=list(row_copy.keys())
+            )
+            self._csv_writer.writeheader()
+        self._csv_writer.writerow(row_copy)
+        self._csv_file.flush()
+        self._rows.append(row_copy)
+
+        times = np.asarray([item["time_s"] for item in self._rows], dtype=float)
+
+        rate_values = []
+        for key, line in self._rate_lines.items():
+            values = np.asarray([item[key] for item in self._rows], dtype=float)
+            line.set_data(times, values)
+            rate_values.append(values)
+        self._set_positive_limits(self._rates_ax, times, rate_values)
+        self._rates_ax.set_title(f"Oxygen rates (step {row_copy['step']})")
+        self._save_atomic(self._rates_fig, self.rates_path)
+
+        cumulative_values = []
+        for key, line in self._cumulative_lines.items():
+            values = np.asarray([item[key] for item in self._rows], dtype=float)
+            line.set_data(times, values)
+            cumulative_values.append(values)
+        self._set_positive_limits(self._cumulative_ax, times, cumulative_values)
+        self._cumulative_ax.set_title(
+            f"Cumulative oxygen quantities (step {row_copy['step']})"
+        )
+        self._save_atomic(self._cumulative_fig, self.cumulative_path)
+
+        below_critical_pct = 100.0 * np.asarray(
+            [
+                item["organoid_below_critical_volume_fraction"]
+                for item in self._rows
+            ],
+            dtype=float,
+        )
+        self._critical_line.set_data(times, below_critical_pct)
+        self._critical_ax.set_xlim(0.0, max(float(times[-1]), 1.0))
+        self._critical_ax.set_title(
+            "Organoid below critical oxygen concentration "
+            f"(step {row_copy['step']})"
+        )
+        self._save_atomic(self._critical_fig, self.below_critical_path)
+
+    def close(self) -> None:
+        self._csv_file.close()
+        self._plt.close(self._rates_fig)
+        self._plt.close(self._cumulative_fig)
+        self._plt.close(self._critical_fig)
 
 
 ################################################################################
@@ -189,7 +347,7 @@ class TransportSolver:
     # cgs conversions used here:
     #   m^2/s -> cm^2/s: multiply by 1e4
     #   mol/m^3 -> mol/cm^3: divide by 1e6
-    PAPER_D_ORG_CM2_PER_S = 1.0e-5
+    PAPER_D_ORG_CM2_PER_S = 1.07e-5
     PAPER_D_GEL_CM2_PER_S = 1.0e-5
     PAPER_D_WATER_CM2_PER_S = 3.0e-5
     PAPER_C_IN_MOL_PER_CM3 = 2.0e-7
@@ -198,6 +356,7 @@ class TransportSolver:
     PAPER_VMAX_MOL_PER_CM3_S = 2.0e-9
     PAPER_CRITICAL_TRANSITION_WIDTH_MOL_PER_CM3 = 0.5 * PAPER_C_CRIT_MOL_PER_CM3
     VELOCITY_SCALE_FACTOR = 1.0
+    # VELOCITY_SCALE_FACTOR = 44500.0
 
     def __init__(
         self,
@@ -211,6 +370,8 @@ class TransportSolver:
         interface_bc_file="",
         concave_exchange_mode="velocity",
         skip_1d=False,
+        diffusion_only=False,
+        marker_32_concentration=None,
         T=10.0,
         dt=1.0,
         D_value=None,
@@ -235,10 +396,37 @@ class TransportSolver:
             bioreactor_domain, facet_file
         )
 
-        # Darcy velocity field projected to nodal P1 values.
-        self.velocity, self.velocity_times, self._velocity_series = self._load_velocity(vel_file)
+        self.diffusion_only = bool(diffusion_only)
+        self.skip_1d = bool(skip_1d or self.diffusion_only)
+        self.concave_exchange_mode = (
+            "dirichlet"
+            if self.diffusion_only
+            else str(concave_exchange_mode).strip().lower()
+        )
+        if self.concave_exchange_mode not in {
+            "velocity",
+            "uniform",
+            "dirichlet",
+            "combined",
+        }:
+            raise ValueError(
+                "concave_exchange_mode must be 'velocity', 'uniform', "
+                f"'dirichlet', or 'combined', got {concave_exchange_mode!r}"
+            )
 
-        self.skip_1d = bool(skip_1d)
+        self._velocity_point_coords = None
+        self._velocity_local_point_ids = None
+        if self.diffusion_only:
+            # Do not require or read a Darcy velocity file in diffusion-only mode.
+            self.velocity = self._zero_velocity_function()
+            self.velocity_times = np.asarray([0.0], dtype=np.float64)
+            self._velocity_series = None
+        else:
+            # Darcy velocity field projected to nodal P1 values.
+            self.velocity, self.velocity_times, self._velocity_series = (
+                self._load_velocity(vel_file)
+            )
+
         self.inlet_mesh = None
         self.inlet_tags = None
         self.outlet_mesh = None
@@ -250,12 +438,6 @@ class TransportSolver:
         self.venous_concave_marker = 32
         self.inlet_base_marker = 1000
         self.outlet_base_marker = 2000
-        self.concave_exchange_mode = str(concave_exchange_mode).strip().lower()
-        if self.concave_exchange_mode not in {"velocity", "uniform"}:
-            raise ValueError(
-                "concave_exchange_mode must be 'velocity' or 'uniform', "
-                f"got {concave_exchange_mode!r}"
-            )
         self.concave_exchange = []
         self.inlet_exchange = []
         self.outlet_exchange = []
@@ -263,9 +445,6 @@ class TransportSolver:
         self.x_outlet = np.zeros((0, 3), dtype=float)
         self.q_inlet_vals = np.zeros((0,), dtype=float)
         self.q_outlet_vals = np.zeros((0,), dtype=float)
-        self._velocity_point_coords = None
-        self._velocity_local_point_ids = None
-
         if not self.skip_1d:
             # 1D inlet/outlet terminal meshes + checkpointed terminal flows.
             self.inlet_mesh, self.inlet_tags = import_mesh(mesh_inlet_file)
@@ -285,8 +464,14 @@ class TransportSolver:
 
         if self.concave_exchange_mode == "uniform":
             self._build_concave_exchange_data(interface_bc_file)
-        else:
+        elif self.concave_exchange_mode in {"velocity", "combined"}:
             self._report_concave_velocity_fluxes()
+        elif self.mesh.comm.rank == 0:
+            print(
+                "[transport] Diffusion-only mode: zero velocity, no 1D terminals, "
+                "and prescribed concentrations on concave markers 31 and 32.",
+                flush=True,
+            )
 
         self.T = float(T)
         self.dt = float(dt)
@@ -296,6 +481,29 @@ class TransportSolver:
         self.c_in_value = float(
             self.PAPER_C_IN_MOL_PER_CM3 if c_in_value is None else c_in_value
         )
+        self.marker_32_concentration = (
+            0.0
+            if marker_32_concentration is None
+            and self.concave_exchange_mode == "combined"
+            else None
+            if marker_32_concentration is None
+            else float(marker_32_concentration)
+        )
+        if (
+            self.marker_32_concentration is not None
+            and self.concave_exchange_mode not in {"dirichlet", "combined"}
+        ):
+            raise ValueError(
+                "--marker-32-concentration is only used with --diffusion-only "
+                "or --concave-exchange-mode combined"
+            )
+        if self.concave_exchange_mode == "combined" and self.mesh.comm.rank == 0:
+            print(
+                "[transport] Combined concave boundary: Darcy upwind advection "
+                f"plus Dirichlet diffusion; marker 31 concentration={self.c_in_value:.6e}, "
+                f"marker 32 concentration={self.marker_32_concentration:.6e} mol/cm^3.",
+                flush=True,
+            )
         self.out_file = str(out_file)
         self.interface_bc_file = str(interface_bc_file)
         self.diffusion_region_path = str(diffusion_region_path).strip()
@@ -534,11 +742,20 @@ class TransportSolver:
             "D_background_cm2_per_s": float(self.D_background),
             "D_water_cm2_per_s": float(self.D_water),
             "c_in_mol_per_cm3": float(self.c_in_value),
+            "marker_31_concentration_mol_per_cm3": float(self.c_in_value),
+            "marker_32_concentration_mol_per_cm3": float(
+                self.c_in_value
+                if self.marker_32_concentration is None
+                else self.marker_32_concentration
+            ),
             "critical_oxygen_mol_per_cm3": float(self.critical_oxygen_concentration),
             "critical_transition_width_mol_per_cm3": float(self.critical_transition_width),
             "michaelis_menten_km_mol_per_cm3": float(self.mm_km),
             "michaelis_menten_vmax_mol_per_cm3_s": float(self.mm_vmax),
             "michaelis_menten_enabled": bool(self.enable_mm_consumption),
+            "diffusion_only": bool(self.diffusion_only),
+            "skip_1d": bool(self.skip_1d),
+            "concave_exchange_mode": str(self.concave_exchange_mode),
             "organoid_volume_cm3": float(org_vol),
         }
         return chi, D_field
@@ -546,6 +763,21 @@ class TransportSolver:
     ###########################################################################
     # Velocity import
     ###########################################################################
+    def _zero_velocity_function(self):
+        V = fem.functionspace(
+            self.mesh,
+            element(
+                "Lagrange",
+                self.mesh.basix_cell(),
+                1,
+                shape=(self.mesh.geometry.dim,),
+            ),
+        )
+        velocity = fem.Function(V)
+        velocity.x.array[:] = 0.0
+        velocity.x.scatter_forward()
+        return velocity
+
     def _read_vtu_velocity(self, vtu_file: str):
         reader = vtk.vtkXMLUnstructuredGridReader()
         reader.SetFileName(str(vtu_file))
@@ -1262,7 +1494,9 @@ class TransportSolver:
 
         return a_exchange, L_exchange
 
-    def _build_concave_exchange_forms(self, c, w, c_in, ds_tagged, n):
+    def _build_concave_exchange_forms(
+        self, c, w, c_marker_31, c_marker_32, ds_tagged, n
+    ):
         """
         Add concave-wall exchange.
 
@@ -1276,6 +1510,11 @@ class TransportSolver:
         a_exchange = 0
         L_exchange = 0
 
+        # Diffusion-only supply is imposed separately through the SIPG
+        # Dirichlet boundary terms, not as an advective source/sink.
+        if self.concave_exchange_mode == "dirichlet":
+            return a_exchange, L_exchange
+
         if self.concave_exchange_mode == "velocity":
             qn = ufl.dot(self.velocity, n)
             q_in = 0.5 * (-qn + abs(qn))
@@ -1284,7 +1523,23 @@ class TransportSolver:
                 int(self.arterial_concave_marker),
                 int(self.venous_concave_marker),
             ):
-                L_exchange += q_in * c_in * w * ds_tagged(marker)
+                L_exchange += q_in * c_marker_31 * w * ds_tagged(marker)
+                a_exchange += q_out * c * w * ds_tagged(marker)
+            return a_exchange, L_exchange
+
+        if self.concave_exchange_mode == "combined":
+            qn = ufl.dot(self.velocity, n)
+            q_in = 0.5 * (-qn + abs(qn))
+            q_out = 0.5 * (qn + abs(qn))
+            for marker, boundary_concentration in (
+                (int(self.arterial_concave_marker), c_marker_31),
+                (int(self.venous_concave_marker), c_marker_32),
+            ):
+                # Upwind advection: exterior concentration on inflow and the
+                # tissue-side concentration on outflow.
+                L_exchange += (
+                    q_in * boundary_concentration * w * ds_tagged(marker)
+                )
                 a_exchange += q_out * c * w * ds_tagged(marker)
             return a_exchange, L_exchange
 
@@ -1293,11 +1548,32 @@ class TransportSolver:
             marker = int(data["marker"])
             g = fem.Constant(mesh, dfx.default_scalar_type(data["flux_density"]))
             if data["mode"] == "source":
-                L_exchange += g * c_in * w * ds_tagged(marker)
+                L_exchange += g * c_marker_31 * w * ds_tagged(marker)
             elif data["mode"] == "sink":
                 a_exchange += g * c * w * ds_tagged(marker)
 
         return a_exchange, L_exchange
+
+    def _build_concave_dirichlet_diffusion_forms(
+        self, c, w, c_marker_31, c_marker_32, D, ds_tagged, n, h, alpha
+    ):
+        """SIPG/Nitsche concentration conditions on the two concave walls."""
+        a_dirichlet = 0
+        L_dirichlet = 0
+        for marker, boundary_concentration in (
+            (int(self.arterial_concave_marker), c_marker_31),
+            (int(self.venous_concave_marker), c_marker_32),
+        ):
+            a_dirichlet += (
+                alpha * D / h * c * w
+                - D * ufl.dot(ufl.grad(c), n) * w
+                - D * ufl.dot(ufl.grad(w), n) * c
+            ) * ds_tagged(marker)
+            L_dirichlet += (
+                alpha * D / h * boundary_concentration * w
+                - D * ufl.dot(ufl.grad(w), n) * boundary_concentration
+            ) * ds_tagged(marker)
+        return a_dirichlet, L_dirichlet
 
     def _compute_exchange_rates(self, c_h, c_in, ds_tagged, dS_tagged):
         """
@@ -1335,9 +1611,84 @@ class TransportSolver:
             np.asarray(outlet_rates, dtype=float),
         )
 
-    def _compute_concave_exchange_rates(self, c_h, c_in, ds_tagged, n):
+    def _compute_concave_exchange_rates(
+        self,
+        c_h,
+        c_marker_31,
+        c_marker_32,
+        ds_tagged,
+        n,
+        D=None,
+        h=None,
+        alpha=None,
+    ):
         inflow_rates = []
         outflow_rates = []
+
+        if self.concave_exchange_mode == "combined":
+            if D is None or h is None or alpha is None:
+                raise ValueError(
+                    "Combined concave flux diagnostics require D, h, and alpha"
+                )
+            qn = ufl.dot(self.velocity, n)
+            q_in = 0.5 * (-qn + abs(qn))
+            q_out = 0.5 * (qn + abs(qn))
+            for marker, boundary_concentration in (
+                (int(self.arterial_concave_marker), c_marker_31),
+                (int(self.venous_concave_marker), c_marker_32),
+            ):
+                advective_flux_out = q_out * c_h - q_in * boundary_concentration
+                diffusive_flux_out = (
+                    -D * ufl.dot(ufl.grad(c_h), n)
+                    + alpha * D / h * (c_h - boundary_concentration)
+                )
+                total_flux_out = advective_flux_out + diffusive_flux_out
+                total_flux_in = 0.5 * (
+                    -total_flux_out + abs(total_flux_out)
+                )
+                total_flux_out_positive = 0.5 * (
+                    total_flux_out + abs(total_flux_out)
+                )
+                inflow_rates.append(
+                    self._global_scalar(total_flux_in * ds_tagged(marker))
+                )
+                outflow_rates.append(
+                    self._global_scalar(
+                        total_flux_out_positive * ds_tagged(marker)
+                    )
+                )
+            return (
+                np.asarray(inflow_rates, dtype=float),
+                np.asarray(outflow_rates, dtype=float),
+            )
+
+        if self.concave_exchange_mode == "dirichlet":
+            if D is None or h is None or alpha is None:
+                raise ValueError(
+                    "Dirichlet concave flux diagnostics require D, h, and alpha"
+                )
+            # Numerical outward diffusive flux associated with the SIPG
+            # Dirichlet boundary residual. Negative values enter the domain.
+            for marker, boundary_concentration in (
+                (int(self.arterial_concave_marker), c_marker_31),
+                (int(self.venous_concave_marker), c_marker_32),
+            ):
+                flux_out = (
+                    -D * ufl.dot(ufl.grad(c_h), n)
+                    + alpha * D / h * (c_h - boundary_concentration)
+                )
+                flux_in = 0.5 * (-flux_out + abs(flux_out))
+                flux_out_positive = 0.5 * (flux_out + abs(flux_out))
+                inflow_rates.append(
+                    self._global_scalar(flux_in * ds_tagged(marker))
+                )
+                outflow_rates.append(
+                    self._global_scalar(flux_out_positive * ds_tagged(marker))
+                )
+            return (
+                np.asarray(inflow_rates, dtype=float),
+                np.asarray(outflow_rates, dtype=float),
+            )
 
         if self.concave_exchange_mode == "velocity":
             qn = ufl.dot(self.velocity, n)
@@ -1347,7 +1698,9 @@ class TransportSolver:
                 int(self.arterial_concave_marker),
                 int(self.venous_concave_marker),
             ):
-                inflow_rates.append(self._global_scalar(q_in * c_in * ds_tagged(marker)))
+                inflow_rates.append(
+                    self._global_scalar(q_in * c_marker_31 * ds_tagged(marker))
+                )
                 outflow_rates.append(self._global_scalar(q_out * c_h * ds_tagged(marker)))
             return (
                 np.asarray(inflow_rates, dtype=float),
@@ -1359,7 +1712,7 @@ class TransportSolver:
             marker = int(data["marker"])
             g = fem.Constant(mesh, dfx.default_scalar_type(data["flux_density"]))
             if data["mode"] == "source":
-                rate = self._global_scalar(g * c_in * ds_tagged(marker))
+                rate = self._global_scalar(g * c_marker_31 * ds_tagged(marker))
                 inflow_rates.append(rate)
             elif data["mode"] == "sink":
                 rate = self._global_scalar(g * c_h * ds_tagged(marker))
@@ -1462,6 +1815,13 @@ class TransportSolver:
         W = fem.functionspace(mesh, DG)
 
         c_in = fem.Constant(mesh, dfx.default_scalar_type(self.c_in_value))
+        c_marker_32 = (
+            c_in
+            if self.marker_32_concentration is None
+            else fem.Constant(
+                mesh, dfx.default_scalar_type(self.marker_32_concentration)
+            )
+        )
         delta_t = fem.Constant(mesh, dfx.default_scalar_type(self.dt))
         organoid_indicator, D = self._build_organoid_indicator_and_diffusion(W)
         mm_rate = fem.Function(W)
@@ -1492,7 +1852,7 @@ class TransportSolver:
             c, w, c_in, ds_tagged, dS_tagged
         )
         a_concave, L_concave = self._build_concave_exchange_forms(
-            c, w, c_in, ds_tagged, n
+            c, w, c_in, c_marker_32, ds_tagged, n
         )
 
         a = a_time + a_advect + a_diffuse + a_consumption + a_exchange + a_concave
@@ -1505,6 +1865,12 @@ class TransportSolver:
         # SIPG diffusion for DG concentration.
         h = ufl.CellDiameter(domain)
         alpha = fem.Constant(mesh, dfx.default_scalar_type(10.0))
+        if self.concave_exchange_mode in {"dirichlet", "combined"}:
+            a_dirichlet, L_dirichlet = self._build_concave_dirichlet_diffusion_forms(
+                c, w, c_in, c_marker_32, D, ds_tagged, n, h, alpha
+            )
+            a += a_dirichlet
+            L += L_dirichlet
         a += D("+") * alpha("+") / h("+") * ufl.dot(
             ufl.jump(w, n), ufl.jump(c, n)
         ) * dS_tagged
@@ -1632,6 +1998,21 @@ class TransportSolver:
         removed_cumulative = 0.0
         consumed_cumulative = 0.0
         critical_rows = []
+        progress_reporter = (
+            TransportProgressReporter(self.out_file) if mesh.comm.rank == 0 else None
+        )
+        if progress_reporter is not None:
+            print(
+                f"[transport] Writing timestep history: {progress_reporter.csv_path}",
+                flush=True,
+            )
+            print(
+                "[transport] Updating progress figures: "
+                f"{progress_reporter.rates_path}, "
+                f"{progress_reporter.cumulative_path}, "
+                f"{progress_reporter.below_critical_path}",
+                flush=True,
+            )
 
         for step in range(nt):
             t += self.dt
@@ -1702,7 +2083,14 @@ class TransportSolver:
                 c_h, c_in, ds_tagged, dS_tagged
             )
             concave_in_rates, concave_out_rates = self._compute_concave_exchange_rates(
-                c_h, c_in, ds_tagged, n
+                c_h,
+                c_in,
+                c_marker_32,
+                ds_tagged,
+                n,
+                D=D,
+                h=h,
+                alpha=alpha,
             )
             consumption_rate = self._compute_consumption_rate(c_h, organoid_indicator, dx)
             inlet_total = float(np.sum(inlet_rates) + np.sum(concave_in_rates))
@@ -1721,6 +2109,10 @@ class TransportSolver:
                 "injection_rate_mol_per_s": float(inlet_total),
                 "outflow_rate_mol_per_s": float(outlet_total),
                 "consumption_rate_mol_per_s": float(consumption_rate),
+                "terminal_injection_rate_mol_per_s": float(terminal_in_total),
+                "terminal_outflow_rate_mol_per_s": float(terminal_out_total),
+                "concave_injection_rate_mol_per_s": float(concave_in_total),
+                "concave_outflow_rate_mol_per_s": float(concave_out_total),
                 "injected_cumulative_mol": float(injected_cumulative),
                 "removed_cumulative_mol": float(removed_cumulative),
                 "consumed_cumulative_mol": float(consumed_cumulative),
@@ -1739,6 +2131,10 @@ class TransportSolver:
                     f"cons_cum={consumed_cumulative:.6e}   "
                     f"org_below_crit={critical_stats['organoid_below_critical_volume_fraction']:.3e}"
                 )
+                progress_reporter.update(row)
+
+        if progress_reporter is not None:
+            progress_reporter.close()
 
         if vtk_out is not None:
             vtk_out.close()
@@ -1787,6 +2183,12 @@ class TransportSolver:
                     str(xdmf_consumption_output_path)
                     if write_xdmf and write_consumption_visualization and xdmf_consumption_output_path is not None
                     else ""
+                ),
+                "time_history_csv": str(progress_reporter.csv_path),
+                "rates_figure": str(progress_reporter.rates_path),
+                "cumulative_figure": str(progress_reporter.cumulative_path),
+                "organoid_below_critical_figure": str(
+                    progress_reporter.below_critical_path
                 ),
             }
             summary_path.write_text(json.dumps(payload, indent=2))
@@ -1863,6 +2265,8 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
             interface_bc_file=args.interface_bc_file,
             concave_exchange_mode=args.concave_exchange_mode,
             skip_1d=args.skip_1d,
+            diffusion_only=args.diffusion_only,
+            marker_32_concentration=args.marker_32_concentration,
             T=args.T,
             dt=args.dt,
             D_value=args.D_value,
@@ -1894,6 +2298,8 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
         interface_bc_file=_resolve_organoid_path(args.interface_bc_file, organoid_id),
         concave_exchange_mode=args.concave_exchange_mode,
         skip_1d=args.skip_1d,
+        diffusion_only=args.diffusion_only,
+        marker_32_concentration=args.marker_32_concentration,
         T=args.T,
         dt=args.dt,
         D_value=args.D_value,
@@ -1969,17 +2375,41 @@ if __name__ == "__main__":
     )
     ap.add_argument(
         "--concave-exchange-mode",
-        choices=["velocity", "uniform"],
+        choices=["velocity", "uniform", "combined"],
         default="velocity",
-        help="Use local Darcy u·n on the concave walls ('velocity') or uniform flux densities from interface_bc.json ('uniform').",
+        help=(
+            "Concave-wall model: local Darcy advective flux ('velocity'), "
+            "uniform flux from interface_bc.json ('uniform'), or local Darcy "
+            "advection plus Dirichlet diffusion with marker 31 at c_in and "
+            "marker 32 at zero by default ('combined')."
+        ),
     )
     ap.add_argument(
         "--skip-1d",
         action="store_true",
         help="Disable synthetic terminal exchange and run transport using only concave-wall exchange.",
     )
-    ap.add_argument("--T", type=float, default=50000.0)
-    ap.add_argument("--dt", type=float, default=1000.0)
+    ap.add_argument(
+        "--diffusion-only",
+        action="store_true",
+        help=(
+            "Disable Darcy advection and all 1D terminal exchange, and prescribe "
+            "c_in as a Dirichlet condition on concave markers 31 and 32. The "
+            "velocity and 1D flow files are not read."
+        ),
+    )
+    ap.add_argument(
+        "--marker-32-concentration",
+        type=float,
+        default=None,
+        help=(
+            "Dirichlet concentration on concave marker 32 in mol/cm^3 for a "
+            "diffusion-only or combined run. Diffusion-only defaults to c_in; "
+            "combined defaults to zero. Marker 31 remains at c_in."
+        ),
+    )
+    ap.add_argument("--T", type=float, default=5000.0)
+    ap.add_argument("--dt", type=float, default=50.0)
     ap.add_argument(
         "--D-value",
         type=float,
