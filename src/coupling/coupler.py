@@ -4229,15 +4229,26 @@ def run_darcy_for_all(
         run(cmd)
 
     if scaled_cfg is not None:
-        if str(getattr(args, "darcy_output_mode", "full")) == "minimal":
+        minimal_output = str(getattr(args, "darcy_output_mode", "full")) == "minimal"
+        if replicate_reference_outputs:
+            # run_0 deliberately has zero channel/interface flow, so its 0D
+            # reference pressure drop is zero and cannot define a multiplicative
+            # pressure transform.  All wells share that zero-ramp state; copy
+            # the reference outputs instead.  In minimal mode only the interface
+            # JSON exists and should be copied.
+            replicate_reference_organoid_outputs(
+                run_dir,
+                int(args.n_organoids),
+                scaled_cfg,
+                copy_field_outputs=not minimal_output,
+            )
+        elif minimal_output:
             synthesize_scaled_screening_outputs(
                 run_dir,
                 int(args.n_organoids),
                 scaled_cfg,
                 write_field_outputs=False,
             )
-        elif replicate_reference_outputs:
-            replicate_reference_organoid_outputs(run_dir, int(args.n_organoids), scaled_cfg)
         else:
             synthesize_scaled_screening_outputs(run_dir, int(args.n_organoids), scaled_cfg)
 
