@@ -160,6 +160,18 @@ def _parse_wrapper_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]
         ),
     )
     ap.add_argument(
+        "--hybrid-side-gauge-common-mode-band-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Require the median absolute branch pressure-drop error to be "
+            "inside --hybrid-side-gauge-common-mode-band before applying the "
+            "side common-mode correction. Use "
+            "--no-hybrid-side-gauge-common-mode-band-gate to apply common mode "
+            "regardless of the branch pressure-drop error."
+        ),
+    )
+    ap.add_argument(
         "--hybrid-arterial-side-gauge-common-mode-gain",
         type=float,
         default=1.0,
@@ -2072,6 +2084,9 @@ def _apply_side_gauge_common_mode_control(
     if not bool(config.hybrid_side_gauge_common_mode_control):
         return
     band = max(float(config.hybrid_side_gauge_common_mode_band), 0.0)
+    band_gate_enabled = bool(
+        getattr(config, "hybrid_side_gauge_common_mode_band_gate", True)
+    )
     max_step = max(float(config.hybrid_side_gauge_common_mode_max_log_step), 0.0)
     gains = {
         "arterial": max(float(config.hybrid_arterial_side_gauge_common_mode_gain), 0.0),
@@ -2090,7 +2105,7 @@ def _apply_side_gauge_common_mode_control(
             for plan in organoid_plans
             if _finite(plan.get("hybrid_pressure_drop_error_normalized"))
         ]
-        if (
+        if band_gate_enabled and (
             len(branch_errors) != len(organoid_plans)
             or not branch_errors
             or _median(branch_errors) > band
