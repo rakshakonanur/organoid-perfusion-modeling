@@ -19,7 +19,9 @@ from dolfinx.fem.petsc import assemble_matrix, assemble_vector, create_vector
 from mpi4py import MPI
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
-from vtk.util.numpy_support import vtk_to_numpy
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 
 class TransportProgressReporter:
@@ -281,7 +283,6 @@ def import_flow_data(mesh_obj, bp_file: str):
     out = []
     for t in ts:
         adios4dolfinx.read_function(bp_file, q_src, name="f", time=t)
-        q_src.x.array[:] = (10/3)*q_src.x.array[:]
         q_src.x.scatter_forward()
         out.append(q_src.copy())
     return out
@@ -303,6 +304,577 @@ def _remove_xdmf_with_sidecar(xdmf_path: str | Path) -> None:
                 candidate.unlink()
         except IsADirectoryError:
             pass
+
+
+class NetworkTransport1D:
+    """Implicit conservative advection-diffusion solver on a branching graph.
+
+    Each branchingData row is subdivided into a configurable number of finite
+    volumes. Concentration is continuous at bifurcation nodes, while the
+    assembled node balance conserves advective and diffusive species flux.
+    Branch flow is reconstructed from the coupled terminal checkpoint flows,
+    so it is consistent with the terminal rates used by the 3D model.
+    """
+
+    def __init__(
+        self,
+        csv_path: str,
+        terminal_checkpoint_coords,
+        terminal_checkpoint_flows,
+        diffusivity: float,
+        dt: float,
+        cells_per_segment: int = 20,
+        initial_concentration: float = 0.0,
+        label: str = "network",
+    ):
+        self.csv_path = str(csv_path)
+        self.label = str(label)
+        self.diffusivity = float(diffusivity)
+        self.dt = float(dt)
+        self.cells_per_segment = int(max(1, cells_per_segment))
+        if self.diffusivity < 0.0:
+            raise ValueError(f"{self.label}: diffusivity must be non-negative")
+        if self.dt <= 0.0:
+            raise ValueError(f"{self.label}: timestep must be positive")
+
+        with Path(csv_path).open(newline="") as stream:
+            self.rows = list(csv.DictReader(stream))
+        if not self.rows:
+            raise ValueError(f"No branches found in {csv_path}")
+
+        self.branch_indices = np.arange(len(self.rows), dtype=int)
+        self.children = [self._child_indices(row) for row in self.rows]
+        self.terminal_branches = np.asarray(
+            [i for i, children in enumerate(self.children) if not children],
+            dtype=int,
+        )
+        roots = [
+            i
+            for i, row in enumerate(self.rows)
+            if self._optional_int(row.get("Parent")) is None
+        ]
+        if len(roots) != 1:
+            raise ValueError(
+                f"Expected one root branch in {csv_path}, found {len(roots)}"
+            )
+        self.root_branch = int(roots[0])
+
+        proximal = np.asarray(
+            [
+                [
+                    float(row["proximalCoordsX"]),
+                    float(row["proximalCoordsY"]),
+                    float(row["proximalCoordsZ"]),
+                ]
+                for row in self.rows
+            ],
+            dtype=float,
+        )
+        distal = np.asarray(
+            [
+                [
+                    float(row["distalCoordsX"]),
+                    float(row["distalCoordsY"]),
+                    float(row["distalCoordsZ"]),
+                ]
+                for row in self.rows
+            ],
+            dtype=float,
+        )
+        self.proximal_coords = proximal
+        self.distal_coords = distal
+        self.terminal_coords = distal[self.terminal_branches]
+        self.lengths = np.asarray(
+            [float(row["Length"]) for row in self.rows], dtype=float
+        )
+        self.areas = np.pi * np.asarray(
+            [float(row["Radius"]) for row in self.rows], dtype=float
+        ) ** 2
+        if np.any(self.lengths <= 0.0) or np.any(self.areas <= 0.0):
+            raise ValueError(f"Non-positive branch length or area in {csv_path}")
+
+        checkpoint_coords = np.asarray(terminal_checkpoint_coords, dtype=float).reshape((-1, 3))
+        checkpoint_flows = np.asarray(terminal_checkpoint_flows, dtype=float).reshape(-1)
+        if len(checkpoint_coords) != len(checkpoint_flows) or len(checkpoint_coords) == 0:
+            raise ValueError(
+                f"Missing terminal checkpoint coordinates/flows for {self.label}"
+            )
+        distances, nearest = cKDTree(checkpoint_coords).query(self.terminal_coords)
+        nearest = np.asarray(nearest, dtype=int)
+        if len(checkpoint_coords) != len(self.terminal_coords):
+            raise ValueError(
+                f"{self.label}: found {len(checkpoint_coords)} checkpoint terminals "
+                f"but {len(self.terminal_coords)} terminal branches"
+            )
+        if len(np.unique(nearest)) != len(nearest) or np.any(~np.isfinite(distances)):
+            raise ValueError(
+                f"{self.label}: checkpoint-to-branch terminal mapping is not one-to-one"
+            )
+        terminal_flows = checkpoint_flows[nearest]
+        self.branch_flows = np.full(len(self.rows), np.nan, dtype=float)
+        self.branch_flows[self.terminal_branches] = terminal_flows
+        self._accumulate_branch_flows(self.root_branch)
+        if np.any(~np.isfinite(self.branch_flows)):
+            missing = np.flatnonzero(~np.isfinite(self.branch_flows)).tolist()
+            raise ValueError(f"Could not reconstruct branch flows {missing} in {csv_path}")
+
+        self._build_discrete_graph()
+        self.concentration = np.full(
+            self.n_nodes, float(initial_concentration), dtype=float
+        )
+        self.terminal_boundary_concentrations = np.full(
+            len(self.terminal_branches), float(initial_concentration), dtype=float
+        )
+        self.terminal_flux_rates = np.zeros(len(self.terminal_branches), dtype=float)
+        self.terminal_diffusive_flux_rates = np.zeros(
+            len(self.terminal_branches), dtype=float
+        )
+        self.root_flux_rate = 0.0
+        self.storage_rate = 0.0
+        self.balance_residual = 0.0
+
+    @staticmethod
+    def _optional_int(value):
+        text = str(value or "").strip()
+        if not text or text.lower() == "nan":
+            return None
+        number = float(text)
+        if number < 0:
+            return None
+        return int(number)
+
+    @classmethod
+    def _child_indices(cls, row):
+        out = []
+        for name in ("Child1", "Child2"):
+            value = cls._optional_int(row.get(name))
+            if value is not None:
+                out.append(value)
+        return out
+
+    def _accumulate_branch_flows(self, branch: int):
+        if np.isfinite(self.branch_flows[branch]):
+            return float(self.branch_flows[branch])
+        children = self.children[branch]
+        if not children:
+            raise ValueError(f"Terminal branch {branch} has no checkpoint flow")
+        value = float(sum(self._accumulate_branch_flows(child) for child in children))
+        self.branch_flows[branch] = value
+        return value
+
+    def _build_discrete_graph(self):
+        endpoint_nodes = {}
+
+        def endpoint_node(raw_index):
+            key = int(raw_index)
+            if key not in endpoint_nodes:
+                endpoint_nodes[key] = len(endpoint_nodes)
+            return endpoint_nodes[key]
+
+        branch_node_paths = []
+        next_node = 0
+        # Allocate all branching endpoints first, preserving shared bifurcations.
+        for row in self.rows:
+            endpoint_node(float(row["ProximalNodeIndex"]))
+            endpoint_node(float(row["DistalNodeIndex"]))
+        next_node = len(endpoint_nodes)
+
+        for row in self.rows:
+            start = endpoint_nodes[int(float(row["ProximalNodeIndex"]))]
+            end = endpoint_nodes[int(float(row["DistalNodeIndex"]))]
+            internal = list(
+                range(next_node, next_node + self.cells_per_segment - 1)
+            )
+            next_node += len(internal)
+            branch_node_paths.append([start, *internal, end])
+
+        self.n_nodes = int(next_node)
+        self.node_coords = np.zeros((self.n_nodes, 3), dtype=float)
+        for branch, row in enumerate(self.rows):
+            start = endpoint_nodes[int(float(row["ProximalNodeIndex"]))]
+            end = endpoint_nodes[int(float(row["DistalNodeIndex"]))]
+            self.node_coords[start] = self.proximal_coords[branch]
+            self.node_coords[end] = self.distal_coords[branch]
+            nodes = branch_node_paths[branch]
+            for local_node, node in enumerate(nodes[1:-1], start=1):
+                fraction = local_node / float(self.cells_per_segment)
+                self.node_coords[node] = (
+                    (1.0 - fraction) * self.proximal_coords[branch]
+                    + fraction * self.distal_coords[branch]
+                )
+        self.node_volumes = np.zeros(self.n_nodes, dtype=float)
+        self.edges = []
+        self.edge_branch_indices = []
+        self.branch_final_edge = {}
+        self.branch_first_edge = {}
+        for branch, nodes in enumerate(branch_node_paths):
+            dx = float(self.lengths[branch]) / self.cells_per_segment
+            area = float(self.areas[branch])
+            flow = float(self.branch_flows[branch])
+            conductance = float(self.diffusivity * area / dx)
+            for local_edge, (left, right) in enumerate(zip(nodes[:-1], nodes[1:])):
+                edge_index = len(self.edges)
+                self.edges.append((int(left), int(right), flow, conductance))
+                self.edge_branch_indices.append(int(branch))
+                volume = area * dx
+                self.node_volumes[left] += 0.5 * volume
+                self.node_volumes[right] += 0.5 * volume
+                if local_edge == 0:
+                    self.branch_first_edge[branch] = edge_index
+                if local_edge == self.cells_per_segment - 1:
+                    self.branch_final_edge[branch] = edge_index
+
+        root_row = self.rows[self.root_branch]
+        self.root_node = endpoint_nodes[int(float(root_row["ProximalNodeIndex"]))]
+        self.terminal_nodes = np.asarray(
+            [
+                endpoint_nodes[
+                    int(float(self.rows[branch]["DistalNodeIndex"]))
+                ]
+                for branch in self.terminal_branches
+            ],
+            dtype=int,
+        )
+        self._transport_matrix = self._assemble_transport_matrix()
+        self.edge_branch_indices = np.asarray(
+            self.edge_branch_indices, dtype=np.int32
+        )
+
+    def _assemble_transport_matrix(self):
+        rows = []
+        cols = []
+        values = []
+
+        def add(row, col, value):
+            rows.append(int(row))
+            cols.append(int(col))
+            values.append(float(value))
+
+        for left, right, flow, conductance in self.edges:
+            coeff_left, coeff_right = self._edge_flux_coefficients(
+                flow, conductance
+            )
+            # F(left -> right) = coeff_left*c_left + coeff_right*c_right.
+            add(left, left, coeff_left)
+            add(left, right, coeff_right)
+            add(right, left, -coeff_left)
+            add(right, right, -coeff_right)
+        return sparse.csr_matrix(
+            (values, (rows, cols)), shape=(self.n_nodes, self.n_nodes)
+        )
+
+    @staticmethod
+    def _bernoulli(value):
+        """Stable Bernoulli function x/(exp(x)-1) for exponential fitting."""
+        x = float(value)
+        if abs(x) < 1.0e-6:
+            return 1.0 - 0.5 * x + x * x / 12.0 - x**4 / 720.0
+        if x > 50.0:
+            return x * np.exp(-x)
+        if x < -50.0:
+            return -x
+        return x / np.expm1(x)
+
+    @classmethod
+    def _edge_flux_coefficients(cls, flow, conductance):
+        """Scharfetter-Gummel flux coefficients for one vascular interval."""
+        q = float(flow)
+        g = float(conductance)
+        if g <= np.finfo(float).tiny:
+            return max(q, 0.0), min(q, 0.0)
+        peclet = q / g
+        return g * cls._bernoulli(-peclet), -g * cls._bernoulli(peclet)
+
+    def _edge_flux(self, edge_index, concentration):
+        left, right, flow, conductance = self.edges[int(edge_index)]
+        coeff_left, coeff_right = self._edge_flux_coefficients(flow, conductance)
+        return float(
+            coeff_left * concentration[left]
+            + coeff_right * concentration[right]
+        )
+
+    def step(self, root_concentration: float, terminal_concentrations):
+        terminal_values = np.asarray(terminal_concentrations, dtype=float).reshape(-1)
+        if len(terminal_values) != len(self.terminal_nodes):
+            raise ValueError(
+                f"{self.label}: expected {len(self.terminal_nodes)} terminal "
+                f"concentrations, received {len(terminal_values)}"
+            )
+
+        old = self.concentration.copy()
+        mass_over_dt = self.node_volumes / self.dt
+        matrix = self._transport_matrix + sparse.diags(mass_over_dt, format="csr")
+        rhs = mass_over_dt * old
+
+        dirichlet_nodes = np.concatenate(
+            (np.asarray([self.root_node], dtype=int), self.terminal_nodes)
+        )
+        dirichlet_values = np.concatenate(
+            (
+                np.asarray([float(root_concentration)], dtype=float),
+                terminal_values,
+            )
+        )
+        matrix = matrix.tolil()
+        for node, value in zip(dirichlet_nodes, dirichlet_values):
+            matrix.rows[int(node)] = [int(node)]
+            matrix.data[int(node)] = [1.0]
+            rhs[int(node)] = float(value)
+        concentration = np.asarray(spsolve(matrix.tocsr(), rhs), dtype=float)
+        if np.any(~np.isfinite(concentration)):
+            raise RuntimeError(f"Non-finite concentration in {self.label} solve")
+
+        self.concentration = concentration
+        self.terminal_boundary_concentrations = terminal_values.copy()
+        self.terminal_flux_rates = np.asarray(
+            [
+                self._edge_flux(self.branch_final_edge[int(branch)], concentration)
+                for branch in self.terminal_branches
+            ],
+            dtype=float,
+        )
+        self.root_flux_rate = self._edge_flux(
+            self.branch_first_edge[self.root_branch], concentration
+        )
+        dynamic_nodes = np.ones(self.n_nodes, dtype=bool)
+        dynamic_nodes[dirichlet_nodes] = False
+        self.storage_rate = float(
+            np.dot(
+                self.node_volumes[dynamic_nodes],
+                concentration[dynamic_nodes] - old[dynamic_nodes],
+            )
+            / self.dt
+        )
+        # Positive root flux enters the graph; positive terminal flux leaves it.
+        self.balance_residual = float(
+            self.root_flux_rate
+            - np.sum(self.terminal_flux_rates)
+            - self.storage_rate
+        )
+        return self.terminal_flux_rates.copy()
+
+    def step_with_diffusive_terminal_flux(
+        self, root_concentration: float, terminal_diffusive_flux_rates
+    ):
+        """Advance with natural terminal diffusion and unknown terminal values.
+
+        Flux is positive from the network into the 3D domain.  At terminal
+        ``i``, the external total species flux is
+
+            F_i = Q_i C_i + F_diff,i.
+
+        The signed flow ``Q_i`` is positive for arterial network outflow and
+        negative for venous network inflow.  The supplied diffusive flux is
+        the value returned by the preceding 3D solve; it is zero initially.
+        """
+        diffusive_rates = np.asarray(
+            terminal_diffusive_flux_rates, dtype=float
+        ).reshape(-1)
+        if len(diffusive_rates) != len(self.terminal_nodes):
+            raise ValueError(
+                f"{self.label}: expected {len(self.terminal_nodes)} terminal "
+                f"diffusive fluxes, received {len(diffusive_rates)}"
+            )
+
+        old = self.concentration.copy()
+        mass_over_dt = self.node_volumes / self.dt
+        matrix = (
+            self._transport_matrix
+            + sparse.diags(mass_over_dt, format="csr")
+        ).tolil()
+        rhs = mass_over_dt * old
+
+        # Terminal control-volume balance: internal transport is already in
+        # _transport_matrix; add the external advective outflow implicitly and
+        # move the prescribed outward diffusive flux to the right-hand side.
+        for terminal_index, (node, branch) in enumerate(
+            zip(self.terminal_nodes, self.terminal_branches)
+        ):
+            matrix[int(node), int(node)] += float(self.branch_flows[int(branch)])
+            rhs[int(node)] -= float(diffusive_rates[terminal_index])
+
+        root = int(self.root_node)
+        matrix.rows[root] = [root]
+        matrix.data[root] = [1.0]
+        rhs[root] = float(root_concentration)
+        concentration = np.asarray(spsolve(matrix.tocsr(), rhs), dtype=float)
+        if np.any(~np.isfinite(concentration)):
+            raise RuntimeError(f"Non-finite concentration in {self.label} solve")
+
+        self.concentration = concentration
+        self.terminal_boundary_concentrations = concentration[
+            self.terminal_nodes
+        ].copy()
+        self.terminal_diffusive_flux_rates = diffusive_rates.copy()
+        terminal_flows = self.branch_flows[self.terminal_branches]
+        self.terminal_flux_rates = (
+            terminal_flows * self.terminal_boundary_concentrations
+            + self.terminal_diffusive_flux_rates
+        )
+        self.root_flux_rate = self._edge_flux(
+            self.branch_first_edge[self.root_branch], concentration
+        )
+        dynamic_nodes = np.ones(self.n_nodes, dtype=bool)
+        dynamic_nodes[root] = False
+        self.storage_rate = float(
+            np.dot(
+                self.node_volumes[dynamic_nodes],
+                concentration[dynamic_nodes] - old[dynamic_nodes],
+            )
+            / self.dt
+        )
+        self.balance_residual = float(
+            self.root_flux_rate
+            - np.sum(self.terminal_flux_rates)
+            - self.storage_rate
+        )
+        return self.terminal_boundary_concentrations.copy()
+
+
+class NetworkTransportVTKWriter:
+    """Write a ParaView-readable PVD/VTP time series for one 1D network."""
+
+    def __init__(self, network: NetworkTransport1D, pvd_path: str | Path):
+        self.network = network
+        self.pvd_path = Path(pvd_path)
+        self.pvd_path.parent.mkdir(parents=True, exist_ok=True)
+        self._datasets = []
+        for old_path in self.pvd_path.parent.glob(f"{self.pvd_path.stem}_*.vtp"):
+            old_path.unlink()
+        if self.pvd_path.exists():
+            self.pvd_path.unlink()
+
+    @staticmethod
+    def _add_array(data_attributes, name, values, vtk_type=None):
+        array = numpy_to_vtk(
+            np.ascontiguousarray(values), deep=True, array_type=vtk_type
+        )
+        array.SetName(str(name))
+        data_attributes.AddArray(array)
+
+    def write(self, time_value: float):
+        network = self.network
+        polydata = vtk.vtkPolyData()
+
+        points = vtk.vtkPoints()
+        points.SetData(numpy_to_vtk(np.ascontiguousarray(network.node_coords), deep=True))
+        polydata.SetPoints(points)
+
+        lines = vtk.vtkCellArray()
+        for left, right, _flow, _conductance in network.edges:
+            line = vtk.vtkLine()
+            line.GetPointIds().SetId(0, int(left))
+            line.GetPointIds().SetId(1, int(right))
+            lines.InsertNextCell(line)
+        polydata.SetLines(lines)
+
+        self._add_array(
+            polydata.GetPointData(),
+            "oxygen_concentration_mol_per_cm3",
+            np.asarray(network.concentration, dtype=np.float64),
+        )
+        self._add_array(
+            polydata.GetPointData(),
+            "control_volume_cm3",
+            np.asarray(network.node_volumes, dtype=np.float64),
+        )
+
+        branch_ids = network.edge_branch_indices
+        edge_flows = network.branch_flows[branch_ids]
+        edge_areas = network.areas[branch_ids]
+        edge_radii = np.sqrt(edge_areas / np.pi)
+        edge_velocity = edge_flows / edge_areas
+        edge_dx = network.lengths[branch_ids] / network.cells_per_segment
+        edge_peclet = np.abs(edge_velocity) * edge_dx / max(
+            network.diffusivity, np.finfo(float).tiny
+        )
+        self._add_array(
+            polydata.GetCellData(),
+            "branch_id",
+            branch_ids,
+            vtk.VTK_INT,
+        )
+        for name, values in (
+            ("volumetric_flow_rate_cm3_per_s", edge_flows),
+            ("cross_sectional_area_cm2", edge_areas),
+            ("radius_cm", edge_radii),
+            ("axial_velocity_cm_per_s", edge_velocity),
+            ("cell_peclet_number", edge_peclet),
+        ):
+            self._add_array(
+                polydata.GetCellData(), name, np.asarray(values, dtype=np.float64)
+            )
+
+        time_array = vtk.vtkDoubleArray()
+        time_array.SetName("time_s")
+        time_array.SetNumberOfTuples(1)
+        time_array.SetValue(0, float(time_value))
+        polydata.GetFieldData().AddArray(time_array)
+
+        step = len(self._datasets)
+        vtp_path = self.pvd_path.with_name(
+            f"{self.pvd_path.stem}_{step:06d}.vtp"
+        )
+        writer = vtk.vtkXMLPolyDataWriter()
+        writer.SetFileName(str(vtp_path))
+        writer.SetInputData(polydata)
+        if writer.Write() != 1:
+            raise RuntimeError(f"Failed to write 1D network visualization {vtp_path}")
+
+        self._datasets.append((float(time_value), vtp_path.name))
+        self._write_pvd_index()
+
+    def _write_pvd_index(self):
+        root = ET.Element(
+            "VTKFile",
+            type="Collection",
+            version="0.1",
+            byte_order="LittleEndian",
+        )
+        collection = ET.SubElement(root, "Collection")
+        for time_value, filename in self._datasets:
+            ET.SubElement(
+                collection,
+                "DataSet",
+                timestep=f"{time_value:.16g}",
+                group="",
+                part="0",
+                file=filename,
+            )
+        try:
+            ET.indent(root, space="  ")
+        except AttributeError:
+            pass
+        temporary = self.pvd_path.with_name(f".{self.pvd_path.name}.tmp")
+        ET.ElementTree(root).write(
+            temporary, encoding="utf-8", xml_declaration=True
+        )
+        os.replace(temporary, self.pvd_path)
+
+
+class NetworkTerminalHistoryWriter:
+    """Stream terminal coupling rows to disk and flush every timestep."""
+
+    def __init__(self, csv_path: str | Path):
+        self.csv_path = Path(csv_path)
+        self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream = self.csv_path.open("w", newline="")
+        self._writer = None
+
+    def update(self, rows):
+        rows = list(rows)
+        if not rows:
+            return
+        if self._writer is None:
+            self._writer = csv.DictWriter(
+                self._stream, fieldnames=list(rows[0].keys())
+            )
+            self._writer.writeheader()
+        self._writer.writerows(rows)
+        self._stream.flush()
+
+    def close(self):
+        self._stream.close()
 
 
 def _vtk_output_path(path: str | Path) -> Path:
@@ -352,10 +924,13 @@ class TransportSolver:
     PAPER_D_WATER_CM2_PER_S = 3.0e-5
     PAPER_C_IN_MOL_PER_CM3 = 2.0e-7
     PAPER_C_CRIT_MOL_PER_CM3 = 4.0e-8
-    PAPER_KM_MOL_PER_CM3 = 5.0e-9
-    PAPER_VMAX_MOL_PER_CM3_S = 2.0e-9
+    # PAPER_KM_MOL_PER_CM3 = 5.0e-9
+    PAPER_KM_MOL_PER_CM3 = 2.01e-7
+    # PAPER_VMAX_MOL_PER_CM3_S = 2.0e-9
+    PAPER_VMAX_MOL_PER_CM3_S = 6.93e-9
     PAPER_CRITICAL_TRANSITION_WIDTH_MOL_PER_CM3 = 0.5 * PAPER_C_CRIT_MOL_PER_CM3
-    VELOCITY_SCALE_FACTOR = 1.0
+    VELOCITY_SCALE_FACTOR = 82.5065
+    # VELOCITY_SCALE_FACTOR = 1.0
     # VELOCITY_SCALE_FACTOR = 44500.0
 
     def __init__(
@@ -389,7 +964,14 @@ class TransportSolver:
         critical_output_file="",
         consumption_output_file="",
         critical_summary_file="",
+        velocity_debug_output_file="",
         output_format="vtk",
+        branching_in_file="",
+        branching_out_file="",
+        couple_1d_transport=False,
+        network_cells_per_segment=20,
+        network_coupling_relaxation=1.0,
+        network_initial_concentration=0.0,
     ):
         # 3D tissue mesh + facet tags from the same geometry pipeline as Darcy.
         self.mesh, self.facet_tags = import_3d_mesh_with_facets(
@@ -398,6 +980,21 @@ class TransportSolver:
 
         self.diffusion_only = bool(diffusion_only)
         self.skip_1d = bool(skip_1d or self.diffusion_only)
+        self.couple_1d_transport = bool(couple_1d_transport)
+        if self.couple_1d_transport and self.skip_1d:
+            raise ValueError(
+                "--coupled-1d-transport cannot be combined with --skip-1d or "
+                "--diffusion-only"
+            )
+        self.network_cells_per_segment = int(network_cells_per_segment)
+        if self.network_cells_per_segment < 1:
+            raise ValueError("--network-cells-per-segment must be at least 1")
+        self.network_coupling_relaxation = float(network_coupling_relaxation)
+        if not 0.0 < self.network_coupling_relaxation <= 1.0:
+            raise ValueError("--network-coupling-relaxation must be in (0, 1]")
+        self.network_initial_concentration = float(network_initial_concentration)
+        if self.network_initial_concentration < 0.0:
+            raise ValueError("--network-initial-concentration must be non-negative")
         self.concave_exchange_mode = (
             "dirichlet"
             if self.diffusion_only
@@ -445,6 +1042,12 @@ class TransportSolver:
         self.x_outlet = np.zeros((0, 3), dtype=float)
         self.q_inlet_vals = np.zeros((0,), dtype=float)
         self.q_outlet_vals = np.zeros((0,), dtype=float)
+        self.branch_coords_in = np.zeros((0, 3), dtype=float)
+        self.branch_normals_in = np.zeros((0, 3), dtype=float)
+        self.branch_coords_out = np.zeros((0, 3), dtype=float)
+        self.branch_normals_out = np.zeros((0, 3), dtype=float)
+        self.branching_in_file = ""
+        self.branching_out_file = ""
         if not self.skip_1d:
             # 1D inlet/outlet terminal meshes + checkpointed terminal flows.
             self.inlet_mesh, self.inlet_tags = import_mesh(mesh_inlet_file)
@@ -459,6 +1062,20 @@ class TransportSolver:
             self.q_inlet_fun = inlet_hist[-1]
             self.q_outlet_fun = outlet_hist[-1]
 
+            branching_in_file = self._resolve_terminal_branching_file(
+                branching_in_file, mesh_inlet_file, "branchingData_0.csv"
+            )
+            branching_out_file = self._resolve_terminal_branching_file(
+                branching_out_file, mesh_outlet_file, "branchingData_1.csv"
+            )
+            self.branching_in_file = str(branching_in_file)
+            self.branching_out_file = str(branching_out_file)
+            self.branch_coords_in, self.branch_normals_in = (
+                self._load_terminal_branch_directions(branching_in_file)
+            )
+            self.branch_coords_out, self.branch_normals_out = (
+                self._load_terminal_branch_directions(branching_out_file)
+            )
             self._extract_terminal_data()
             self._build_terminal_exchange_data()
 
@@ -535,12 +1152,33 @@ class TransportSolver:
         self.critical_output_file = str(critical_output_file).strip()
         self.consumption_output_file = str(consumption_output_file).strip()
         self.critical_summary_file = str(critical_summary_file).strip()
+        self.velocity_debug_output_file = str(velocity_debug_output_file).strip()
         self.output_format = str(output_format or "vtk").strip().lower()
         if self.output_format not in {"vtk", "xdmf", "both"}:
             raise ValueError(
                 "--output-format must be one of 'vtk', 'xdmf', or 'both'; "
                 f"got {self.output_format!r}."
             )
+
+        self.network_inlet = None
+        self.network_outlet = None
+        self.inlet_marker_to_network_terminal = np.zeros(0, dtype=int)
+        self.outlet_marker_to_network_terminal = np.zeros(0, dtype=int)
+        self._coupled_terminal_flux_constants = {"inlet": [], "outlet": []}
+        self._coupled_terminal_concentration_constants = {
+            "inlet": [], "outlet": []
+        }
+        self._coupled_terminal_diffusive_rates = {
+            "inlet": np.zeros(len(self.inlet_exchange), dtype=float),
+            "outlet": np.zeros(len(self.outlet_exchange), dtype=float),
+        }
+        self._coupled_terminal_marker_rates = {
+            "inlet": np.zeros(len(self.inlet_exchange), dtype=float),
+            "outlet": np.zeros(len(self.outlet_exchange), dtype=float),
+        }
+        self.network_history = []
+        if self.couple_1d_transport:
+            self._initialize_coupled_network_transport()
 
     ###########################################################################
     # Organoid mask + cgs oxygen constants
@@ -755,7 +1393,41 @@ class TransportSolver:
             "michaelis_menten_enabled": bool(self.enable_mm_consumption),
             "diffusion_only": bool(self.diffusion_only),
             "skip_1d": bool(self.skip_1d),
+            "coupled_1d_transport": bool(self.couple_1d_transport),
+            "network_cells_per_segment": int(self.network_cells_per_segment),
+            "network_coupling_relaxation": float(
+                self.network_coupling_relaxation
+            ),
+            "network_initial_concentration_mol_per_cm3": float(
+                self.network_initial_concentration
+            ),
+            "network_coupling_scheme": (
+                "directional_arterial_1d_to_3d_to_venous_1d_with_3d_face_concentration_imposition"
+                if self.couple_1d_transport
+                else "disabled"
+            ),
+            "arterial_network_root_concentration": "marker_31_c_in",
+            "venous_network_root_concentration": "marker_32",
             "concave_exchange_mode": str(self.concave_exchange_mode),
+            "arterial_synthetic_terminal_bc": (
+                "disabled_skip_1d"
+                if self.skip_1d
+                else "1d_terminal_concentration_plus_matched_advection_and_nitsche_diffusion"
+                if self.couple_1d_transport
+                else "danckwerts_prescribed_total_flux"
+            ),
+            "arterial_synthetic_terminal_total_flux": (
+                "Q*C_terminal plus lagged 3D numerical diffusive flux"
+                if self.couple_1d_transport
+                else "(Q/A)*c_feed; zero total species flux when Q=0"
+            ),
+            "venous_synthetic_terminal_bc": (
+                "disabled_skip_1d"
+                if self.skip_1d
+                else "advective_local_concentration_outflow_to_1d"
+                if self.couple_1d_transport
+                else "advective_local_concentration_outflow"
+            ),
             "organoid_volume_cm3": float(org_vol),
         }
         return chi, D_field
@@ -1167,6 +1839,174 @@ class TransportSolver:
     ###########################################################################
     # Terminal data from 1D checkpoints
     ###########################################################################
+    @staticmethod
+    def _resolve_terminal_branching_file(explicit_path, terminal_mesh_file, filename):
+        """Resolve branching metadata next to the organoid geometry by default."""
+        if explicit_path:
+            path = Path(explicit_path).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(f"Missing terminal branching data: {path}")
+            return str(path)
+
+        mesh_path = Path(terminal_mesh_file).expanduser()
+        candidates = [
+            mesh_path.parent / filename,
+            mesh_path.parent.parent / filename,
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return ""
+
+    @staticmethod
+    def _load_terminal_branch_directions(csv_path):
+        """Return terminal distal coordinates and normalized proximal-to-distal axes."""
+        if not csv_path:
+            return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=float)
+
+        with Path(csv_path).open(newline="") as stream:
+            reader = csv.DictReader(stream)
+            rows = list(reader)
+            fieldnames = list(reader.fieldnames or [])
+
+        child_cols = [name for name in fieldnames if "child" in name.lower()]
+        terminal_rows = [
+            row
+            for row in rows
+            if not child_cols
+            or all(str(row.get(name, "") or "").strip() == "" for name in child_cols)
+        ]
+
+        coordinate_sets = [
+            ("distalCoordsX", "distalCoordsY", "distalCoordsZ"),
+            ("x_dist", "y_dist", "z_dist"),
+            ("xDist", "yDist", "zDist"),
+            ("xd", "yd", "zd"),
+            ("x", "y", "z"),
+        ]
+        coord_cols = next(
+            (cols for cols in coordinate_sets if all(name in fieldnames for name in cols)),
+            None,
+        )
+        if coord_cols is None:
+            raise ValueError(f"Could not find distal coordinate columns in {csv_path}")
+
+        coords = np.asarray(
+            [[float(row[name]) for name in coord_cols] for row in terminal_rows],
+            dtype=float,
+        ).reshape((-1, 3))
+
+        if all(
+            name in fieldnames
+            for name in ("proximalCoordsX", "proximalCoordsY", "proximalCoordsZ")
+        ):
+            proximal = np.asarray(
+                [
+                    [
+                        float(row["proximalCoordsX"]),
+                        float(row["proximalCoordsY"]),
+                        float(row["proximalCoordsZ"]),
+                    ]
+                    for row in terminal_rows
+                ],
+                dtype=float,
+            ).reshape((-1, 3))
+            directions = coords - proximal
+        elif all(name in fieldnames for name in ("W1", "W2", "W3")):
+            # The generated branchingData files store W from distal to
+            # proximal. Embedded-facet selection needs the opposite direction:
+            # from the branch interior toward its tissue-facing distal end.
+            directions = -np.asarray(
+                [
+                    [float(row["W1"]), float(row["W2"]), float(row["W3"])]
+                    for row in terminal_rows
+                ],
+                dtype=float,
+            ).reshape((-1, 3))
+        else:
+            raise ValueError(
+                f"Could not find W1/W2/W3 or proximal coordinates in {csv_path}"
+            )
+
+        norms = np.linalg.norm(directions, axis=1)
+        valid = np.isfinite(norms) & (norms > 0.0)
+        if not np.all(valid):
+            bad = np.flatnonzero(~valid).tolist()
+            raise ValueError(f"Invalid terminal directions in {csv_path}, rows {bad}")
+        directions = directions / norms[:, None]
+        return coords, directions
+
+    def _initialize_coupled_network_transport(self):
+        """Construct both 1D transport trees and their 3D-marker mappings."""
+        if not self.branching_in_file or not self.branching_out_file:
+            raise ValueError(
+                "Coupled 1D transport requires arterial and venous branchingData CSVs"
+            )
+
+        common = {
+            "diffusivity": self.D_water,
+            "dt": self.dt,
+            "cells_per_segment": self.network_cells_per_segment,
+            "initial_concentration": self.network_initial_concentration,
+        }
+        self.network_inlet = NetworkTransport1D(
+            self.branching_in_file,
+            self.x_inlet,
+            self.q_inlet_vals,
+            label="arterial",
+            **common,
+        )
+        self.network_outlet = NetworkTransport1D(
+            self.branching_out_file,
+            self.x_outlet,
+            self.q_outlet_vals,
+            label="venous",
+            **common,
+        )
+
+        _, _, inlet_centroids, outlet_centroids, _, _ = (
+            self._get_terminal_marker_data()
+        )
+        self.inlet_marker_to_network_terminal = self._map_marker_centroids_to_network(
+            inlet_centroids, self.network_inlet, "arterial"
+        )
+        self.outlet_marker_to_network_terminal = self._map_marker_centroids_to_network(
+            outlet_centroids, self.network_outlet, "venous"
+        )
+
+        if self.mesh.comm.rank == 0:
+            print(
+                "[transport] Coupled 1D transport enabled: "
+                f"arterial branches={len(self.network_inlet.rows)}, "
+                f"terminals={len(self.network_inlet.terminal_nodes)}; "
+                f"venous branches={len(self.network_outlet.rows)}, "
+                f"terminals={len(self.network_outlet.terminal_nodes)}; "
+                f"cells/branch={self.network_cells_per_segment}, "
+                f"D_water={self.D_water:.6e} cm^2/s, "
+                f"initial lumen concentration={self.network_initial_concentration:.6e}.",
+                flush=True,
+            )
+
+    @staticmethod
+    def _map_marker_centroids_to_network(marker_centroids, network, label):
+        centroids = np.asarray(marker_centroids, dtype=float).reshape((-1, 3))
+        if len(centroids) != len(network.terminal_coords):
+            raise ValueError(
+                f"{label}: found {len(centroids)} 3D terminal markers but "
+                f"{len(network.terminal_coords)} terminal network branches"
+            )
+        distances, indices = cKDTree(network.terminal_coords).query(centroids)
+        indices = np.asarray(indices, dtype=int)
+        if len(np.unique(indices)) != len(indices):
+            raise ValueError(f"{label}: terminal marker-to-branch mapping is not one-to-one")
+        branch_scale = max(float(np.max(network.lengths)), np.finfo(float).eps)
+        if np.any(~np.isfinite(distances)) or np.max(distances) > 0.25 * branch_scale:
+            raise ValueError(
+                f"{label}: 3D terminal marker is too far from its network endpoint "
+                f"(maximum distance {np.max(distances):.6e})"
+            )
+        return indices
+
     def _extract_terminal_data(self):
         """
         Extract terminal coordinates from the 1D inlet/outlet meshes (marker 2)
@@ -1206,7 +2046,12 @@ class TransportSolver:
     # Darcy-style marker utilities
     ###########################################################################
     def _get_terminal_marker_sets(self):
-        vals = np.unique(self.facet_tags.values)
+        local_vals = np.unique(np.asarray(self.facet_tags.values, dtype=np.int32))
+        gathered = self.mesh.comm.allgather(local_vals.tolist())
+        vals = np.asarray(
+            sorted({int(value) for rank_values in gathered for value in rank_values}),
+            dtype=np.int32,
+        )
         inlet_marks = np.sort(
             vals[(vals >= self.inlet_base_marker) & (vals < self.outlet_base_marker)]
         )
@@ -1231,14 +2076,20 @@ class TransportSolver:
         centroids = np.zeros((len(markers), 3), dtype=np.float64)
         for i, marker in enumerate(markers):
             facets = self.facet_tags.find(int(marker))
-            if facets.size == 0:
-                centroids[i, :] = np.nan
-                continue
-            c = np.zeros((facets.size, 3), dtype=np.float64)
-            for j, facet in enumerate(facets):
+            local_sum = np.zeros(3, dtype=np.float64)
+            local_count = np.asarray([0], dtype=np.int64)
+            for facet in facets:
                 verts = f_to_v.links(int(facet))
-                c[j, :] = X[verts].mean(axis=0)
-            centroids[i, :] = c.mean(axis=0)
+                local_sum += X[verts].mean(axis=0)
+                local_count[0] += 1
+            global_sum = np.zeros_like(local_sum)
+            global_count = np.zeros_like(local_count)
+            mesh.comm.Allreduce(local_sum, global_sum, op=MPI.SUM)
+            mesh.comm.Allreduce(local_count, global_count, op=MPI.SUM)
+            if int(global_count[0]) <= 0:
+                centroids[i, :] = np.nan
+            else:
+                centroids[i, :] = global_sum / float(global_count[0])
         return centroids
 
     def _assign_markers_to_terminals(self, marker_centroids, terminal_coords):
@@ -1247,6 +2098,18 @@ class TransportSolver:
         tree = cKDTree(terminal_coords)
         _, idx = tree.query(marker_centroids)
         return idx.astype(int)
+
+    @staticmethod
+    def _assign_marker_directions(marker_centroids, branch_coords, branch_directions):
+        if (
+            marker_centroids.size == 0
+            or branch_coords.size == 0
+            or branch_directions.size == 0
+        ):
+            return np.zeros((len(marker_centroids), 3), dtype=float)
+        tree = cKDTree(branch_coords)
+        _, idx = tree.query(marker_centroids)
+        return np.asarray(branch_directions[np.asarray(idx, dtype=int)], dtype=float)
 
     def _get_terminal_marker_data(self):
         inlet_marks, outlet_marks = self._get_terminal_marker_sets()
@@ -1279,6 +2142,12 @@ class TransportSolver:
                 interior.append(int(facet))
         return np.asarray(exterior, dtype=np.int32), np.asarray(interior, dtype=np.int32)
 
+    def _marker_global_facet_counts(self, marker: int):
+        exterior, interior = self._split_marker_facets(int(marker))
+        n_exterior = int(self.mesh.comm.allreduce(int(exterior.size), op=MPI.SUM))
+        n_interior = int(self.mesh.comm.allreduce(int(interior.size), op=MPI.SUM))
+        return n_exterior, n_interior
+
     def _global_scalar(self, form_expr):
         local = float(fem.assemble_scalar(fem.form(form_expr)))
         return float(self.mesh.comm.allreduce(local, op=MPI.SUM))
@@ -1301,26 +2170,50 @@ class TransportSolver:
         ds = ufl.Measure("ds", domain=domain, subdomain_data=self.facet_tags)
         dS = ufl.Measure("dS", domain=domain, subdomain_data=self.facet_tags)
 
-        inlet_marks, outlet_marks, _, _, idx_in, idx_out = self._get_terminal_marker_data()
+        inlet_marks, outlet_marks, inlet_c, outlet_c, idx_in, idx_out = (
+            self._get_terminal_marker_data()
+        )
+        inlet_directions = self._assign_marker_directions(
+            inlet_c, self.branch_coords_in, self.branch_normals_in
+        )
+        outlet_directions = self._assign_marker_directions(
+            outlet_c, self.branch_coords_out, self.branch_normals_out
+        )
 
-        def build_data(markers, idx_map, flows, role):
+        def build_data(markers, idx_map, flows, directions, role):
             out = []
             for j, marker in enumerate(markers):
                 if j >= len(idx_map):
                     continue
 
-                ext_facets, int_facets = self._split_marker_facets(int(marker))
+                n_ext, n_int = self._marker_global_facet_counts(int(marker))
                 area_ext = (
-                    self._global_scalar(one * ds(int(marker))) if ext_facets.size > 0 else 0.0
+                    self._global_scalar(one * ds(int(marker))) if n_ext > 0 else 0.0
                 )
                 area_int = (
-                    self._global_scalar(one * dS(int(marker))) if int_facets.size > 0 else 0.0
+                    self._global_scalar(one * dS(int(marker))) if n_int > 0 else 0.0
                 )
                 area_total = area_ext + area_int
 
                 q_raw = float(flows[idx_map[j]]) if len(flows) else 0.0
                 q_mag = abs(q_raw)
                 g = q_mag / area_total if area_total > 0.0 else 0.0
+                direction = (
+                    np.asarray(directions[j], dtype=float)
+                    if j < len(directions)
+                    else np.zeros(3, dtype=float)
+                )
+                direction_norm = float(np.linalg.norm(direction))
+                if area_int > 0.0 and (
+                    not np.isfinite(direction_norm) or direction_norm <= 0.0
+                ):
+                    raise RuntimeError(
+                        f"Embedded {role} marker {int(marker)} has no valid "
+                        "branching-data direction. Pass the corresponding "
+                        "--branching-*-file option."
+                    )
+                if direction_norm > 0.0:
+                    direction = direction / direction_norm
 
                 out.append(
                     {
@@ -1332,17 +2225,23 @@ class TransportSolver:
                         "area_interior": area_int,
                         "area_total": area_total,
                         "flux_density": g,
+                        "distal_direction": direction,
                     }
                 )
             return out
 
-        self.inlet_exchange = build_data(inlet_marks, idx_in, self.q_inlet_vals, "inlet")
+        self.inlet_exchange = build_data(
+            inlet_marks, idx_in, self.q_inlet_vals, inlet_directions, "inlet"
+        )
         self.outlet_exchange = build_data(
-            outlet_marks, idx_out, self.q_outlet_vals, "outlet"
+            outlet_marks, idx_out, self.q_outlet_vals, outlet_directions, "outlet"
         )
 
         if mesh.comm.rank == 0:
-            print("Configured inlet terminal exchange:")
+            print(
+                "Configured inlet terminal exchange "
+                "(Danckwerts prescribed total species flux):"
+            )
             for data in self.inlet_exchange:
                 print(
                     f"  marker {data['marker']}: |Q|={data['flow_mag']:.6e}, "
@@ -1387,6 +2286,108 @@ class TransportSolver:
                     f"  {label} (marker {marker}): "
                     f"A={area:.6e}, Qin={q_in_tot:.6e}, Qout={q_out_tot:.6e}"
                 )
+
+    def _velocity_debug_rows(self, time_value, ds_tagged, dS_tagged):
+        """Audit the exact scaled velocity field used by the transport forms."""
+        mesh = self.mesh
+        n = ufl.FacetNormal(mesh)
+        dx = ufl.Measure("dx", domain=mesh.ufl_domain())
+        speed = ufl.sqrt(ufl.dot(self.velocity, self.velocity))
+        volume = self._global_scalar(1.0 * dx)
+        mean_speed = self._global_scalar(speed * dx) / volume if volume > 0.0 else 0.0
+
+        gdim = mesh.geometry.dim
+        nodal_velocity = np.asarray(self.velocity.x.array, dtype=float).reshape((-1, gdim))
+        local_speed = np.linalg.norm(nodal_velocity, axis=1)
+        local_min = float(np.min(local_speed)) if local_speed.size else float("inf")
+        local_max = float(np.max(local_speed)) if local_speed.size else float("-inf")
+        min_speed = float(mesh.comm.allreduce(local_min, op=MPI.MIN))
+        max_speed = float(mesh.comm.allreduce(local_max, op=MPI.MAX))
+
+        fieldnames = (
+            "time_s",
+            "surface_type",
+            "role",
+            "marker",
+            "area_cm2",
+            "checkpoint_network_to_3d_flow_cm3_per_s",
+            "velocity_network_to_3d_flow_cm3_per_s",
+            "velocity_to_checkpoint_ratio",
+            "mean_speed_cm_per_s",
+            "min_nodal_speed_cm_per_s",
+            "max_nodal_speed_cm_per_s",
+            "velocity_scale_factor",
+        )
+
+        def row(surface_type, role, marker, area, expected, measured):
+            ratio = measured / expected if expected != 0.0 else float("nan")
+            values = {
+                "time_s": float(time_value),
+                "surface_type": str(surface_type),
+                "role": str(role),
+                "marker": int(marker),
+                "area_cm2": float(area),
+                "checkpoint_network_to_3d_flow_cm3_per_s": float(expected),
+                "velocity_network_to_3d_flow_cm3_per_s": float(measured),
+                "velocity_to_checkpoint_ratio": float(ratio),
+                "mean_speed_cm_per_s": float(mean_speed),
+                "min_nodal_speed_cm_per_s": float(min_speed),
+                "max_nodal_speed_cm_per_s": float(max_speed),
+                "velocity_scale_factor": float(self.VELOCITY_SCALE_FACTOR),
+            }
+            return {name: values[name] for name in fieldnames}
+
+        rows = [row("bulk", "domain", -1, volume, 0.0, 0.0)]
+
+        # Positive values use one convention everywhere: flow into the 3D domain.
+        for role, marker in (
+            ("arterial_concave", int(self.arterial_concave_marker)),
+            ("venous_concave", int(self.venous_concave_marker)),
+        ):
+            area = self._global_scalar(1.0 * ds_tagged(marker))
+            flow_into_3d = -self._global_scalar(
+                ufl.dot(self.velocity, n) * ds_tagged(marker)
+            )
+            rows.append(row("concave", role, marker, area, 0.0, flow_into_3d))
+
+        for role, exchange in (
+            ("arterial_terminal", self.inlet_exchange),
+            ("venous_terminal", self.outlet_exchange),
+        ):
+            for data in exchange:
+                marker = int(data["marker"])
+                flow_into_3d = 0.0
+                if data["area_exterior"] > 0.0:
+                    flow_into_3d -= self._global_scalar(
+                        ufl.dot(self.velocity, n) * ds_tagged(marker)
+                    )
+                if data["area_interior"] > 0.0:
+                    direction = fem.Constant(
+                        mesh,
+                        dfx.default_scalar_type(
+                            tuple(float(value) for value in data["distal_direction"])
+                        ),
+                    )
+                    use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+                    tissue_outward_flux = ufl.conditional(
+                        use_minus,
+                        ufl.dot(self.velocity("-"), n("-")),
+                        ufl.dot(self.velocity("+"), n("+")),
+                    )
+                    flow_into_3d -= self._global_scalar(
+                        tissue_outward_flux * dS_tagged(marker)
+                    )
+                rows.append(
+                    row(
+                        "synthetic_terminal",
+                        role,
+                        marker,
+                        float(data["area_total"]),
+                        float(data["flow_raw"]),
+                        flow_into_3d,
+                    )
+                )
+        return rows
 
     def _build_concave_exchange_data(self, interface_bc_file):
         """
@@ -1460,28 +2461,184 @@ class TransportSolver:
                     f"g={data['flux_density']:.6e}, mode={data['mode']}"
                 )
 
-    def _build_terminal_exchange_forms(self, c, w, c_in, ds_tagged, dS_tagged):
-        """
-        Assemble facet exchange terms.
+    def _build_arterial_terminal_danckwerts_form(
+        self, w, c_feed, ds_tagged, dS_tagged, n
+    ):
+        """Prescribe the total arterial species flux on synthetic terminals.
 
-        Exterior terminal markers use ds(marker). Interior embedded terminal
-        markers use dS(marker). For DG concentration spaces, the interior terms
-        are written symmetrically using facet averages so the source/sink is not
-        biased to one arbitrary side of the embedded surface.
+        With the terminal direction pointing from the vessel into the tissue,
+        the Danckwerts condition is
+
+            (u c - D grad(c)) . d = (Q/A) c_feed.
+
+        After integration by parts, this is a natural total-flux condition and
+        contributes only the prescribed right-hand-side flux below.  Adding a
+        separate Dirichlet/Nitsche diffusion term would supply oxygen in excess
+        of Q*c_feed and would no longer be a Danckwerts condition.
+
+        Embedded dS terminals use the branching-oriented distal tissue trace.
+        Exterior ds terminals have only one trace.  When Q is zero, this pure
+        Danckwerts condition becomes zero total species flux.
         """
         mesh = self.mesh
-
-        a_exchange = 0
-        L_exchange = 0
+        L_danckwerts = 0
 
         for data in self.inlet_exchange:
             marker = int(data["marker"])
-            g = fem.Constant(mesh, dfx.default_scalar_type(data["flux_density"]))
+            speed = fem.Constant(
+                mesh, dfx.default_scalar_type(data["flux_density"])
+            )
+            prescribed_total_flux = speed * c_feed
 
             if data["area_exterior"] > 0.0:
-                L_exchange += g * c_in * w * ds_tagged(marker)
+                L_danckwerts += prescribed_total_flux * w * ds_tagged(marker)
+
             if data["area_interior"] > 0.0:
-                L_exchange += g * c_in * ufl.avg(w) * dS_tagged(marker)
+                direction = fem.Constant(
+                    mesh,
+                    dfx.default_scalar_type(
+                        tuple(float(value) for value in data["distal_direction"])
+                    ),
+                )
+                use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+                w_tissue = ufl.conditional(use_minus, w("-"), w("+"))
+                L_danckwerts += (
+                    prescribed_total_flux * w_tissue * dS_tagged(marker)
+                )
+
+        return L_danckwerts
+
+    def _build_terminal_exchange_forms(
+        self, c, w, c_in, D, ds_tagged, dS_tagged, n, h, alpha
+    ):
+        """
+        Assemble facet exchange terms.
+
+        In coupled 1D mode, arterial terminal concentrations are imposed on the
+        3D tissue-facing trace with Nitsche diffusion terms. Venous terminals
+        use local advective outflow; their 3D trace is sampled after the solve
+        and imposed as the downstream 1D inflow concentration. Outside coupled
+        mode, arterial terminals use a Danckwerts prescribed-total-flux
+        condition and venous terminals use local advective outflow.
+
+        Exterior markers use ds(marker); interior embedded markers use the
+        branching-oriented distal trace on dS(marker).
+        """
+        mesh = self.mesh
+
+        if self.couple_1d_transport:
+            a_exchange = 0
+            L_exchange = 0
+            self._coupled_terminal_concentration_constants = {
+                "inlet": [], "outlet": []
+            }
+            self._coupled_terminal_flux_constants = {"inlet": [], "outlet": []}
+
+            # Arterial network is upstream: solve it first and impose its
+            # terminal concentrations on the 3D tissue-facing trace.  The
+            # Nitsche reaction is the arterial diffusive flux returned to the
+            # next arterial solve.
+            for data in self.inlet_exchange:
+                marker = int(data["marker"])
+                boundary_concentration = fem.Constant(
+                    mesh,
+                    dfx.default_scalar_type(self.network_initial_concentration),
+                )
+                self._coupled_terminal_concentration_constants["inlet"].append(
+                    boundary_concentration
+                )
+                signed_speed = fem.Constant(
+                    mesh,
+                    dfx.default_scalar_type(
+                        float(data["flow_raw"]) / float(data["area_total"])
+                        if data["area_total"] > 0.0 else 0.0
+                    ),
+                )
+                if data["area_exterior"] > 0.0:
+                    L_exchange += (
+                        signed_speed * boundary_concentration * w
+                        + alpha * D / h * boundary_concentration * w
+                        - D * ufl.dot(ufl.grad(w), n) * boundary_concentration
+                    ) * ds_tagged(marker)
+                    a_exchange += (
+                        alpha * D / h * c * w
+                        - D * ufl.dot(ufl.grad(c), n) * w
+                        - D * ufl.dot(ufl.grad(w), n) * c
+                    ) * ds_tagged(marker)
+                if data["area_interior"] > 0.0:
+                    direction = fem.Constant(
+                        mesh,
+                        dfx.default_scalar_type(
+                            tuple(float(value) for value in data["distal_direction"])
+                        ),
+                    )
+                    use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+                    w_tissue = ufl.conditional(use_minus, w("-"), w("+"))
+                    grad_w_tissue = ufl.conditional(
+                        use_minus, ufl.grad(w)("-"), ufl.grad(w)("+")
+                    )
+                    normal_tissue = ufl.conditional(use_minus, n("-"), n("+"))
+                    D_tissue = ufl.conditional(use_minus, D("-"), D("+"))
+                    h_tissue = ufl.conditional(use_minus, h("-"), h("+"))
+                    L_exchange += (
+                        signed_speed * boundary_concentration * w_tissue
+                        + alpha * D_tissue / h_tissue
+                        * boundary_concentration * w_tissue
+                        - D_tissue * ufl.dot(grad_w_tissue, normal_tissue)
+                        * boundary_concentration
+                    ) * dS_tagged(marker)
+                    a_exchange += (
+                        ufl.conditional(
+                            use_minus,
+                            alpha * D("-") / h("-") * c("-") * w("-"),
+                            alpha * D("+") / h("+") * c("+") * w("+"),
+                        )
+                        - ufl.conditional(
+                            use_minus,
+                            D("-") * ufl.dot(ufl.grad(c)("-"), n("-")) * w("-"),
+                            D("+") * ufl.dot(ufl.grad(c)("+"), n("+")) * w("+"),
+                        )
+                        - ufl.conditional(
+                            use_minus,
+                            D("-") * ufl.dot(ufl.grad(w)("-"), n("-")) * c("-"),
+                            D("+") * ufl.dot(ufl.grad(w)("+"), n("+")) * c("+"),
+                        )
+                    ) * dS_tagged(marker)
+
+            # Venous network is downstream. Do not impose a venous Dirichlet /
+            # Nitsche concentration on the 3D terminal face here; that acted as
+            # an artificial drain when the lagged 1D terminal concentration was
+            # low. Instead, remove species advectively from the local 3D trace
+            # and pass the solved 3D trace to the venous 1D network afterward.
+            for data in self.outlet_exchange:
+                marker = int(data["marker"])
+                outflow_speed = fem.Constant(
+                    mesh,
+                    dfx.default_scalar_type(
+                        abs(float(data["flow_raw"])) / float(data["area_total"])
+                        if data["area_total"] > 0.0 else 0.0
+                    ),
+                )
+                if data["area_exterior"] > 0.0:
+                    a_exchange += outflow_speed * c * w * ds_tagged(marker)
+                if data["area_interior"] > 0.0:
+                    direction = fem.Constant(
+                        mesh,
+                        dfx.default_scalar_type(
+                            tuple(float(value) for value in data["distal_direction"])
+                        ),
+                    )
+                    use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+                    cw_tissue = ufl.conditional(
+                        use_minus, c("-") * w("-"), c("+") * w("+")
+                    )
+                    a_exchange += outflow_speed * cw_tissue * dS_tagged(marker)
+            return a_exchange, L_exchange
+
+        a_exchange = 0
+        L_exchange = self._build_arterial_terminal_danckwerts_form(
+            w, c_in, ds_tagged, dS_tagged, n
+        )
 
         for data in self.outlet_exchange:
             marker = int(data["marker"])
@@ -1490,9 +2647,326 @@ class TransportSolver:
             if data["area_exterior"] > 0.0:
                 a_exchange += g * c * w * ds_tagged(marker)
             if data["area_interior"] > 0.0:
-                a_exchange += g * ufl.avg(c * w) * dS_tagged(marker)
+                direction = fem.Constant(
+                    mesh,
+                    dfx.default_scalar_type(
+                        tuple(float(value) for value in data["distal_direction"])
+                    ),
+                )
+                use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+                cw_tissue = ufl.conditional(
+                    use_minus, c("-") * w("-"), c("+") * w("+")
+                )
+                a_exchange += g * cw_tissue * dS_tagged(marker)
 
         return a_exchange, L_exchange
+
+    def _advance_coupled_networks(
+        self, time_value: float, arterial_root_concentration: float,
+        venous_root_concentration: float
+    ):
+        """Solve the upstream arterial tree before the 3D transport step."""
+        if not self.couple_1d_transport:
+            return
+
+        network = self.network_inlet
+        marker_to_terminal = self.inlet_marker_to_network_terminal
+        marker_diffusive_rates = self._coupled_terminal_diffusive_rates["inlet"]
+        network_diffusive_rates = np.empty(len(network.terminal_nodes), dtype=float)
+        for marker_index, network_terminal in enumerate(marker_to_terminal):
+            network_diffusive_rates[int(network_terminal)] = (
+                marker_diffusive_rates[marker_index]
+            )
+        network.step_with_diffusive_terminal_flux(
+            float(arterial_root_concentration), network_diffusive_rates
+        )
+
+        marker_total_rates = np.empty(len(self.inlet_exchange), dtype=float)
+        for marker_index, (data, constant) in enumerate(
+            zip(
+                self.inlet_exchange,
+                self._coupled_terminal_concentration_constants["inlet"],
+            )
+        ):
+            network_terminal = int(marker_to_terminal[marker_index])
+            terminal_concentration = float(
+                network.terminal_boundary_concentrations[network_terminal]
+            )
+            constant.value = dfx.default_scalar_type(terminal_concentration)
+            marker_total_rates[marker_index] = (
+                float(data["flow_raw"]) * terminal_concentration
+                + marker_diffusive_rates[marker_index]
+            )
+        self._coupled_terminal_marker_rates["inlet"] = marker_total_rates
+
+    def _terminal_face_concentrations(self, c_h, exchange, ds_tagged, dS_tagged):
+        """Area-average the tissue-facing 3D concentration for each terminal."""
+        n = ufl.FacetNormal(self.mesh)
+        values = []
+        for data in exchange:
+            marker = int(data["marker"])
+            integral = 0.0
+            if data["area_exterior"] > 0.0:
+                integral += self._global_scalar(c_h * ds_tagged(marker))
+            if data["area_interior"] > 0.0:
+                direction = fem.Constant(
+                    self.mesh,
+                    dfx.default_scalar_type(
+                        tuple(float(value) for value in data["distal_direction"])
+                    ),
+                )
+                c_tissue = ufl.conditional(
+                    ufl.gt(ufl.dot(n("+"), direction), 0.0), c_h("-"), c_h("+")
+                )
+                integral += self._global_scalar(c_tissue * dS_tagged(marker))
+            area = float(data["area_total"])
+            values.append(integral / area if area > 0.0 else 0.0)
+        return np.asarray(values, dtype=float)
+
+    def _terminal_diffusive_flux_rates(
+        self, c_h, D, exchange, concentration_constants,
+        ds_tagged, dS_tagged, h, alpha
+    ):
+        """Return Nitsche numerical diffusion, positive network -> 3D."""
+        n = ufl.FacetNormal(self.mesh)
+        rates = []
+        for data, boundary_concentration in zip(
+            exchange, concentration_constants
+        ):
+            marker = int(data["marker"])
+            rate = 0.0
+            if data["area_exterior"] > 0.0:
+                outward_numerical_flux = (
+                    -D * ufl.dot(ufl.grad(c_h), n)
+                    + alpha * D / h * (c_h - boundary_concentration)
+                )
+                rate -= self._global_scalar(
+                    outward_numerical_flux * ds_tagged(marker)
+                )
+            if data["area_interior"] > 0.0:
+                direction = fem.Constant(
+                    self.mesh,
+                    dfx.default_scalar_type(
+                        tuple(float(value) for value in data["distal_direction"])
+                    ),
+                )
+                use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+                c_tissue = ufl.conditional(
+                    use_minus, c_h("-"), c_h("+")
+                )
+                grad_c_tissue = ufl.conditional(
+                    use_minus, ufl.grad(c_h)("-"), ufl.grad(c_h)("+")
+                )
+                normal_tissue = ufl.conditional(
+                    use_minus, n("-"), n("+")
+                )
+                D_tissue = ufl.conditional(use_minus, D("-"), D("+"))
+                h_tissue = ufl.conditional(use_minus, h("-"), h("+"))
+                outward_numerical_flux = (
+                    -D_tissue * ufl.dot(grad_c_tissue, normal_tissue)
+                    + alpha * D_tissue / h_tissue
+                    * (c_tissue - boundary_concentration)
+                )
+                rate -= self._global_scalar(
+                    outward_numerical_flux * dS_tagged(marker)
+                )
+            rates.append(rate)
+        return np.asarray(rates, dtype=float)
+
+    def _update_coupled_terminal_diffusive_fluxes(
+        self, c_h, D, ds_tagged, dS_tagged, h, alpha,
+        time_value, arterial_root_concentration, venous_root_concentration
+    ):
+        """Return 3D terminal diffusive reactions to the lagged 1D solves."""
+        if not self.couple_1d_transport:
+            return
+        relaxation = float(self.network_coupling_relaxation)
+        iteration = int(np.rint(float(time_value) / self.dt))
+
+        # Arterial: concentration came from 1D; the 3D Nitsche reaction is the
+        # new diffusive flux returned to the next arterial solve.
+        arterial_trace = self._terminal_face_concentrations(
+            c_h, self.inlet_exchange, ds_tagged, dS_tagged
+        )
+        arterial_imposed_diffusion = self._coupled_terminal_diffusive_rates[
+            "inlet"
+        ].copy()
+        arterial_returned_diffusion = self._terminal_diffusive_flux_rates(
+            c_h,
+            D,
+            self.inlet_exchange,
+            self._coupled_terminal_concentration_constants["inlet"],
+            ds_tagged,
+            dS_tagged,
+            h,
+            alpha,
+        )
+        arterial_next_diffusion = (
+            relaxation * arterial_returned_diffusion
+            + (1.0 - relaxation) * arterial_imposed_diffusion
+        )
+        self._coupled_terminal_diffusive_rates["inlet"] = (
+            arterial_next_diffusion
+        )
+        arterial_applied_rates = np.empty(len(self.inlet_exchange), dtype=float)
+        for marker_index, data in enumerate(self.inlet_exchange):
+            network_terminal = int(
+                self.inlet_marker_to_network_terminal[marker_index]
+            )
+            terminal_concentration = float(
+                self.network_inlet.terminal_boundary_concentrations[
+                    network_terminal
+                ]
+            )
+            advective_rate = float(data["flow_raw"] * terminal_concentration)
+            network_total_rate = advective_rate + arterial_imposed_diffusion[
+                marker_index
+            ]
+            applied_3d_rate = advective_rate + arterial_returned_diffusion[
+                marker_index
+            ]
+            arterial_applied_rates[marker_index] = applied_3d_rate
+            self.network_history.append(
+                {
+                    "coupling_iteration": iteration,
+                    "time_s": float(time_value),
+                    "network": "arterial",
+                    "marker": int(data["marker"]),
+                    "network_terminal_index": network_terminal,
+                    "root_concentration_mol_per_cm3": float(
+                        arterial_root_concentration
+                    ),
+                    "terminal_concentration_mol_per_cm3": terminal_concentration,
+                    "three_d_trace_concentration_mol_per_cm3": float(
+                        arterial_trace[marker_index]
+                    ),
+                    "concentration_continuity_residual_mol_per_cm3": float(
+                        arterial_trace[marker_index] - terminal_concentration
+                    ),
+                    "advective_network_to_3d_flux_mol_per_s": advective_rate,
+                    "imposed_diffusive_network_to_3d_flux_mol_per_s": float(
+                        arterial_imposed_diffusion[marker_index]
+                    ),
+                    "returned_diffusive_network_to_3d_flux_mol_per_s": float(
+                        arterial_returned_diffusion[marker_index]
+                    ),
+                    "next_relaxed_diffusive_network_to_3d_flux_mol_per_s": float(
+                        arterial_next_diffusion[marker_index]
+                    ),
+                    "raw_network_to_3d_flux_mol_per_s": float(network_total_rate),
+                    "applied_network_to_3d_flux_mol_per_s": float(applied_3d_rate),
+                    "network_root_influx_mol_per_s": float(
+                        self.network_inlet.root_flux_rate
+                    ),
+                    "network_storage_rate_mol_per_s": float(
+                        self.network_inlet.storage_rate
+                    ),
+                    "network_balance_residual_mol_per_s": float(
+                        self.network_inlet.balance_residual
+                    ),
+                }
+            )
+        self._coupled_terminal_marker_rates["inlet"] = arterial_applied_rates
+
+        # Venous: the previous 1D terminal concentration was imposed on the 3D
+        # trace before this solve. The current 3D trace is then imposed as the
+        # downstream 1D inflow concentration.
+        venous_trace = self._terminal_face_concentrations(
+            c_h, self.outlet_exchange, ds_tagged, dS_tagged
+        )
+        venous_imposed_diffusion = np.zeros(len(self.outlet_exchange), dtype=float)
+        venous_terminal_values = (
+            self.network_outlet.terminal_boundary_concentrations.copy()
+        )
+        for marker_index, network_terminal in enumerate(
+            self.outlet_marker_to_network_terminal
+        ):
+            venous_terminal_values[int(network_terminal)] = max(
+                float(venous_trace[marker_index]), 0.0
+            )
+        venous_network_total_rates = self.network_outlet.step(
+            float(venous_root_concentration), venous_terminal_values
+        )
+
+        venous_returned_diffusion = np.empty(
+            len(self.outlet_exchange), dtype=float
+        )
+        venous_applied_rates = np.empty(len(self.outlet_exchange), dtype=float)
+        for marker_index, data in enumerate(self.outlet_exchange):
+            network_terminal = int(
+                self.outlet_marker_to_network_terminal[marker_index]
+            )
+            terminal_concentration = float(
+                self.network_outlet.terminal_boundary_concentrations[
+                    network_terminal
+                ]
+            )
+            advective_rate = float(data["flow_raw"] * terminal_concentration)
+            venous_returned_diffusion[marker_index] = (
+                float(venous_network_total_rates[network_terminal])
+                - advective_rate
+            )
+            venous_applied_rates[marker_index] = advective_rate
+
+        venous_next_diffusion = np.zeros(len(self.outlet_exchange), dtype=float)
+        self._coupled_terminal_diffusive_rates["outlet"] = venous_next_diffusion
+        self._coupled_terminal_marker_rates["outlet"] = venous_applied_rates
+
+        for marker_index, data in enumerate(self.outlet_exchange):
+            network_terminal = int(
+                self.outlet_marker_to_network_terminal[marker_index]
+            )
+            terminal_concentration = float(
+                self.network_outlet.terminal_boundary_concentrations[
+                    network_terminal
+                ]
+            )
+            advective_rate = float(data["flow_raw"] * terminal_concentration)
+            network_total_rate = float(
+                venous_network_total_rates[network_terminal]
+            )
+            self.network_history.append(
+                {
+                    "coupling_iteration": iteration,
+                    "time_s": float(time_value),
+                    "network": "venous",
+                    "marker": int(data["marker"]),
+                    "network_terminal_index": network_terminal,
+                    "root_concentration_mol_per_cm3": float(
+                        venous_root_concentration
+                    ),
+                    "terminal_concentration_mol_per_cm3": terminal_concentration,
+                    "three_d_trace_concentration_mol_per_cm3": float(
+                        venous_trace[marker_index]
+                    ),
+                    "concentration_continuity_residual_mol_per_cm3": float(
+                        venous_trace[marker_index] - terminal_concentration
+                    ),
+                    "advective_network_to_3d_flux_mol_per_s": advective_rate,
+                    "imposed_diffusive_network_to_3d_flux_mol_per_s": float(
+                        venous_imposed_diffusion[marker_index]
+                    ),
+                    "returned_diffusive_network_to_3d_flux_mol_per_s": float(
+                        venous_returned_diffusion[marker_index]
+                    ),
+                    "next_relaxed_diffusive_network_to_3d_flux_mol_per_s": float(
+                        venous_next_diffusion[marker_index]
+                    ),
+                    "raw_network_to_3d_flux_mol_per_s": network_total_rate,
+                    "applied_network_to_3d_flux_mol_per_s": float(
+                        venous_applied_rates[marker_index]
+                    ),
+                    "network_root_influx_mol_per_s": float(
+                        self.network_outlet.root_flux_rate
+                    ),
+                    "network_storage_rate_mol_per_s": float(
+                        self.network_outlet.storage_rate
+                    ),
+                    "network_balance_residual_mol_per_s": float(
+                        self.network_outlet.balance_residual
+                    ),
+                }
+            )
 
     def _build_concave_exchange_forms(
         self, c, w, c_marker_31, c_marker_32, ds_tagged, n
@@ -1583,6 +3057,22 @@ class TransportSolver:
         flow, i.e. "amount per unit time".
         """
         mesh = self.mesh
+        n = ufl.FacetNormal(mesh)
+
+        if self.couple_1d_transport:
+            signed_rates = np.concatenate(
+                (
+                    self._coupled_terminal_marker_rates["inlet"],
+                    self._coupled_terminal_marker_rates["outlet"],
+                )
+            )
+            # Positive means network -> 3D injection; negative means 3D ->
+            # network removal. Either tree may change sign when diffusion
+            # dominates weak advection, so classify by the computed flux.
+            return (
+                np.maximum(signed_rates, 0.0),
+                np.maximum(-signed_rates, 0.0),
+            )
 
         inlet_rates = []
         for data in self.inlet_exchange:
@@ -1603,7 +3093,16 @@ class TransportSolver:
             if data["area_exterior"] > 0.0:
                 rate += self._global_scalar(g * c_h * ds_tagged(marker))
             if data["area_interior"] > 0.0:
-                rate += self._global_scalar(g * ufl.avg(c_h) * dS_tagged(marker))
+                direction = fem.Constant(
+                    mesh,
+                    dfx.default_scalar_type(
+                        tuple(float(value) for value in data["distal_direction"])
+                    ),
+                )
+                c_tissue = ufl.conditional(
+                    ufl.gt(ufl.dot(n("+"), direction), 0.0), c_h("-"), c_h("+")
+                )
+                rate += self._global_scalar(g * c_tissue * dS_tagged(marker))
             outlet_rates.append(rate)
 
         return (
@@ -1848,8 +3347,11 @@ class TransportSolver:
         a_advect = -ufl.dot(c * self.velocity, ufl.grad(w)) * dx
         a_diffuse = ufl.dot(D * ufl.grad(c), ufl.grad(w)) * dx
         a_consumption = mm_rate * c * w * dx
+        h = ufl.CellDiameter(domain)
+        alpha = fem.Constant(mesh, dfx.default_scalar_type(10.0))
+        terminal_alpha = fem.Constant(mesh, dfx.default_scalar_type(1000.0))
         a_exchange, L_exchange = self._build_terminal_exchange_forms(
-            c, w, c_in, ds_tagged, dS_tagged
+            c, w, c_in, D, ds_tagged, dS_tagged, n, h, terminal_alpha
         )
         a_concave, L_concave = self._build_concave_exchange_forms(
             c, w, c_in, c_marker_32, ds_tagged, n
@@ -1860,22 +3362,36 @@ class TransportSolver:
 
         # Upwind advection flux on all interior facets.
         un = (ufl.dot(self.velocity, n) + abs(ufl.dot(self.velocity, n))) / 2.0
-        a += ufl.jump(w) * (un("+") * c("+") - un("-") * c("-")) * dS_tagged
+        interior_advection = ufl.jump(w) * (
+            un("+") * c("+") - un("-") * c("-")
+        )
+        a += interior_advection * dS_tagged
+        if self.couple_1d_transport:
+            for data in [*self.inlet_exchange, *self.outlet_exchange]:
+                if data["area_interior"] > 0.0:
+                    a -= interior_advection * dS_tagged(int(data["marker"]))
 
         # SIPG diffusion for DG concentration.
-        h = ufl.CellDiameter(domain)
-        alpha = fem.Constant(mesh, dfx.default_scalar_type(10.0))
         if self.concave_exchange_mode in {"dirichlet", "combined"}:
             a_dirichlet, L_dirichlet = self._build_concave_dirichlet_diffusion_forms(
                 c, w, c_in, c_marker_32, D, ds_tagged, n, h, alpha
             )
             a += a_dirichlet
             L += L_dirichlet
-        a += D("+") * alpha("+") / h("+") * ufl.dot(
+        interior_diffusion = D("+") * alpha("+") / h("+") * ufl.dot(
             ufl.jump(w, n), ufl.jump(c, n)
-        ) * dS_tagged
-        a -= D("+") * ufl.dot(ufl.avg(ufl.grad(w)), ufl.jump(c, n)) * dS_tagged
-        a -= D("+") * ufl.dot(ufl.avg(ufl.grad(c)), ufl.jump(w, n)) * dS_tagged
+        )
+        interior_diffusion -= D("+") * ufl.dot(
+            ufl.avg(ufl.grad(w)), ufl.jump(c, n)
+        )
+        interior_diffusion -= D("+") * ufl.dot(
+            ufl.avg(ufl.grad(c)), ufl.jump(w, n)
+        )
+        a += interior_diffusion * dS_tagged
+        if self.couple_1d_transport:
+            for data in [*self.inlet_exchange, *self.outlet_exchange]:
+                if data["area_interior"] > 0.0:
+                    a -= interior_diffusion * dS_tagged(int(data["marker"]))
 
         a_form = fem.form(a)
         L_form = fem.form(L)
@@ -1992,12 +3508,91 @@ class TransportSolver:
                 msg += f" and {xdmf_consumption_output_path}"
             print(msg, flush=True)
 
+        velocity_debug_out = None
+        velocity_magnitude_debug_out = None
+        velocity_debug_csv_stream = None
+        velocity_debug_csv_writer = None
+        velocity_debug_path = None
+        velocity_magnitude_debug_path = None
+        velocity_debug_csv_path = None
+        velocity_magnitude = None
+        velocity_magnitude_expression = None
+        if self.velocity_debug_output_file:
+            velocity_debug_path = _vtk_output_path(self.velocity_debug_output_file)
+            velocity_magnitude_debug_path = velocity_debug_path.with_name(
+                f"{velocity_debug_path.stem}_magnitude.pvd"
+            )
+            velocity_debug_csv_path = velocity_debug_path.with_name(
+                f"{velocity_debug_path.stem}_surface_flux.csv"
+            )
+            if mesh.comm.rank == 0:
+                velocity_debug_path.parent.mkdir(parents=True, exist_ok=True)
+                _remove_vtk_series(velocity_debug_path)
+                _remove_vtk_series(velocity_magnitude_debug_path)
+                if velocity_debug_csv_path.exists():
+                    velocity_debug_csv_path.unlink()
+                velocity_debug_csv_stream = velocity_debug_csv_path.open(
+                    "w", newline=""
+                )
+            mesh.comm.barrier()
+            velocity_debug_out = io.VTKFile(
+                mesh.comm, str(velocity_debug_path), "w"
+            )
+            velocity_magnitude_debug_out = io.VTKFile(
+                mesh.comm, str(velocity_magnitude_debug_path), "w"
+            )
+            velocity_magnitude_space = fem.functionspace(mesh, P1)
+            velocity_magnitude = fem.Function(velocity_magnitude_space)
+            velocity_magnitude.name = "transport_velocity_magnitude_cm_per_s"
+            velocity_magnitude_expression = fem.Expression(
+                ufl.sqrt(ufl.dot(self.velocity, self.velocity)),
+                velocity_magnitude_space.element.interpolation_points(),
+            )
+            self.velocity.name = "transport_velocity_scaled_cm_per_s"
+            if mesh.comm.rank == 0:
+                print(
+                    "[transport] Writing exact imported/scaled velocity debug fields: "
+                    f"{velocity_debug_path} and {velocity_magnitude_debug_path}; "
+                    f"surface audit: {velocity_debug_csv_path}",
+                    flush=True,
+                )
+
         t = 0.0
         nt = int(np.round(self.T / self.dt))
         injected_cumulative = 0.0
         removed_cumulative = 0.0
         consumed_cumulative = 0.0
         critical_rows = []
+        output_stem = Path(self.out_file).stem
+        output_parent = Path(self.out_file).parent
+        network_history_path = output_parent / f"{output_stem}_1d_terminal_history.csv"
+        arterial_network_pvd_path = output_parent / f"{output_stem}_1d_arterial.pvd"
+        venous_network_pvd_path = output_parent / f"{output_stem}_1d_venous.pvd"
+        network_history_writer = None
+        arterial_network_writer = None
+        venous_network_writer = None
+        if mesh.comm.rank == 0 and self.couple_1d_transport:
+            network_history_writer = NetworkTerminalHistoryWriter(
+                network_history_path
+            )
+            arterial_network_writer = NetworkTransportVTKWriter(
+                self.network_inlet, arterial_network_pvd_path
+            )
+            venous_network_writer = NetworkTransportVTKWriter(
+                self.network_outlet, venous_network_pvd_path
+            )
+            arterial_network_writer.write(0.0)
+            venous_network_writer.write(0.0)
+            print(
+                "[transport] Writing coupled 1D visualization time series: "
+                f"{arterial_network_pvd_path} and {venous_network_pvd_path}",
+                flush=True,
+            )
+            print(
+                "[transport] Streaming coupled 1D terminal history each timestep: "
+                f"{network_history_path}",
+                flush=True,
+            )
         progress_reporter = (
             TransportProgressReporter(self.out_file) if mesh.comm.rank == 0 else None
         )
@@ -2019,7 +3614,16 @@ class TransportSolver:
             c_in.value = dfx.default_scalar_type(self._inlet_concentration(t))
             self._update_mm_consumption_rate(mm_rate, c_old, organoid_indicator)
 
-            if self._update_velocity_for_time(t):
+            if self.couple_1d_transport:
+                history_start = len(self.network_history)
+                self._advance_coupled_networks(
+                    t,
+                    float(c_in.value),
+                    float(c_marker_32.value),
+                )
+
+            velocity_changed = self._update_velocity_for_time(t)
+            if velocity_changed:
                 A = assemble_matrix(a_form)
                 A.assemble()
                 solver.setOperators(A)
@@ -2027,6 +3631,25 @@ class TransportSolver:
                 A = assemble_matrix(a_form)
                 A.assemble()
                 solver.setOperators(A)
+
+            # A static velocity is written once; a time-dependent imported
+            # velocity is written after every interpolation update. These are
+            # the exact scaled coefficient values used by the transport form.
+            if velocity_debug_out is not None and (step == 0 or velocity_changed):
+                velocity_magnitude.interpolate(velocity_magnitude_expression)
+                velocity_magnitude.x.scatter_forward()
+                velocity_debug_out.write_function(self.velocity, t)
+                velocity_magnitude_debug_out.write_function(velocity_magnitude, t)
+                debug_rows = self._velocity_debug_rows(t, ds_tagged, dS_tagged)
+                if mesh.comm.rank == 0:
+                    if velocity_debug_csv_writer is None:
+                        velocity_debug_csv_writer = csv.DictWriter(
+                            velocity_debug_csv_stream,
+                            fieldnames=list(debug_rows[0].keys()),
+                        )
+                        velocity_debug_csv_writer.writeheader()
+                    velocity_debug_csv_writer.writerows(debug_rows)
+                    velocity_debug_csv_stream.flush()
 
             b.zeroEntries()
             assemble_vector(b, L_form)
@@ -2036,9 +3659,29 @@ class TransportSolver:
 
             solver.solve(b, c_h.x.petsc_vec)
             c_h.x.scatter_forward()
+            if self.couple_1d_transport:
+                self._update_coupled_terminal_diffusive_fluxes(
+                    c_h,
+                    D,
+                    ds_tagged,
+                    dS_tagged,
+                    h,
+                    terminal_alpha,
+                    t,
+                    float(c_in.value),
+                    float(c_marker_32.value),
+                )
+                if mesh.comm.rank == 0:
+                    network_history_writer.update(
+                        self.network_history[history_start:]
+                    )
+                    arterial_network_writer.write(t)
+                    venous_network_writer.write(t)
             c_old.x.array[:] = c_h.x.array
 
             c_out.interpolate(c_h)
+            # c_out.x.array[:] = c_h.x.array
+            # c_out.x.scatter_forward()
             critical_stats = self._critical_oxygen_stats(
                 c_h,
                 organoid_indicator,
@@ -2135,6 +3778,8 @@ class TransportSolver:
 
         if progress_reporter is not None:
             progress_reporter.close()
+        if network_history_writer is not None:
+            network_history_writer.close()
 
         if vtk_out is not None:
             vtk_out.close()
@@ -2142,6 +3787,12 @@ class TransportSolver:
             vtk_critical_out.close()
         if vtk_consumption_out is not None:
             vtk_consumption_out.close()
+        if velocity_debug_out is not None:
+            velocity_debug_out.close()
+        if velocity_magnitude_debug_out is not None:
+            velocity_magnitude_debug_out.close()
+        if velocity_debug_csv_stream is not None:
+            velocity_debug_csv_stream.close()
 
         if write_xdmf:
             if xdmf_out is not None:
@@ -2185,6 +3836,19 @@ class TransportSolver:
                     else ""
                 ),
                 "time_history_csv": str(progress_reporter.csv_path),
+                "network_terminal_history_csv": (
+                    str(network_history_path) if self.couple_1d_transport else ""
+                ),
+                "arterial_network_pvd": (
+                    str(arterial_network_pvd_path)
+                    if self.couple_1d_transport
+                    else ""
+                ),
+                "venous_network_pvd": (
+                    str(venous_network_pvd_path)
+                    if self.couple_1d_transport
+                    else ""
+                ),
                 "rates_figure": str(progress_reporter.rates_path),
                 "cumulative_figure": str(progress_reporter.cumulative_path),
                 "organoid_below_critical_figure": str(
@@ -2284,7 +3948,14 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
             critical_output_file=args.critical_output_file,
             consumption_output_file=args.consumption_output_file,
             critical_summary_file=args.critical_summary_file,
+            velocity_debug_output_file=args.velocity_debug_output_file,
             output_format=args.output_format,
+            branching_in_file=args.branching_in_file,
+            branching_out_file=args.branching_out_file,
+            couple_1d_transport=args.coupled_1d_transport,
+            network_cells_per_segment=args.network_cells_per_segment,
+            network_coupling_relaxation=args.network_coupling_relaxation,
+            network_initial_concentration=args.network_initial_concentration,
         )
 
     return TransportSolver(
@@ -2325,7 +3996,22 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
         critical_summary_file=_resolve_output_path(args.critical_summary_file, organoid_id, batch_mode)
         if args.critical_summary_file
         else "",
+        velocity_debug_output_file=_resolve_output_path(
+            args.velocity_debug_output_file, organoid_id, batch_mode
+        )
+        if args.velocity_debug_output_file
+        else "",
         output_format=args.output_format,
+        branching_in_file=_resolve_organoid_path(args.branching_in_file, organoid_id)
+        if args.branching_in_file
+        else "",
+        branching_out_file=_resolve_organoid_path(args.branching_out_file, organoid_id)
+        if args.branching_out_file
+        else "",
+        couple_1d_transport=args.coupled_1d_transport,
+        network_cells_per_segment=args.network_cells_per_segment,
+        network_coupling_relaxation=args.network_coupling_relaxation,
+        network_initial_concentration=args.network_initial_concentration,
     )
 
 
@@ -2364,6 +4050,22 @@ if __name__ == "__main__":
         help="1D outlet flow checkpoint BP file.",
     )
     ap.add_argument(
+        "--branching-in-file",
+        default="",
+        help=(
+            "Arterial branchingData CSV used to orient embedded terminal faces. "
+            "Defaults to branchingData_0.csv beside the organoid geometry directory."
+        ),
+    )
+    ap.add_argument(
+        "--branching-out-file",
+        default="",
+        help=(
+            "Venous branchingData CSV used to orient embedded terminal faces. "
+            "Defaults to branchingData_1.csv beside the organoid geometry directory."
+        ),
+    )
+    ap.add_argument(
         "--vel-file",
         default="/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/coupling-output/run_20/organoid_3/out_darcy/u_p0_000000.vtu",
         help="Darcy velocity file. Accepts legacy VTU or batched transient u.xdmf; XDMF is converted and cached as u_p0_000000.vtu.",
@@ -2388,6 +4090,41 @@ if __name__ == "__main__":
         "--skip-1d",
         action="store_true",
         help="Disable synthetic terminal exchange and run transport using only concave-wall exchange.",
+    )
+    ap.add_argument(
+        "--coupled-1d-transport",
+        action="store_true",
+        help=(
+            "Solve advection-diffusion on both arterial and venous branching "
+            "networks and impose their terminal concentrations on the matching "
+            "3D terminal faces. The 3D Nitsche diffusive reactions are relaxed "
+            "and returned to the next 1D solves. Existing terminal-only "
+            "conditions remain the default when omitted."
+        ),
+    )
+    ap.add_argument(
+        "--network-cells-per-segment",
+        type=int,
+        default=1000,
+        help="Finite-volume intervals per branchingData segment (default: 1000).",
+    )
+    ap.add_argument(
+        "--network-coupling-relaxation",
+        type=float,
+        default=0.1,
+        help=(
+            "Relaxation applied to the 3D numerical diffusive flux before it is "
+            "used by the next 1D solve; must be in (0, 1] (default: 0.3)."
+        ),
+    )
+    ap.add_argument(
+        "--network-initial-concentration",
+        type=float,
+        default=0.0,
+        help=(
+            "Initial arterial and venous lumen concentration in mol/cm^3 "
+            "(default: 0)."
+        ),
     )
     ap.add_argument(
         "--diffusion-only",
@@ -2497,6 +4234,17 @@ if __name__ == "__main__":
         "--critical-summary-file",
         default="",
         help="Optional JSON path for critical-oxygen volume/time-series summary.",
+    )
+    ap.add_argument(
+        "--velocity-debug-output-file",
+        default="",
+        help=(
+            "Optional PVD path for the exact imported, time-interpolated, and "
+            "scaled Darcy velocity used by the transport form. Also writes a "
+            "velocity-magnitude PVD and a per-surface flow-audit CSV. Static "
+            "velocity is written once; transient velocity is written whenever "
+            "the imported field is updated."
+        ),
     )
     ap.add_argument(
         "--output-format",
