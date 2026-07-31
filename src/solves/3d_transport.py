@@ -924,10 +924,10 @@ class TransportSolver:
     PAPER_D_WATER_CM2_PER_S = 3.0e-5
     PAPER_C_IN_MOL_PER_CM3 = 2.0e-7
     PAPER_C_CRIT_MOL_PER_CM3 = 4.0e-8
-    # PAPER_KM_MOL_PER_CM3 = 5.0e-9
-    PAPER_KM_MOL_PER_CM3 = 2.01e-7
-    # PAPER_VMAX_MOL_PER_CM3_S = 2.0e-9
-    PAPER_VMAX_MOL_PER_CM3_S = 6.93e-9
+    PAPER_KM_MOL_PER_CM3 = 5e-9
+    # PAPER_KM_MOL_PER_CM3 = 1.5e-7
+    PAPER_VMAX_MOL_PER_CM3_S = 2e-9
+    # PAPER_VMAX_MOL_PER_CM3_S = 6.93e-9
     PAPER_CRITICAL_TRANSITION_WIDTH_MOL_PER_CM3 = 0.5 * PAPER_C_CRIT_MOL_PER_CM3
     VELOCITY_SCALE_FACTOR = 82.5065
     # VELOCITY_SCALE_FACTOR = 1.0
@@ -1402,7 +1402,7 @@ class TransportSolver:
                 self.network_initial_concentration
             ),
             "network_coupling_scheme": (
-                "directional_arterial_1d_to_3d_to_venous_1d_with_3d_face_concentration_imposition"
+                "directional_arterial_1d_concentration_imposition_without_diffusive_feedback_to_3d_to_venous_1d"
                 if self.couple_1d_transport
                 else "disabled"
             ),
@@ -1412,12 +1412,12 @@ class TransportSolver:
             "arterial_synthetic_terminal_bc": (
                 "disabled_skip_1d"
                 if self.skip_1d
-                else "1d_terminal_concentration_plus_matched_advection_and_nitsche_diffusion"
+                else "1d_terminal_concentration_nitsche_imposition_plus_advective_flux_no_1d_diffusive_feedback"
                 if self.couple_1d_transport
                 else "danckwerts_prescribed_total_flux"
             ),
             "arterial_synthetic_terminal_total_flux": (
-                "Q*C_terminal plus lagged 3D numerical diffusive flux"
+                "Q*C_terminal plus 3D Nitsche concentration-imposition flux; Nitsche reaction is reported as applied 3D flux but not returned to 1D"
                 if self.couple_1d_transport
                 else "(Q/A)*c_feed; zero total species flux when Q=0"
             ),
@@ -2515,11 +2515,13 @@ class TransportSolver:
         Assemble facet exchange terms.
 
         In coupled 1D mode, arterial terminal concentrations are imposed on the
-        3D tissue-facing trace with Nitsche diffusion terms. Venous terminals
-        use local advective outflow; their 3D trace is sampled after the solve
-        and imposed as the downstream 1D inflow concentration. Outside coupled
-        mode, arterial terminals use a Danckwerts prescribed-total-flux
-        condition and venous terminals use local advective outflow.
+        3D tissue-facing trace with Nitsche terms and also set the advective
+        injection Q*c_terminal. The resulting 3D Nitsche reaction is not fed
+        back as an additional 1D terminal loss. Venous terminals use local
+        advective outflow; their 3D trace is sampled after the solve and imposed
+        as the downstream 1D inflow concentration. Outside coupled mode, arterial
+        terminals use a Danckwerts prescribed-total-flux condition and venous
+        terminals use local advective outflow.
 
         Exterior markers use ds(marker); interior embedded markers use the
         branching-oriented distal trace on dS(marker).
@@ -2535,9 +2537,8 @@ class TransportSolver:
             self._coupled_terminal_flux_constants = {"inlet": [], "outlet": []}
 
             # Arterial network is upstream: solve it first and impose its
-            # terminal concentrations on the 3D tissue-facing trace.  The
-            # Nitsche reaction is the arterial diffusive flux returned to the
-            # next arterial solve.
+            # terminal concentrations on the 3D tissue-facing trace, while also
+            # prescribing the advective species flux Q*c_terminal.
             for data in self.inlet_exchange:
                 marker = int(data["marker"])
                 boundary_concentration = fem.Constant(
@@ -2671,7 +2672,8 @@ class TransportSolver:
 
         network = self.network_inlet
         marker_to_terminal = self.inlet_marker_to_network_terminal
-        marker_diffusive_rates = self._coupled_terminal_diffusive_rates["inlet"]
+        marker_diffusive_rates = np.zeros(len(self.inlet_exchange), dtype=float)
+        self._coupled_terminal_diffusive_rates["inlet"] = marker_diffusive_rates
         network_diffusive_rates = np.empty(len(network.terminal_nodes), dtype=float)
         for marker_index, network_terminal in enumerate(marker_to_terminal):
             network_diffusive_rates[int(network_terminal)] = (
@@ -2695,7 +2697,6 @@ class TransportSolver:
             constant.value = dfx.default_scalar_type(terminal_concentration)
             marker_total_rates[marker_index] = (
                 float(data["flow_raw"]) * terminal_concentration
-                + marker_diffusive_rates[marker_index]
             )
         self._coupled_terminal_marker_rates["inlet"] = marker_total_rates
 
@@ -2777,20 +2778,20 @@ class TransportSolver:
         self, c_h, D, ds_tagged, dS_tagged, h, alpha,
         time_value, arterial_root_concentration, venous_root_concentration
     ):
-        """Return 3D terminal diffusive reactions to the lagged 1D solves."""
+        """Update coupled terminal diagnostics after the 3D solve."""
         if not self.couple_1d_transport:
             return
-        relaxation = float(self.network_coupling_relaxation)
         iteration = int(np.rint(float(time_value) / self.dt))
 
-        # Arterial: concentration came from 1D; the 3D Nitsche reaction is the
-        # new diffusive flux returned to the next arterial solve.
+        # Arterial: concentration came from 1D and is imposed on the 3D terminal
+        # faces to maintain concentration continuity.  We still do not feed the
+        # 3D Nitsche reaction back as an extra 1D terminal loss; the 1D artery is
+        # treated as an upstream concentration source.  The reaction is still a
+        # real 3D boundary flux, so include it in the reported/applied 3D rate.
         arterial_trace = self._terminal_face_concentrations(
             c_h, self.inlet_exchange, ds_tagged, dS_tagged
         )
-        arterial_imposed_diffusion = self._coupled_terminal_diffusive_rates[
-            "inlet"
-        ].copy()
+        arterial_imposed_diffusion = np.zeros(len(self.inlet_exchange), dtype=float)
         arterial_returned_diffusion = self._terminal_diffusive_flux_rates(
             c_h,
             D,
@@ -2801,13 +2802,8 @@ class TransportSolver:
             h,
             alpha,
         )
-        arterial_next_diffusion = (
-            relaxation * arterial_returned_diffusion
-            + (1.0 - relaxation) * arterial_imposed_diffusion
-        )
-        self._coupled_terminal_diffusive_rates["inlet"] = (
-            arterial_next_diffusion
-        )
+        arterial_next_diffusion = np.zeros(len(self.inlet_exchange), dtype=float)
+        self._coupled_terminal_diffusive_rates["inlet"] = arterial_next_diffusion
         arterial_applied_rates = np.empty(len(self.inlet_exchange), dtype=float)
         for marker_index, data in enumerate(self.inlet_exchange):
             network_terminal = int(
@@ -2819,9 +2815,7 @@ class TransportSolver:
                 ]
             )
             advective_rate = float(data["flow_raw"] * terminal_concentration)
-            network_total_rate = advective_rate + arterial_imposed_diffusion[
-                marker_index
-            ]
+            network_total_rate = advective_rate
             applied_3d_rate = advective_rate + arterial_returned_diffusion[
                 marker_index
             ]
@@ -4096,10 +4090,13 @@ if __name__ == "__main__":
         action="store_true",
         help=(
             "Solve advection-diffusion on both arterial and venous branching "
-            "networks and impose their terminal concentrations on the matching "
-            "3D terminal faces. The 3D Nitsche diffusive reactions are relaxed "
-            "and returned to the next 1D solves. Existing terminal-only "
-            "conditions remain the default when omitted."
+            "networks. Arterial terminal concentrations are imposed on the "
+            "3D synthetic faces and also set the advective injection "
+            "Q*c_terminal, but the resulting 3D Nitsche reaction is diagnostic "
+            "only and is not returned as an extra 1D terminal loss. Venous 3D "
+            "terminal concentrations are sampled after the 3D solve and imposed "
+            "on the venous 1D network. Existing terminal-only conditions remain "
+            "the default when omitted."
         ),
     )
     ap.add_argument(
@@ -4111,10 +4108,11 @@ if __name__ == "__main__":
     ap.add_argument(
         "--network-coupling-relaxation",
         type=float,
-        default=0.1,
+        default=1.0,
         help=(
-            "Relaxation applied to the 3D numerical diffusive flux before it is "
-            "used by the next 1D solve; must be in (0, 1] (default: 0.3)."
+            "Legacy relaxation for diffusive 1D/3D terminal feedback. The "
+            "current open-terminal coupled model does not return synthetic "
+            "terminal diffusive fluxes, so this is a no-op for those terminals."
         ),
     )
     ap.add_argument(
