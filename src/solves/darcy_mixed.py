@@ -383,7 +383,35 @@ class PerfusionSolver(CGPerfusionSolver):
 
         return L_flux
 
-    def _build_embedded_port_flow_rhs(self, v, inlet_marks, inlet_q_in, outlet_marks, outlet_q_out):
+    def _embedded_tissue_trace(self, argument, marker: int, kind: str):
+        """Select the cell beyond an embedded terminal along its vessel axis.
+
+        The terminal facet is internal to the Darcy mesh, so ``+``/``-`` are
+        arbitrary mesh orientations.  The proximal-to-distal direction from
+        branchingData identifies the tissue-facing cell in the same way as the
+        embedded-facet treatment in 3d_transport.py.
+        """
+        direction = self._marker_distal_direction_constant(marker, kind)
+        if direction is None:
+            raise RuntimeError(
+                f"Embedded {kind} terminal marker {int(marker)} has no valid "
+                "proximal-to-distal branching direction. Pass the corresponding "
+                "--branching-*-file option."
+            )
+        self._validate_embedded_marker_direction(marker, kind)
+        n = ufl.FacetNormal(self.mesh)
+        use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+        return ufl.conditional(use_minus, argument("-"), argument("+"))
+
+    def _build_embedded_port_flow_rhs(
+        self, v, inlet_marks, inlet_q_in, outlet_marks, outlet_q_out
+    ):
+        """Apply embedded terminal flow to the vessel-oriented tissue trace.
+
+        Positive arterial flow is a tissue source and positive venous flow is
+        a tissue sink.  Unlike ``avg(v)``, the selected trace deposits/removes
+        the complete terminal rate on only the distal, tissue-facing side.
+        """
         mesh = self.mesh
         dS = ufl.Measure("dS", domain=mesh, subdomain_data=self.facet_tags)
         one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
@@ -393,13 +421,15 @@ class PerfusionSolver(CGPerfusionSolver):
             area = float(mesh.comm.allreduce(fem.assemble_scalar(fem.form(one * dS(int(m)))), op=MPI.SUM))
             g_val = float(Q_in) / area if area > 0.0 else 0.0
             g = fem.Constant(mesh, dfx.default_scalar_type(g_val))
-            L_ports += g * ufl.avg(v) * dS(int(m))
+            v_tissue = self._embedded_tissue_trace(v, int(m), "inlet")
+            L_ports += g * v_tissue * dS(int(m))
 
         for m, Q_out in zip(np.asarray(outlet_marks, dtype=int), np.asarray(outlet_q_out, dtype=float)):
             area = float(mesh.comm.allreduce(fem.assemble_scalar(fem.form(one * dS(int(m)))), op=MPI.SUM))
             g_val = float(Q_out) / area if area > 0.0 else 0.0
             g = fem.Constant(mesh, dfx.default_scalar_type(g_val))
-            L_ports += -g * ufl.avg(v) * dS(int(m))
+            v_tissue = self._embedded_tissue_trace(v, int(m), "outlet")
+            L_ports += -g * v_tissue * dS(int(m))
 
         return L_ports
 
@@ -686,6 +716,12 @@ class PerfusionSolver(CGPerfusionSolver):
     def _build_terminal_port_normal_maps(self):
         inlet_marks, outlet_marks, inlet_c, outlet_c, _idx_in, _idx_out = self._get_terminal_marker_data()
 
+        inlet_distal_directions = self._get_branch_port_normals(
+            inlet_c, self.branch_coords_in, self.branch_normals_in, outward=False
+        )
+        outlet_distal_directions = self._get_branch_port_normals(
+            outlet_c, self.branch_coords_out, self.branch_normals_out, outward=False
+        )
         inlet_normals = self._get_branch_port_normals(
             inlet_c, self.branch_coords_in, self.branch_normals_in, outward=True
         )
@@ -699,6 +735,90 @@ class PerfusionSolver(CGPerfusionSolver):
         self._outlet_port_normal_by_marker = {
             int(m): np.asarray(n, dtype=float) for m, n in zip(outlet_marks, outlet_normals)
         }
+        self._inlet_distal_direction_by_marker = {
+            int(m): np.asarray(n, dtype=float)
+            for m, n in zip(inlet_marks, inlet_distal_directions)
+        }
+        self._outlet_distal_direction_by_marker = {
+            int(m): np.asarray(n, dtype=float)
+            for m, n in zip(outlet_marks, outlet_distal_directions)
+        }
+
+    def _marker_distal_direction_vector(self, marker: int, kind: str):
+        marker = int(marker)
+        if kind == "inlet":
+            vec = getattr(self, "_inlet_distal_direction_by_marker", {}).get(marker)
+        elif kind == "outlet":
+            vec = getattr(self, "_outlet_distal_direction_by_marker", {}).get(marker)
+        else:
+            raise ValueError(f"Unknown embedded terminal kind: {kind}")
+        if vec is None:
+            return None
+        vec = np.asarray(vec, dtype=float).reshape(-1)
+        norm = float(np.linalg.norm(vec))
+        if (
+            vec.size != self.mesh.geometry.dim
+            or not np.all(np.isfinite(vec))
+            or not np.isfinite(norm)
+            or norm <= 0.0
+        ):
+            return None
+        return vec / norm
+
+    def _marker_distal_direction_constant(self, marker: int, kind: str):
+        vec = self._marker_distal_direction_vector(marker, kind)
+        if vec is None:
+            return None
+        return fem.Constant(
+            self.mesh,
+            dfx.default_scalar_type(tuple(float(value) for value in vec)),
+        )
+
+    def _validate_embedded_marker_direction(self, marker: int, kind: str):
+        """Reject a branch axis that is nearly tangent to its terminal face."""
+        marker = int(marker)
+        cache = getattr(self, "_validated_embedded_marker_directions", set())
+        key = (kind, marker)
+        if key in cache:
+            return
+
+        direction = self._marker_distal_direction_vector(marker, kind)
+        if direction is None:
+            return
+
+        fdim = self.mesh.topology.dim - 1
+        gdim = self.mesh.geometry.dim
+        weighted_alignment = 0.0
+        total_weight = 0.0
+        for facet in np.asarray(self.facet_tags.find(marker), dtype=np.int32):
+            points = self._entity_geometry_points(
+                self.mesh, fdim, int(facet), gdim
+            )
+            if points.shape[0] < 3:
+                continue
+            raw_normal = np.cross(points[1] - points[0], points[2] - points[0])
+            weight = float(np.linalg.norm(raw_normal))
+            if not np.isfinite(weight) or weight <= 0.0:
+                continue
+            weighted_alignment += abs(float(np.dot(raw_normal, direction)))
+            total_weight += weight
+
+        weighted_alignment = float(
+            self.mesh.comm.allreduce(weighted_alignment, op=MPI.SUM)
+        )
+        total_weight = float(self.mesh.comm.allreduce(total_weight, op=MPI.SUM))
+        mean_alignment = (
+            weighted_alignment / total_weight if total_weight > 0.0 else 0.0
+        )
+        if mean_alignment < 0.5:
+            raise RuntimeError(
+                f"Embedded {kind} terminal marker {marker} branching direction "
+                f"is poorly aligned with its facet normal "
+                f"(|axis dot normal|={mean_alignment:.3f})."
+            )
+
+        cache.add(key)
+        self._validated_embedded_marker_directions = cache
 
     def _marker_port_normal_constant(self, marker: int, kind: str):
         marker = int(marker)
@@ -973,23 +1093,40 @@ class PerfusionSolver(CGPerfusionSolver):
             q_vals.append(float(self.mesh.comm.allreduce(fem.assemble_scalar(fem.form(q_expr)), op=MPI.SUM)))
         return np.asarray(q_vals, dtype=float)
 
-    def _build_constraint_vectors(self, M, inlet_marks, bc_dofs):
+    def _build_constraint_vectors(self, M, constraints, bc_dofs):
         ds = ufl.Measure("ds", domain=self.mesh, subdomain_data=self.facet_tags)
         dS = ufl.Measure("dS", domain=self.mesh, subdomain_data=self.facet_tags)
         n = ufl.FacetNormal(self.mesh)
         w, _v = ufl.TestFunctions(M)
         c_vecs = []
 
-        for m in inlet_marks:
+        for constraint in constraints:
+            if isinstance(constraint, dict):
+                m = int(constraint["marker"])
+                kind = str(constraint.get("kind", "inlet"))
+                use_port_normal = bool(constraint.get("use_port_normal", False))
+            else:
+                # Backward-compatible path for the historical exterior-inlet
+                # constraints.
+                m = int(constraint)
+                kind = "inlet"
+                use_port_normal = False
             m_int = int(m)
             n_ext, n_int = self._marker_global_facet_counts(m_int)
             if n_ext <= 0 and n_int <= 0:
                 continue
             form_expr = None
             if n_ext > 0:
-                form_expr = ufl.dot(w, n) * ds(m_int)
+                if use_port_normal:
+                    n_port = self._marker_port_normal_constant(m_int, kind=kind)
+                    if n_port is None:
+                        form_expr = ufl.dot(w, n) * ds(m_int)
+                    else:
+                        form_expr = ufl.dot(w, n_port) * ds(m_int)
+                else:
+                    form_expr = ufl.dot(w, n) * ds(m_int)
             if n_int > 0:
-                n_port = self._marker_port_normal_constant(m_int, kind="inlet")
+                n_port = self._marker_port_normal_constant(m_int, kind=kind)
                 if n_port is None:
                     int_expr = ufl.dot(ufl.avg(w), n("+")) * dS(m_int)
                 else:
@@ -1375,14 +1512,22 @@ class PerfusionSolver(CGPerfusionSolver):
             if n_ext > 0:
                 area = _global_scalar(one * ds(marker))
                 p_int = _global_scalar(p_h * ds(marker))
-                ux = [_global_scalar(u_h[k] * ds(marker)) for k in range(gdim)]
-                q = _global_scalar(ufl.dot(u_h, n) * ds(marker))
+                if self.diagnostics_mode == "full":
+                    ux = [_global_scalar(u_h[k] * ds(marker)) for k in range(gdim)]
+                    q = _global_scalar(ufl.dot(u_h, n) * ds(marker))
+                else:
+                    ux = [0.0] * gdim
+                    q = 0.0
                 cnum = [_global_scalar(x[k] * ds(marker)) for k in range(3)]
             elif n_int > 0:
                 area = _global_scalar(one * dS(marker))
                 p_int = _global_scalar(p_h("+") * dS(marker))
-                ux = [_global_scalar(u_h[k]("+") * dS(marker)) for k in range(gdim)]
-                q = _global_scalar(ufl.dot(u_h("+"), n("+")) * dS(marker))
+                if self.diagnostics_mode == "full":
+                    ux = [_global_scalar(u_h[k]("+") * dS(marker)) for k in range(gdim)]
+                    q = _global_scalar(ufl.dot(u_h("+"), n("+")) * dS(marker))
+                else:
+                    ux = [0.0] * gdim
+                    q = 0.0
                 cnum = [_global_scalar(x[k]("+") * dS(marker)) for k in range(3)]
             else:
                 area = 0.0
@@ -1432,17 +1577,23 @@ class PerfusionSolver(CGPerfusionSolver):
         coords_in = np.asarray(coords_in, dtype=float).reshape((-1, 3)) if len(coords_in) else np.zeros((0, 3))
         coords_out = np.asarray(coords_out, dtype=float).reshape((-1, 3)) if len(coords_out) else np.zeros((0, 3))
         port_normals_in_raw = self._get_branch_port_normals(
-            coords_in, self.branch_coords_in, self.branch_normals_in, outward=False
+            coords_in, self.branch_coords_in, self.branch_normals_in, outward=True
         )
         port_normals_out_raw = self._get_branch_port_normals(
             coords_out, self.branch_coords_out, self.branch_normals_out, outward=True
         )
-        q_inlet_port_raw = self._compute_port_fluxes_with_normals(
-            u_h, inlet_marks, coords_in, port_normals_in_raw
-        )
-        q_outlet_port_raw = self._compute_port_fluxes_with_normals(
-            u_h, outlet_marks, coords_out, port_normals_out_raw
-        )
+        if self.diagnostics_mode == "full":
+            q_inlet_port_raw = self._compute_port_fluxes_with_normals(
+                u_h, inlet_marks, coords_in, port_normals_in_raw
+            )
+            q_outlet_port_raw = self._compute_port_fluxes_with_normals(
+                u_h, outlet_marks, coords_out, port_normals_out_raw
+            )
+            port_flux_diagnostic_mode = "assembled_port_normal_flux"
+        else:
+            q_inlet_port_raw = np.zeros(len(inlet_marks_arr), dtype=float)
+            q_outlet_port_raw = np.zeros(len(outlet_marks_arr), dtype=float)
+            port_flux_diagnostic_mode = "constraint_target_minimal"
 
         if self.diagnostics_mode == "full":
             f_h, _, _, _, _, cell_vol = self._compute_q_from_div_u(u_h)
@@ -1499,6 +1650,8 @@ class PerfusionSolver(CGPerfusionSolver):
                 p_inlet_parent = p_inlet_parent_marker[idx_in_branch] if len(p_inlet_parent_marker) else p_inlet_parent_marker
             q_inlet_target = q_inlet_target_marker[idx_in_branch] if len(q_inlet_target_marker) else q_inlet_target_marker
             q_inlet_target_in = np.abs(q_inlet_target)
+            if self.diagnostics_mode != "full":
+                q_inlet_port = q_inlet_target_in.copy()
         else:
             p_inlet = p_inlet_raw
             u_inlet = u_inlet_raw
@@ -1513,6 +1666,8 @@ class PerfusionSolver(CGPerfusionSolver):
             p_inlet_parent = p_inlet_parent_marker
             q_inlet_target = q_inlet_target_marker
             q_inlet_target_in = np.abs(q_inlet_target)
+            if self.diagnostics_mode != "full":
+                q_inlet_port = q_inlet_target_in.copy()
 
         if idx_out_branch is not None:
             p_outlet = p_outlet_raw[idx_out_branch]
@@ -1534,6 +1689,8 @@ class PerfusionSolver(CGPerfusionSolver):
             else:
                 p_outlet_parent = p_outlet_parent_marker[idx_out_branch] if len(p_outlet_parent_marker) else p_outlet_parent_marker
             q_outlet_target = q_outlet_target_marker[idx_out_branch] if len(q_outlet_target_marker) else q_outlet_target_marker
+            if self.diagnostics_mode != "full":
+                q_outlet_port = q_outlet_target.copy()
         else:
             p_outlet = p_outlet_raw
             u_outlet = u_outlet_raw
@@ -1547,6 +1704,8 @@ class PerfusionSolver(CGPerfusionSolver):
             p_outlet_target = p_outlet_target_marker
             p_outlet_parent = p_outlet_parent_marker
             q_outlet_target = q_outlet_target_marker
+            if self.diagnostics_mode != "full":
+                q_outlet_port = q_outlet_target.copy()
 
         expected_inlet_markers = np.arange(
             int(self.inlet_base_marker),
@@ -1575,6 +1734,7 @@ class PerfusionSolver(CGPerfusionSolver):
             "q_outlet": q_outlet.tolist(),
             "q_inlet_port_in": q_inlet_port.tolist(),
             "q_outlet_port_out": q_outlet_port.tolist(),
+            "port_flux_diagnostic_mode": str(port_flux_diagnostic_mode),
             "q_inlet_inward": (-q_inlet).tolist(),
             "divu_inlet": divu_in.tolist(),
             "divu_outlet": divu_out.tolist(),
@@ -1596,6 +1756,14 @@ class PerfusionSolver(CGPerfusionSolver):
             "coords_outlet": coords_out_final.tolist(),
             "port_normals_inlet": port_normals_in.tolist(),
             "port_normals_outlet": port_normals_out.tolist(),
+            "embedded_terminal_flow_application": (
+                "branch_oriented_distal_tissue_trace"
+            ),
+            "embedded_terminal_flow_note": (
+                "Embedded arterial sources and venous sinks are applied to "
+                "the one-sided tissue trace selected by each terminal's "
+                "proximal-to-distal branching direction."
+            ),
             "terminal_markers_inlet_unique": inlet_marks_arr.tolist(),
             "terminal_markers_outlet_unique": outlet_marks_arr.tolist(),
             "terminal_markers_inlet": np.asarray(markers_in_final, dtype=int).tolist(),
@@ -1835,13 +2003,47 @@ class PerfusionSolver(CGPerfusionSolver):
         outlet_marks_int = np.asarray(outlet_marks, dtype=int)[outlet_int_mask]
         q_out_target_int = np.asarray(q_out_target_out, dtype=float)[outlet_int_mask]
 
+        flux_constraints = []
+        flux_constraint_targets = []
+        for marker, target in zip(inlet_marks_ext, q_target_ext):
+            flux_constraints.append(
+                {
+                    "marker": int(marker),
+                    "kind": "inlet",
+                    "use_port_normal": False,
+                    "description": "exterior_inlet_normal_flux",
+                }
+            )
+            flux_constraint_targets.append(float(target))
+        for marker, target in zip(inlet_marks_int, q_in_target_int):
+            flux_constraints.append(
+                {
+                    "marker": int(marker),
+                    "kind": "inlet",
+                    "use_port_normal": True,
+                    "description": "embedded_inlet_port_flux_into_tissue",
+                }
+            )
+            flux_constraint_targets.append(float(target))
+        for marker, target in zip(outlet_marks_int, q_out_target_int):
+            flux_constraints.append(
+                {
+                    "marker": int(marker),
+                    "kind": "outlet",
+                    "use_port_normal": True,
+                    "description": "embedded_outlet_port_flux_out_of_tissue",
+                }
+            )
+            flux_constraint_targets.append(float(target))
+        flux_constraint_targets = np.asarray(flux_constraint_targets, dtype=float)
+
         L += self._build_embedded_port_flow_rhs(v, inlet_marks_int, q_in_target_int, outlet_marks_int, q_out_target_int)
         if mesh.comm.rank == 0:
             print("[solve] Assembling mixed Darcy system", flush=True)
         t0 = time.perf_counter()
         A, b, _ = self._assemble_system(a, L, bcs)
         bc_dofs = self._collect_bc_dofs(bcs)
-        c_vecs = self._build_constraint_vectors(M, inlet_marks_ext, bc_dofs)
+        c_vecs = self._build_constraint_vectors(M, flux_constraints, bc_dofs)
         if mesh.comm.rank == 0:
             print(
                 f"[solve] Assembly complete in {time.perf_counter() - t0:.2f}s; "
@@ -1872,12 +2074,12 @@ class PerfusionSolver(CGPerfusionSolver):
                 flush=True,
             )
 
-        nt = len(inlet_marks_ext)
+        nt = len(flux_constraints)
         S = np.zeros((nt, nt), dtype=float)
         rhs = np.zeros(nt, dtype=float)
 
         for i in range(nt):
-            rhs[i] = q_target_ext[i] - c_vecs[i].dot(z0)
+            rhs[i] = flux_constraint_targets[i] - c_vecs[i].dot(z0)
             for j in range(nt):
                 S[i, j] = c_vecs[i].dot(z_list[j])
 
@@ -1973,6 +2175,47 @@ class PerfusionSolver(CGPerfusionSolver):
         t0 = time.perf_counter()
         interface_bc = self._compute_interface_bc(p_h, u_h, q_src, Q_art_leak, Q_ven_leak)
         p_ref, p_ref_model = self._compute_pressure_reference(p_h, Kfun)
+        interface_bc["embedded_terminal_flux_constraint"] = (
+            "branch_oriented_integral_flux_constraint"
+        )
+        interface_bc["terminal_flux_constraint_count"] = int(len(flux_constraints))
+        interface_bc["terminal_flux_constraint_descriptions"] = [
+            str(item.get("description", "")) for item in flux_constraints
+        ]
+        interface_bc["terminal_flux_constraint_markers"] = [
+            int(item.get("marker", -1)) for item in flux_constraints
+        ]
+        interface_bc["terminal_flux_constraint_targets"] = (
+            np.asarray(flux_constraint_targets, dtype=float).tolist()
+        )
+        q_in_port_check = np.asarray(interface_bc.get("q_inlet_port_in", []), dtype=float)
+        q_in_target_check = np.asarray(interface_bc.get("q_inlet_target_in", []), dtype=float)
+        q_out_port_check = np.asarray(interface_bc.get("q_outlet_port_out", []), dtype=float)
+        q_out_target_check = np.asarray(interface_bc.get("q_outlet_target_out", []), dtype=float)
+        if len(q_in_port_check) == len(q_in_target_check):
+            interface_bc["q_inlet_port_residual"] = (
+                q_in_port_check - q_in_target_check
+            ).tolist()
+        if len(q_out_port_check) == len(q_out_target_check):
+            interface_bc["q_outlet_port_residual"] = (
+                q_out_port_check - q_out_target_check
+            ).tolist()
+        port_residual = 0.0
+        port_scale = 0.0
+        if len(q_in_port_check) == len(q_in_target_check):
+            port_residual += float(np.sum(q_in_port_check - q_in_target_check))
+            port_scale += float(
+                np.sum(np.abs(q_in_port_check)) + np.sum(np.abs(q_in_target_check))
+            )
+        if len(q_out_port_check) == len(q_out_target_check):
+            port_residual += float(np.sum(q_out_port_check - q_out_target_check))
+            port_scale += float(
+                np.sum(np.abs(q_out_port_check)) + np.sum(np.abs(q_out_target_check))
+            )
+        interface_bc["mass_balance_direct_port_residual"] = float(port_residual)
+        interface_bc["mass_balance_direct_port_relative"] = (
+            abs(float(port_residual)) / port_scale if port_scale > 0.0 else 0.0
+        )
         interface_bc["p_reference_model"] = p_ref_model
         interface_bc["p_tissue_reference_pressure"] = float(p_ref)
         interface_bc["p_inlet_reference"] = [float(p_ref)] * len(interface_bc.get("p_inlet_nodes", []))
@@ -1983,10 +2226,11 @@ class PerfusionSolver(CGPerfusionSolver):
             interface_bc.update(self._build_mass_balance_report(interface_bc, boundary_audit, Q_tot))
         else:
             interface_bc["diagnostics_mode"] = "minimal"
-            interface_bc["mass_balance_direct_port_relative"] = 0.0
             interface_bc["mass_balance_note"] = (
                 "Full boundary audit and mass-balance diagnostics disabled for fast coupling. "
-                "Run with --diagnostics-mode full to restore them."
+                "Direct embedded-port residuals are still reported from "
+                "q_*_port_* minus q_*_target_*; run with --diagnostics-mode full "
+                "for the full boundary audit."
             )
 
         if mesh.comm.rank == 0:
