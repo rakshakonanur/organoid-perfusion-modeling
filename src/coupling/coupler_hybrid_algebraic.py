@@ -1826,13 +1826,18 @@ def _apply_q_error_sensitivity_scaling(
             local_gain = venous_gain
 
         # Always-on normalized EMA sensitivity magnitude with direction from
-        # the current mismatch sign.
+        # the current mismatch sign.  Do not apply the per-terminal trust
+        # region cap here: branch redistribution, alternate-side damping, and
+        # side common-mode control can still change the composed move.  The
+        # trust-region cap is applied later to the final terminal delta.
         delta_mag = local_gain * abs(float(error)) / float(slope_mag)
         delta_secant = -math.copysign(delta_mag, float(error))
         if not _finite(delta_secant):
             continue
-        delta_secant = max(-adaptive_cap, min(adaptive_cap, delta_secant))
         new_delta = float(delta_secant)
+        plan["hybrid_branch_trust_region_cap"] = float(adaptive_cap)
+        plan["hybrid_q_error_sensitivity_delta_uncapped"] = float(new_delta)
+        plan["hybrid_sensitivity_delta_uncapped"] = float(new_delta)
         plan["hybrid_q_error_sensitivity_slope"] = float(slope_mag)
         plan["hybrid_q_error_sensitivity_sign_consistency"] = float(sign_consistency)
         plan["hybrid_q_error_sensitivity_sample_count"] = float(sample_count)
@@ -1895,27 +1900,81 @@ def _project_branch_secant_to_side_redistribution(
 
     for (_organoid_idx, _side_label), side_plans in grouped.items():
         usable: list[tuple[dict[str, Any], float, float]] = []
-        weighted_sum = 0.0
-        weight_total = 0.0
         for plan in side_plans:
             delta = float(plan.get("delta_log", float("nan")))
-            weight = abs(float(plan.get("q_drive", 0.0)))
-            if not (_finite(delta) and _finite(weight) and weight > sys.float_info.min):
+            raw_weight = abs(float(plan.get("q_drive", 0.0)))
+            if not (_finite(delta) and _finite(raw_weight) and raw_weight > sys.float_info.min):
                 continue
-            usable.append((plan, delta, weight))
-            weighted_sum += weight * delta
-            weight_total += weight
-        if not usable or weight_total <= sys.float_info.min:
+            usable.append((plan, delta, raw_weight))
+        if not usable:
             continue
 
+        # Use clipped-flow weights for the projection common mode.  Raw
+        # flow-weighted projection can let one runaway high-flow venous
+        # terminal dominate the side common-mode estimate and subtract away
+        # almost all of its own corrective branch move.  Clipping at the side
+        # median preserves some flow awareness without giving the current
+        # dominant branch veto power over branch-specific redistribution.
+        positive_weights = sorted(weight for _plan, _delta, weight in usable)
+        clip_weight = float(positive_weights[len(positive_weights) // 2])
+        weighted_sum = 0.0
+        weight_total = 0.0
+        clipped_usable: list[tuple[dict[str, Any], float, float, float]] = []
+        for plan, delta, raw_weight in usable:
+            projection_weight = min(float(raw_weight), float(clip_weight))
+            if not (_finite(projection_weight) and projection_weight > sys.float_info.min):
+                projection_weight = 1.0
+            clipped_usable.append((plan, delta, raw_weight, projection_weight))
+            weighted_sum += projection_weight * delta
+            weight_total += projection_weight
+        if weight_total <= sys.float_info.min:
+            continue
         common_mode_delta = float(weighted_sum / weight_total)
-        for plan, delta, _weight in usable:
+        for plan, delta, raw_weight, projection_weight in clipped_usable:
             redistribution_delta = float(delta - common_mode_delta)
             if abs(redistribution_delta - delta) > 1.0e-12:
                 _set_plan_q_target_from_delta(plan, redistribution_delta)
             plan["hybrid_branch_total_pre_projection_delta"] = float(delta)
             plan["hybrid_branch_common_mode_component"] = float(common_mode_delta)
             plan["hybrid_branch_redistribution_delta"] = float(redistribution_delta)
+            plan["hybrid_branch_projection_weight_raw"] = float(raw_weight)
+            plan["hybrid_branch_projection_weight"] = float(projection_weight)
+            plan["hybrid_branch_projection_weight_clip"] = float(clip_weight)
+            plan["hybrid_branch_projection_weight_mode"] = "flow_clipped_to_side_median"
+
+
+def _apply_final_trust_region_caps(plans: list[dict[str, Any]]) -> None:
+    """Clip the final composed terminal move to the terminal trust region.
+
+    The hybrid controller composes several log-flow corrections: branch
+    sensitivity, side redistribution, alternating-side damping, and optional
+    side-gauge common mode.  The adaptive cap should bound the final terminal
+    move that is actually handed to the algebraic 0D realization, not an
+    intermediate branch-only correction.
+    """
+
+    for plan in plans:
+        raw_delta = float(plan.get("delta_log", float("nan")))
+        cap = float(plan.get("adaptive_cap", float("nan")))
+        if not _finite(raw_delta):
+            continue
+        if not (_finite(cap) and cap > 0.0):
+            plan["hybrid_final_uncapped_delta_log10_q"] = float(raw_delta)
+            plan["hybrid_final_cap_delta_log10_q"] = float(raw_delta)
+            plan["hybrid_final_cap_applied"] = False
+            continue
+
+        cap = abs(float(cap))
+        clipped_delta = max(-cap, min(cap, float(raw_delta)))
+        plan["hybrid_branch_trust_region_cap"] = float(cap)
+        plan["hybrid_final_uncapped_delta_log10_q"] = float(raw_delta)
+        plan["hybrid_final_cap_delta_log10_q"] = float(clipped_delta)
+        plan["hybrid_final_cap_applied"] = bool(
+            abs(clipped_delta - raw_delta) > 1.0e-12
+        )
+        if abs(clipped_delta - raw_delta) > 1.0e-12:
+            _set_plan_q_target_from_delta(plan, float(clipped_delta))
+            plan["action"] = f"{plan['action']}_final_cap"
 
 
 def _apply_opposite_side_referenced_error_controller(
@@ -2754,6 +2813,12 @@ def _build_hybrid_override(config: argparse.Namespace):
                 q_error_sensitivity_map=side_median_sensitivity_map,
                 q_error_sensitivity_fallback_map=pending_state.get("side_median_q_error_sensitivity_fallback_map", {}),
             )
+        if (
+            not run2_equalization
+            and not coarse_deltap_scaling
+            and not post_deltap_probe_phase
+        ):
+            _apply_final_trust_region_caps(all_plans)
         full_model: SteadyResistiveZeroDModel | None = None
         try:
             full_model = SteadyResistiveZeroDModel.from_data(deck)
@@ -2860,6 +2925,9 @@ def _build_hybrid_override(config: argparse.Namespace):
             row["hybrid_q_error_sensitivity_source"] = str(
                 plan.get("hybrid_q_error_sensitivity_source", "")
             )
+            row["hybrid_q_error_sensitivity_delta_uncapped"] = float(
+                plan.get("hybrid_q_error_sensitivity_delta_uncapped", float("nan"))
+            )
             row["hybrid_branch_total_pre_projection_delta"] = float(
                 plan.get("hybrid_branch_total_pre_projection_delta", float("nan"))
             )
@@ -2868,6 +2936,18 @@ def _build_hybrid_override(config: argparse.Namespace):
             )
             row["hybrid_branch_redistribution_delta"] = float(
                 plan.get("hybrid_branch_redistribution_delta", float("nan"))
+            )
+            row["hybrid_branch_projection_weight_raw"] = float(
+                plan.get("hybrid_branch_projection_weight_raw", float("nan"))
+            )
+            row["hybrid_branch_projection_weight"] = float(
+                plan.get("hybrid_branch_projection_weight", float("nan"))
+            )
+            row["hybrid_branch_projection_weight_clip"] = float(
+                plan.get("hybrid_branch_projection_weight_clip", float("nan"))
+            )
+            row["hybrid_branch_projection_weight_mode"] = str(
+                plan.get("hybrid_branch_projection_weight_mode", "")
             )
             row["hybrid_side_median_pressure_error_raw"] = float(
                 plan.get("hybrid_side_median_pressure_error_raw", float("nan"))
@@ -2887,6 +2967,15 @@ def _build_hybrid_override(config: argparse.Namespace):
             row["hybrid_branch_trust_region_cap"] = float(
                 plan.get("hybrid_branch_trust_region_cap", float("nan"))
             )
+            row["hybrid_final_uncapped_delta_log10_q"] = float(
+                plan.get("hybrid_final_uncapped_delta_log10_q", float("nan"))
+            )
+            row["hybrid_final_cap_delta_log10_q"] = float(
+                plan.get("hybrid_final_cap_delta_log10_q", float("nan"))
+            )
+            row["hybrid_final_cap_applied"] = bool(
+                plan.get("hybrid_final_cap_applied", False)
+            )
             row["hybrid_postsolve_relaxation_alpha"] = float(
                 row.get("hybrid_postsolve_relaxation_alpha", float("nan"))
             )
@@ -2902,6 +2991,9 @@ def _build_hybrid_override(config: argparse.Namespace):
             )
             row["hybrid_sensitivity_slope"] = float(
                 plan.get("hybrid_sensitivity_slope", float("nan"))
+            )
+            row["hybrid_sensitivity_delta_uncapped"] = float(
+                plan.get("hybrid_sensitivity_delta_uncapped", float("nan"))
             )
             row["hybrid_sensitivity_sign_consistency"] = float(
                 plan.get("hybrid_sensitivity_sign_consistency", float("nan"))
