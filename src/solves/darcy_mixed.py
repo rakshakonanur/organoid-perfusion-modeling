@@ -1504,7 +1504,7 @@ class PerfusionSolver(CGPerfusionSolver):
             val = float(fem.assemble_scalar(fem.form(form_expr)))
             return float(comm.allreduce(val, op=MPI.SUM))
 
-        def _marker_stats(marker: int):
+        def _marker_stats(marker: int, kind: str):
             ext_facets, int_facets = self._split_marker_facets(marker)
             n_ext = int(comm.allreduce(int(ext_facets.size), op=MPI.SUM))
             n_int = int(comm.allreduce(int(int_facets.size), op=MPI.SUM))
@@ -1521,10 +1521,17 @@ class PerfusionSolver(CGPerfusionSolver):
                 cnum = [_global_scalar(x[k] * ds(marker)) for k in range(3)]
             elif n_int > 0:
                 area = _global_scalar(one * dS(marker))
-                p_int = _global_scalar(p_h("+") * dS(marker))
+                # Internal/embedded terminal facets have arbitrary mesh-side
+                # labels.  Use the same branch-oriented tissue trace used by
+                # the embedded terminal flux RHS, otherwise the pressure fed
+                # back to the 0D coupler can come from the wrong side of the
+                # embedded outlet/inlet.
+                p_trace = self._embedded_tissue_trace(p_h, int(marker), kind)
+                p_int = _global_scalar(p_trace * dS(marker))
                 if self.diagnostics_mode == "full":
-                    ux = [_global_scalar(u_h[k]("+") * dS(marker)) for k in range(gdim)]
-                    q = _global_scalar(ufl.dot(u_h("+"), n("+")) * dS(marker))
+                    u_trace = self._embedded_tissue_trace(u_h, int(marker), kind)
+                    ux = [_global_scalar(u_trace[k] * dS(marker)) for k in range(gdim)]
+                    q = _global_scalar(ufl.dot(ufl.avg(u_h), n("+")) * dS(marker))
                 else:
                     ux = [0.0] * gdim
                     q = 0.0
@@ -1551,7 +1558,7 @@ class PerfusionSolver(CGPerfusionSolver):
         q_inlet_raw = []
         coords_in = []
         for m in inlet_marks:
-            p_avg, u_avg, q_val, c = _marker_stats(int(m))
+            p_avg, u_avg, q_val, c = _marker_stats(int(m), "inlet")
             p_inlet_raw.append(p_avg)
             u_inlet_raw.append(u_avg)
             q_inlet_raw.append(q_val)
@@ -1562,7 +1569,7 @@ class PerfusionSolver(CGPerfusionSolver):
         q_outlet_raw = []
         coords_out = []
         for m in outlet_marks:
-            p_avg, u_avg, q_val, c = _marker_stats(int(m))
+            p_avg, u_avg, q_val, c = _marker_stats(int(m), "outlet")
             p_outlet_raw.append(p_avg)
             u_outlet_raw.append(u_avg)
             q_outlet_raw.append(q_val)
