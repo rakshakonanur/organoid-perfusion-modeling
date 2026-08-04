@@ -56,7 +56,7 @@ class Generate:
         self.parameters['outdir'] = kwargs.get('outdir',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation")
         self.parameters['folder'] = kwargs.get('folder','tmp')
         self.parameters['implicit_geometry'] = kwargs.get('implicit_geometry', 'stl')
-        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/different-shaped-domains/actual.stl")
+        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere/organoid-1.stl")
         self.parameters['sphere_center'] = np.asarray(kwargs.get('sphere_center', [0.0, 0.9, 0.55]), dtype=float)
         self.parameters['sphere_radius'] = float(kwargs.get('sphere_radius', 0.06))
         self.parameters['sphere_theta_resolution'] = int(kwargs.get('sphere_theta_resolution', 60))

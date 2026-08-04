@@ -450,7 +450,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trial-root", type=Path, default=REPO_SRC / "prep" / "prepped")
     parser.add_argument("--trial-name", default="")
     parser.add_argument("--prepared-root", type=Path, default=REPO_SRC / "prep" / "scaled-screening")
-    parser.add_argument("--prepared-name", default="")
+    parser.add_argument("--prepared-name", default="072826")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--build-combined-script", type=Path, default=REPO_SRC / "prep" / "build_combined_0d_v3.py")
     parser.add_argument("--run-and-split-script", type=Path, default=REPO_SRC / "prep" / "run_and_split_svzerod.py")
