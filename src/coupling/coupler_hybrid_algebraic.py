@@ -1827,9 +1827,9 @@ def _apply_q_error_sensitivity_scaling(
 
         # Always-on normalized EMA sensitivity magnitude with direction from
         # the current mismatch sign.  Do not apply the per-terminal trust
-        # region cap here: branch redistribution, alternate-side damping, and
-        # side common-mode control can still change the composed move.  The
-        # trust-region cap is applied later to the final terminal delta.
+        # region cap here: alternating-side damping and side common-mode
+        # control can still change the composed move.  The trust-region cap is
+        # applied later to the final terminal delta.
         delta_mag = local_gain * abs(float(error)) / float(slope_mag)
         delta_secant = -math.copysign(delta_mag, float(error))
         if not _finite(delta_secant):
@@ -1943,14 +1943,30 @@ def _project_branch_secant_to_side_redistribution(
             plan["hybrid_branch_projection_weight_mode"] = "flow_clipped_to_side_median"
 
 
+def _mark_branch_secant_projection_disabled(plans: list[dict[str, Any]]) -> None:
+    """Record that branch sensitivity was used without side redistribution projection."""
+
+    for plan in plans:
+        delta = float(plan.get("delta_log", float("nan")))
+        if not _finite(delta):
+            continue
+        plan["hybrid_branch_total_pre_projection_delta"] = float(delta)
+        plan["hybrid_branch_common_mode_component"] = 0.0
+        plan["hybrid_branch_redistribution_delta"] = float(delta)
+        plan["hybrid_branch_projection_weight_raw"] = float("nan")
+        plan["hybrid_branch_projection_weight"] = float("nan")
+        plan["hybrid_branch_projection_weight_clip"] = float("nan")
+        plan["hybrid_branch_projection_weight_mode"] = "disabled"
+
+
 def _apply_final_trust_region_caps(plans: list[dict[str, Any]]) -> None:
     """Clip the final composed terminal move to the terminal trust region.
 
     The hybrid controller composes several log-flow corrections: branch
-    sensitivity, side redistribution, alternating-side damping, and optional
-    side-gauge common mode.  The adaptive cap should bound the final terminal
-    move that is actually handed to the algebraic 0D realization, not an
-    intermediate branch-only correction.
+    sensitivity, alternating-side damping, and optional side-gauge common mode.
+    The adaptive cap should bound the final terminal move that is actually
+    handed to the algebraic 0D realization, not an intermediate branch-only
+    correction.
     """
 
     for plan in plans:
@@ -2108,7 +2124,7 @@ def _project_side_gauge_common_mode_sensitivity(
         branch_slopes = sorted(branch_slopes)
         return (
             float(branch_slopes[len(branch_slopes) // 2]),
-            "branch_projection",
+            "branch_sensitivity_median",
             float(len(branch_slopes)),
         )
 
@@ -2775,7 +2791,7 @@ def _build_hybrid_override(config: argparse.Namespace):
                 arterial_gain=config.hybrid_q_sensitivity_alpha_arterial,
                 venous_gain=config.hybrid_q_sensitivity_alpha_venous,
             )
-            _project_branch_secant_to_side_redistribution(all_plans)
+            _mark_branch_secant_projection_disabled(all_plans)
         if (
             bool(config.hybrid_alternate_sides)
             and not run2_equalization
