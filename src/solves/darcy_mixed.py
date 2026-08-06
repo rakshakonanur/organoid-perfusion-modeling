@@ -44,6 +44,7 @@ class PerfusionSolver(CGPerfusionSolver):
         perm_low: float = 1.0e-8,
         perm_high: float = 1.0e-6,
         perm_transition_width: float = 0.01,
+        stl_anisotropy_factor: float = 5.0,
         output_mode: str = "full",
         diagnostics_mode: str = "minimal",
         **kwargs,
@@ -54,6 +55,9 @@ class PerfusionSolver(CGPerfusionSolver):
         self.perm_low = float(perm_low)
         self.perm_high = float(perm_high)
         self.perm_transition_width = float(perm_transition_width)
+        self.stl_anisotropy_factor = float(stl_anisotropy_factor)
+        if not np.isfinite(self.stl_anisotropy_factor) or self.stl_anisotropy_factor <= 0.0:
+            raise ValueError("--stl-anisotropy-factor must be a positive finite value")
         output_mode = str(output_mode or "full").strip().lower()
         if output_mode not in {"full", "fields", "minimal"}:
             raise ValueError("--output-mode must be one of: full, fields, minimal")
@@ -282,12 +286,13 @@ class PerfusionSolver(CGPerfusionSolver):
         Kx_fun = fem.Function(V0)
         perm_low = float(self.perm_low)
         perm_high = float(self.perm_high)
+        anisotropy_factor = float(self.stl_anisotropy_factor)
         if abs(perm_high - perm_low) > 0.0:
             alpha = (np.asarray(Kfun.x.array, dtype=float) - perm_low) / (perm_high - perm_low)
             alpha = np.clip(alpha, 0.0, 1.0)
         else:
             alpha = np.zeros_like(Kfun.x.array, dtype=float)
-        Kx_fun.x.array[:] = perm_low + alpha * (5.0 * perm_high - perm_low)
+        Kx_fun.x.array[:] = perm_low + alpha * (anisotropy_factor * perm_high - perm_low)
         Kx_fun.x.scatter_forward()
         return Kx_fun
 
@@ -1909,7 +1914,7 @@ class PerfusionSolver(CGPerfusionSolver):
             "perm_high": float(self.perm_high),
             "perm_transition_width": float(self.perm_transition_width),
             "anisotropy_axis": "x",
-            "anisotropy_factor_inside_stl": 5.0,
+            "anisotropy_factor_inside_stl": float(self.stl_anisotropy_factor),
             "K_perp_min": K_perp_min,
             "K_perp_max": K_perp_max,
             "K_x_min": Kx_min,
@@ -2323,6 +2328,15 @@ if __name__ == "__main__":
         default=0.01,
         help="Half-width of the smooth permeability transition shell around the STL boundary.",
     )
+    ap.add_argument(
+        "--stl-anisotropy-factor",
+        type=float,
+        default=5.0,
+        help=(
+            "Multiplier applied to the x-directed permeability inside STL regions. "
+            "Use 1.0 for isotropic permeability even when --perm-low and --perm-high differ."
+        ),
+    )
     ap.add_argument("--out-dir", default="", help="Optional output directory for out_darcy")
     ap.add_argument(
         "--output-mode",
@@ -2383,6 +2397,7 @@ if __name__ == "__main__":
         perm_low=args.perm_low,
         perm_high=args.perm_high,
         perm_transition_width=args.perm_transition_width,
+        stl_anisotropy_factor=args.stl_anisotropy_factor,
         branching_in_file=args.branching_in_file if args.branching_in_file else None,
         branching_out_file=args.branching_out_file if args.branching_out_file else None,
         inlet_output_csv=args.inlet_output_csv if args.inlet_output_csv else None,
