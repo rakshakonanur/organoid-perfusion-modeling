@@ -1065,6 +1065,8 @@ def _restore_probe_baseline_on_plans(
     *,
     baseline_map: dict[tuple[int, str, int], float] | None = None,
     baseline_bc_map: dict[str, tuple[float, float]] | None = None,
+    baseline_error_map: dict[tuple[int, str, int], float] | None = None,
+    baseline_side_median_error_map: dict[tuple[int, str, int], float] | None = None,
 ) -> bool:
     restored_any = False
     for plan in plans:
@@ -1085,6 +1087,21 @@ def _restore_probe_baseline_on_plans(
             plan["hybrid_post_deltap_baseline_flow"] = float(baseline_flow)
             plan["hybrid_use_saved_baseline_for_sensitivity"] = True
             restored_any = True
+        baseline_error = float((baseline_error_map or {}).get(key, float("nan")))
+        if _finite(baseline_error):
+            # The restored flow and the error consumed by the first secant
+            # update must describe the same pre-probe operating point.
+            plan["error"] = float(baseline_error)
+            plan["rel_error"] = float(baseline_error)
+            plan["hybrid_relative_pressure_error"] = float(baseline_error)
+            plan["hybrid_post_probe_baseline_error"] = float(baseline_error)
+        baseline_side_error = float(
+            (baseline_side_median_error_map or {}).get(key, float("nan"))
+        )
+        if _finite(baseline_side_error):
+            plan["hybrid_post_probe_baseline_side_median_error"] = float(
+                baseline_side_error
+            )
         baseline_bc = (baseline_bc_map or {}).get(str(plan.get("bc_name", "")))
         if baseline_bc is not None:
             plan["pd_seed"] = float(baseline_bc[1])
@@ -1273,6 +1290,73 @@ def _probe_baseline_state_path(coupled_root: Path) -> Path:
     return coupled_root / "hybrid_post_deltap_probe_baseline.json"
 
 
+def _probe_baseline_error_map_from_entries(
+    entries: list[dict[str, Any]],
+    *,
+    pressure_scale_floor: float,
+    error_mode: str,
+) -> dict[tuple[int, str, int], float]:
+    pressure_by_key: dict[tuple[int, str, int], dict[str, float]] = {}
+    for entry in entries:
+        try:
+            key = (
+                int(entry["organoid"]),
+                str(entry["side"]).strip().lower(),
+                int(entry["branch_id"]),
+            )
+            p_darcy = float(entry["baseline_p_darcy"])
+            p_0d = float(entry["baseline_p_0d"])
+        except Exception:
+            continue
+        if _finite(p_darcy) and _finite(p_0d):
+            pressure_by_key[key] = {
+                "p_darcy": float(p_darcy),
+                "p_0d": float(p_0d),
+            }
+
+    mode = str(error_mode).strip().lower()
+    if mode in {"opposite_side_drop", "side_median"}:
+        mapped = _error_map_for_mode(
+            pressure_by_key,
+            pressure_scale_floor=pressure_scale_floor,
+            error_mode=mode,
+        )
+        return {
+            key: float(info["normalized_error"])
+            for key, info in mapped.items()
+            if _finite(info.get("normalized_error"))
+        }
+
+    return {
+        key: float(
+            _signed_bounded_pressure_error(
+                key[1], values["p_darcy"], values["p_0d"]
+            )
+        )
+        for key, values in pressure_by_key.items()
+    }
+
+
+def _load_probe_baseline_error_map(
+    coupled_root: Path,
+    *,
+    pressure_scale_floor: float,
+    error_mode: str,
+) -> dict[tuple[int, str, int], float]:
+    path = _probe_baseline_state_path(coupled_root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return _probe_baseline_error_map_from_entries(
+        list(data.get("entries", [])),
+        pressure_scale_floor=pressure_scale_floor,
+        error_mode=error_mode,
+    )
+
+
 def _save_probe_baseline_state(
     coupled_root: Path,
     plans: list[dict[str, Any]],
@@ -1317,6 +1401,26 @@ def _save_probe_baseline_state(
             "baseline_p_darcy": float(p_darcy),
             "baseline_p_0d": float(p_0d),
         })
+    # Persist each definition explicitly for diagnostics. The sensitivity
+    # builder also recomputes these from the saved pressures so older baseline
+    # files receive the same consistent behavior.
+    for mode, field in (
+        ("direct", "baseline_error_direct"),
+        ("opposite_side_drop", "baseline_error_opposite_side_drop"),
+        ("side_median", "baseline_error_side_median"),
+    ):
+        error_map = _probe_baseline_error_map_from_entries(
+            entries,
+            pressure_scale_floor=1.0,
+            error_mode=mode,
+        )
+        for entry in entries:
+            key = (
+                int(entry["organoid"]),
+                str(entry["side"]).strip().lower(),
+                int(entry["branch_id"]),
+            )
+            entry[field] = float(error_map.get(key, float("nan")))
     path = _probe_baseline_state_path(coupled_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -1420,8 +1524,14 @@ def _build_first_post_probe_sensitivity_map(
     except Exception:
         return {}
 
+    entries = list(data.get("entries", []))
+    baseline_errors = _probe_baseline_error_map_from_entries(
+        entries,
+        pressure_scale_floor=pressure_scale_floor,
+        error_mode=error_mode,
+    )
     baseline_points: dict[tuple[int, str, int], tuple[float, float]] = {}
-    for entry in data.get("entries", []):
+    for entry in entries:
         try:
             key = (
                 int(entry["organoid"]),
@@ -1429,7 +1539,7 @@ def _build_first_post_probe_sensitivity_map(
                 int(entry["branch_id"]),
             )
             flow = float(entry["flow_magnitude"])
-            error = float(entry.get("baseline_error", float("nan")))
+            error = float(baseline_errors.get(key, float("nan")))
         except Exception:
             continue
         if (
@@ -2206,6 +2316,20 @@ def _apply_side_gauge_common_mode_control(
                 gauge_error = float((median_darcy - median_0d) / scale)
             else:
                 gauge_error = float((median_0d - median_darcy) / scale)
+            saved_baseline_errors = [
+                float(plan.get(
+                    "hybrid_post_probe_baseline_side_median_error",
+                    float("nan"),
+                ))
+                for plan in side_plans
+                if bool(plan.get("hybrid_use_saved_baseline_for_sensitivity", False))
+                and _finite(plan.get("hybrid_post_probe_baseline_side_median_error"))
+            ]
+            if len(saved_baseline_errors) == len(side_plans) and saved_baseline_errors:
+                # On the first post-probe update, the side-total correction is
+                # also applied to the restored baseline flow. Use the matching
+                # saved baseline error instead of the final probe observation.
+                gauge_error = float(_median(saved_baseline_errors))
             projected_slope, slope_source, slope_samples = _project_side_gauge_common_mode_sensitivity(
                 organoid_idx=int(organoid_idx),
                 side_label=str(side_label),
@@ -2643,10 +2767,27 @@ def _build_hybrid_override(config: argparse.Namespace):
         )
         baseline_restored_for_sensitivity = False
         if not run2_equalization and ready_for_post_probe_sensitivity:
+            primary_error_mode = (
+                "opposite_side_drop"
+                if bool(config.hybrid_opposite_side_referenced_error)
+                else "direct"
+            )
+            baseline_primary_error_map = _load_probe_baseline_error_map(
+                coupled_root,
+                pressure_scale_floor=float(config.hybrid_pressure_scale_floor),
+                error_mode=primary_error_mode,
+            )
+            baseline_side_median_error_map = _load_probe_baseline_error_map(
+                coupled_root,
+                pressure_scale_floor=float(config.hybrid_pressure_scale_floor),
+                error_mode="side_median",
+            )
             baseline_restored_for_sensitivity = _restore_probe_baseline_on_plans(
                 all_plans,
                 baseline_map=probe_baseline_map,
                 baseline_bc_map=probe_baseline_bc_map,
+                baseline_error_map=baseline_primary_error_map,
+                baseline_side_median_error_map=baseline_side_median_error_map,
             )
             if baseline_restored_for_sensitivity:
                 ready_for_post_probe_sensitivity = True
