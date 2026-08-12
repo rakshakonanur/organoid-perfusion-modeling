@@ -334,10 +334,10 @@ def _parse_wrapper_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Estimate sensitivity only between active-side observations. The "
-            "reference controller leaves this disabled so consecutive "
-            "realized-flow/post-Darcy pairs feed the magnitude EMA; enabling "
-            "it skips the intervening damped run and can mix two updates."
+            "Estimate sensitivity only from adjacent previous-run to "
+            "current-active-run responses. The reference controller leaves "
+            "this disabled so every consecutive realized-flow/post-Darcy "
+            "pair feeds the magnitude EMA."
         ),
     )
     ap.add_argument(
@@ -386,19 +386,13 @@ def _parse_wrapper_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]
         "--hybrid-organoid-deltap-ratio-lower",
         type=float,
         default=0.9,
-        help=(
-            "Lower 0D/Darcy ratio bound for coarse delta-P alignment, "
-            "arterial gauge centering, and venous gauge centering."
-        ),
+        help="Lower |deltaP_0D|/|deltaP_Darcy| bound for fine control.",
     )
     ap.add_argument(
         "--hybrid-organoid-deltap-ratio-upper",
         type=float,
         default=1.1,
-        help=(
-            "Upper 0D/Darcy ratio bound for coarse delta-P alignment, "
-            "arterial gauge centering, and venous gauge centering."
-        ),
+        help="Upper |deltaP_0D|/|deltaP_Darcy| bound for fine control.",
     )
     ap.add_argument(
         "--hybrid-organoid-deltap-min-in-band-runs",
@@ -406,8 +400,7 @@ def _parse_wrapper_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]
         default=2,
         help=(
             "Number of consecutive completed runs that must keep every "
-            "organoid inside the delta-P and side-gauge ratio bands before "
-            "fine control."
+            "organoid inside the pressure-drop band before fine control."
         ),
     )
     ap.add_argument(
@@ -615,6 +608,9 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 
 def _physical_q_from_summary_row(row: dict[str, str], side_label: str) -> float:
+    commanded = row.get("Q_target_commanded", "")
+    if _finite(commanded):
+        return float(commanded)
     hybrid_raw = row.get("hybrid_target_flow_raw", "")
     if _finite(hybrid_raw):
         return float(hybrid_raw)
@@ -627,7 +623,7 @@ def _physical_q_from_summary_row(row: dict[str, str], side_label: str) -> float:
 
 
 def _q0d_magnitude_from_summary_row(row: dict[str, str]) -> float:
-    q_0d = row.get("Q_0D", "")
+    q_0d = row.get("Q_0D_previous", row.get("Q_0D", ""))
     if _finite(q_0d):
         q_mag = abs(float(q_0d))
         if q_mag > 0.0:
@@ -640,6 +636,27 @@ def _q0d_magnitude_from_summary_row(row: dict[str, str]) -> float:
             return q_mag
         return float("nan")
     return float("nan")
+
+
+def _commanded_q_magnitude_from_summary_row(row: dict[str, str]) -> float:
+    """Return the flow command aligned with this run's post-Darcy result.
+
+    ``Q_0D`` in a terminal resistance summary is the input flow from the
+    preceding solve.  The boundary conditions written for the summary's run
+    instead target ``Q_target_commanded`` (legacy name
+    ``hybrid_target_flow_raw``), so that is the flow coordinate that belongs
+    with the same run's post-Darcy pressure.  Older summaries remain readable
+    through the legacy commanded-target field and, lastly, the previous-flow
+    fallback.
+    """
+    side_label = str(row.get("side", "")).strip().lower()
+    q_commanded = _physical_q_from_summary_row(row, side_label)
+    if _finite(q_commanded):
+        q_mag = abs(float(q_commanded))
+        if q_mag > 0.0:
+            return q_mag
+        return float("nan")
+    return _q0d_magnitude_from_summary_row(row)
 
 
 def _opposite_side_referenced_error_map(
@@ -842,7 +859,10 @@ def _build_q_error_sensitivity_map(
             result = result_by_key.get(key)
             if result is None:
                 continue
-            q_mag = _q0d_magnitude_from_summary_row(row)
+            # Pair the post-Darcy pressure with the flow command that produced
+            # this run. Q_0D/Q_0D_previous belongs to the preceding solve and
+            # is therefore one controller step out of phase here.
+            q_mag = _commanded_q_magnitude_from_summary_row(row)
             if not _finite(q_mag):
                 continue
             logq = math.log10(max(abs(float(q_mag)), sys.float_info.min))
@@ -881,26 +901,21 @@ def _build_q_error_sensitivity_map(
         abs_error_slopes: list[float] = []
         improvement_ratios: list[float] = []
         ema_abs_slope = float("nan")
-        if bool(active_only):
-            pair_items = [
-                item for item in items
-                if float(item.get("active", 1.0)) >= 0.5
-            ]
-        else:
-            pair_items = items
-        for prev_item, cur_item in zip(pair_items[:-1], pair_items[1:]):
+        for prev_item, cur_item in zip(items[:-1], items[1:]):
+            # An active observation is the response produced by that run's
+            # active-side flow command. Pair it with the immediately preceding
+            # operating point. Filtering the observations first would instead
+            # pair run N with run N+2 and fold the intervening opposite-side
+            # update into the inferred local branch response.
+            if bool(active_only) and float(cur_item.get("active", 1.0)) < 0.5:
+                continue
             dx = float(cur_item["logq"] - prev_item["logq"])
             de = float(cur_item["error"] - prev_item["error"])
             if not (_finite(dx) and _finite(de)):
                 continue
-            if abs(dx) <= sys.float_info.min:
+            if abs(dx) < min_dx:
                 continue
-            # Treat min_dx as denominator regularization, not a sample
-            # rejection threshold.  This preserves the tiny late-stage moves
-            # that made the reference controller contract smoothly without
-            # allowing roundoff-sized flow changes to inflate the slope.
-            dx_eff = math.copysign(max(abs(dx), min_dx), dx)
-            slope = de / dx_eff
+            slope = de / dx
             if not _finite(slope):
                 continue
             slope_abs = abs(float(slope))
@@ -1224,124 +1239,6 @@ def _organoid_deltap_ratios_from_plans(
     return ratios
 
 
-def _organoid_pressure_alignment_ratios_from_result_rows(
-    rows: list[dict[str, str]],
-) -> dict[int, dict[str, float]]:
-    """Return drop and side-gauge ratios used to release coarse scaling."""
-    ratios: dict[int, dict[str, float]] = {}
-    organoid_indices: set[int] = set()
-    for row in rows:
-        try:
-            organoid_indices.add(int(row.get("organoid", 0)))
-        except Exception:
-            continue
-    for organoid_idx in sorted(organoid_indices):
-        side_rows = {
-            side: [
-                row for row in rows
-                if int(row.get("organoid", 0)) == organoid_idx
-                and str(row.get("side", "")).strip().lower() == side
-            ]
-            for side in ("arterial", "venous")
-        }
-        if not side_rows["arterial"] or not side_rows["venous"]:
-            continue
-        p_darcy_a = _median([float(row.get("P_Darcy", float("nan"))) for row in side_rows["arterial"]])
-        p_darcy_v = _median([float(row.get("P_Darcy", float("nan"))) for row in side_rows["venous"]])
-        p_0d_a = _median([float(row.get("P_0D_target", float("nan"))) for row in side_rows["arterial"]])
-        p_0d_v = _median([float(row.get("P_0D_target", float("nan"))) for row in side_rows["venous"]])
-        organoid_ratios = _pressure_alignment_ratios(
-            p_darcy_a=p_darcy_a,
-            p_darcy_v=p_darcy_v,
-            p_0d_a=p_0d_a,
-            p_0d_v=p_0d_v,
-        )
-        if organoid_ratios is not None:
-            ratios[organoid_idx] = organoid_ratios
-    return ratios
-
-
-def _organoid_pressure_alignment_ratios_from_plans(
-    plans: list[dict[str, Any]],
-) -> dict[int, dict[str, float]]:
-    """Return drop and side-gauge ratios used to release coarse scaling."""
-    ratios: dict[int, dict[str, float]] = {}
-    for organoid_idx in sorted({int(plan.get("organoid_idx", -1)) for plan in plans}):
-        organoid_plans = [
-            plan for plan in plans
-            if int(plan.get("organoid_idx", -1)) == organoid_idx
-        ]
-        by_side = {
-            side: [
-                plan for plan in organoid_plans
-                if str(plan.get("side_label", "")).strip().lower() == side
-            ]
-            for side in ("arterial", "venous")
-        }
-        if not by_side["arterial"] or not by_side["venous"]:
-            continue
-        p_darcy_a = _median([float(plan.get("p_darcy", float("nan"))) for plan in by_side["arterial"]])
-        p_darcy_v = _median([float(plan.get("p_darcy", float("nan"))) for plan in by_side["venous"]])
-        p_0d_a = _median([float(plan.get("p_0d", float("nan"))) for plan in by_side["arterial"]])
-        p_0d_v = _median([float(plan.get("p_0d", float("nan"))) for plan in by_side["venous"]])
-        organoid_ratios = _pressure_alignment_ratios(
-            p_darcy_a=p_darcy_a,
-            p_darcy_v=p_darcy_v,
-            p_0d_a=p_0d_a,
-            p_0d_v=p_0d_v,
-        )
-        if organoid_ratios is not None:
-            ratios[organoid_idx] = organoid_ratios
-    return ratios
-
-
-def _pressure_alignment_ratios(
-    *,
-    p_darcy_a: float,
-    p_darcy_v: float,
-    p_0d_a: float,
-    p_0d_v: float,
-) -> dict[str, float] | None:
-    """Build ratios only when the drop and both signed gauges are usable."""
-    values = (p_darcy_a, p_darcy_v, p_0d_a, p_0d_v)
-    if not all(_finite(value) for value in values):
-        return None
-    darcy_drop = abs(p_darcy_a - p_darcy_v)
-    zero_d_drop = abs(p_0d_a - p_0d_v)
-    if (
-        darcy_drop <= sys.float_info.min
-        or zero_d_drop <= sys.float_info.min
-        or abs(p_darcy_a) <= sys.float_info.min
-        or abs(p_darcy_v) <= sys.float_info.min
-    ):
-        return None
-    return {
-        "deltap": float(zero_d_drop / darcy_drop),
-        # Signed division makes an opposite-sign gauge fail the positive
-        # lower/upper ratio band instead of hiding it behind abs().
-        "arterial": float(p_0d_a / p_darcy_a),
-        "venous": float(p_0d_v / p_darcy_v),
-    }
-
-
-def _pressure_alignment_ratios_in_band(
-    ratios: dict[int, dict[str, float]],
-    *,
-    expected_organoids: set[int],
-    ratio_lower: float,
-    ratio_upper: float,
-) -> bool:
-    """Require delta-P and both absolute side gauges to share one band."""
-    return (
-        set(ratios) == set(expected_organoids)
-        and all(
-            float(ratio_lower) <= ratio <= float(ratio_upper)
-            for organoid_ratios in ratios.values()
-            for ratio in organoid_ratios.values()
-        )
-    )
-
-
 def _completed_deltap_in_band_streak(
     coupled_root: Path,
     *,
@@ -1351,36 +1248,6 @@ def _completed_deltap_in_band_streak(
     ratio_lower: float,
     ratio_upper: float,
 ) -> int:
-    """Count completed runs aligned in delta-P and both side gauges."""
-    streak = 0
-    for run_idx in range(int(current_run) - 1, int(first_run) - 1, -1):
-        rows = _read_csv_rows(
-            coupled_root / f"run_{run_idx}" / "post_darcy_terminal_convergence.csv"
-        )
-        if not rows:
-            break
-        ratios = _organoid_pressure_alignment_ratios_from_result_rows(rows)
-        if not _pressure_alignment_ratios_in_band(
-            ratios,
-            expected_organoids=expected_organoids,
-            ratio_lower=ratio_lower,
-            ratio_upper=ratio_upper,
-        ):
-            break
-        streak += 1
-    return int(streak)
-
-
-def _completed_deltap_only_in_band_streak(
-    coupled_root: Path,
-    *,
-    current_run: int,
-    first_run: int,
-    expected_organoids: set[int],
-    ratio_lower: float,
-    ratio_upper: float,
-) -> int:
-    """Count completed runs whose organoid pressure drops are in band."""
     streak = 0
     for run_idx in range(int(current_run) - 1, int(first_run) - 1, -1):
         rows = _read_csv_rows(
@@ -1764,12 +1631,7 @@ def _build_first_post_probe_sensitivity_map(
             # solved 0D flow can still equal the saved baseline to machine
             # precision, which collapses dlogQ to zero and incorrectly drops
             # the branch from the first post-probe sensitivity map.
-            q_mag = float("nan")
-            target_raw = row.get("hybrid_target_flow_raw", "")
-            if _finite(target_raw):
-                q_mag = abs(float(target_raw))
-            if not (_finite(q_mag) and q_mag > sys.float_info.min):
-                q_mag = _q0d_magnitude_from_summary_row(row)
+            q_mag = _commanded_q_magnitude_from_summary_row(row)
             result = result_by_key.get(key)
             if not _finite(q_mag) or result is None:
                 continue
@@ -1801,10 +1663,9 @@ def _build_first_post_probe_sensitivity_map(
         de = float(probe_error - base_error)
         if not (_finite(dx) and _finite(de)):
             continue
-        if abs(dx) <= sys.float_info.min:
+        if abs(dx) < min_dx:
             continue
-        dx_eff = math.copysign(max(abs(dx), min_dx), dx)
-        slope = de / dx_eff
+        slope = de / dx
         if not _finite(slope):
             continue
         out[key] = {
@@ -1838,7 +1699,6 @@ def _fine_runs_since_coarse_phase(
         if any(
             action.startswith("initial_")
             or action.startswith("coarse_organoid_deltap_")
-            or action.startswith("coarse_organoid_gauge_")
             for action in actions
         ):
             count = 0
@@ -1976,70 +1836,6 @@ def _apply_coarse_organoid_deltap_scaling(
     return True
 
 
-def _apply_coarse_organoid_gauge_centering(
-    plans: list[dict[str, Any]],
-    *,
-    arterial_gain: float,
-    venous_gain: float,
-    max_log_step: float,
-    ratio_lower: float,
-    ratio_upper: float,
-    release_ready: bool,
-) -> bool:
-    """Shift the pressure gauge after delta-P has been aligned.
-
-    Arterial inflow and venous outflow have opposite effects on the common
-    pressure level.  When the Darcy gauge is too high, reduce arterial inflow
-    and increase venous outflow; reverse both moves when it is too low.
-    """
-    gains = {
-        "arterial": max(float(arterial_gain), 0.0),
-        "venous": max(float(venous_gain), 0.0),
-    }
-    max_log_step = max(float(max_log_step), 0.0)
-    ratio_lower = max(float(ratio_lower), sys.float_info.min)
-    ratio_upper = max(float(ratio_upper), ratio_lower)
-    alignment_ratios = _organoid_pressure_alignment_ratios_from_plans(plans)
-
-    # Keep all organoids in the same startup phase. If the current observation
-    # is aligned but the confirmation streak is incomplete, perform a no-move
-    # solve instead of perturbing an already acceptable gauge.
-    any_out_of_band = False
-    for organoid_ratios in alignment_ratios.values():
-        if any(
-            ratio < ratio_lower or ratio > ratio_upper
-            for ratio in organoid_ratios.values()
-        ):
-            any_out_of_band = True
-            break
-    if not any_out_of_band and bool(release_ready):
-        return False
-
-    for plan in plans:
-        organoid_idx = int(plan.get("organoid_idx", -1))
-        side_label = str(plan.get("side_label", "")).strip().lower()
-        organoid_ratios = alignment_ratios.get(organoid_idx, {})
-        ratio = float(organoid_ratios.get(side_label, float("nan")))
-        delta = 0.0
-        if _finite(ratio) and ratio > 0.0 and (
-            ratio < ratio_lower or ratio > ratio_upper
-        ):
-            direction = 1.0 if side_label == "arterial" else -1.0
-            raw_delta = direction * gains.get(side_label, 0.0) * math.log10(ratio)
-            delta = max(-max_log_step, min(max_log_step, raw_delta))
-        _set_plan_q_target_from_delta(plan, delta)
-        if abs(delta) <= 1.0e-12:
-            plan["action"] = "coarse_organoid_gauge_hold"
-        elif delta < 0.0:
-            plan["action"] = "coarse_organoid_gauge_back_off"
-        else:
-            plan["action"] = "coarse_organoid_gauge_open_up"
-        plan["hybrid_organoid_gauge_ratio"] = float(ratio)
-        plan["hybrid_alternate_side_active"] = True
-        plan["hybrid_alternate_side_scale"] = 1.0
-    return True
-
-
 def _apply_post_deltap_probe_phase(
     plans: list[dict[str, Any]],
     *,
@@ -2156,19 +1952,18 @@ def _apply_q_error_sensitivity_scaling(
             local_gain = venous_gain
 
         # Always-on normalized EMA sensitivity magnitude with direction from
-        # the current mismatch sign.  Bound the branch move before projecting
-        # it into a side-total-neutral redistribution.  A second cap is still
-        # applied later to the fully composed move after alternating-side
-        # damping and optional side common-mode control.
+        # the current mismatch sign.  Do not apply the per-terminal trust
+        # region cap here: alternating-side damping and side common-mode
+        # control can still change the composed move.  The trust-region cap is
+        # applied later to the final terminal delta.
         delta_mag = local_gain * abs(float(error)) / float(slope_mag)
         delta_secant = -math.copysign(delta_mag, float(error))
         if not _finite(delta_secant):
             continue
-        delta_uncapped = float(delta_secant)
-        new_delta = max(-adaptive_cap, min(adaptive_cap, delta_uncapped))
+        new_delta = float(delta_secant)
         plan["hybrid_branch_trust_region_cap"] = float(adaptive_cap)
-        plan["hybrid_q_error_sensitivity_delta_uncapped"] = float(delta_uncapped)
-        plan["hybrid_sensitivity_delta_uncapped"] = float(delta_uncapped)
+        plan["hybrid_q_error_sensitivity_delta_uncapped"] = float(new_delta)
+        plan["hybrid_sensitivity_delta_uncapped"] = float(new_delta)
         plan["hybrid_q_error_sensitivity_slope"] = float(slope_mag)
         plan["hybrid_q_error_sensitivity_sign_consistency"] = float(sign_consistency)
         plan["hybrid_q_error_sensitivity_sample_count"] = float(sample_count)
@@ -2231,25 +2026,37 @@ def _project_branch_secant_to_side_redistribution(
 
     for (_organoid_idx, _side_label), side_plans in grouped.items():
         usable: list[tuple[dict[str, Any], float, float]] = []
-        weighted_sum = 0.0
-        weight_total = 0.0
         for plan in side_plans:
             delta = float(plan.get("delta_log", float("nan")))
             raw_weight = abs(float(plan.get("q_drive", 0.0)))
             if not (_finite(delta) and _finite(raw_weight) and raw_weight > sys.float_info.min):
                 continue
             usable.append((plan, delta, raw_weight))
-            weighted_sum += raw_weight * delta
-            weight_total += raw_weight
-        if not usable or weight_total <= sys.float_info.min:
+        if not usable:
             continue
 
-        # The sensitivity moves have already been clipped to their branch
-        # trust regions.  Remove their actual-flow-weighted common component
-        # so this stage changes the terminal distribution without introducing
-        # a first-order change in the side's total flow.
-        common_mode_delta = float(weighted_sum / weight_total)
+        # Use clipped-flow weights for the projection common mode.  Raw
+        # flow-weighted projection can let one runaway high-flow venous
+        # terminal dominate the side common-mode estimate and subtract away
+        # almost all of its own corrective branch move.  Clipping at the side
+        # median preserves some flow awareness without giving the current
+        # dominant branch veto power over branch-specific redistribution.
+        positive_weights = sorted(weight for _plan, _delta, weight in usable)
+        clip_weight = float(positive_weights[len(positive_weights) // 2])
+        weighted_sum = 0.0
+        weight_total = 0.0
+        clipped_usable: list[tuple[dict[str, Any], float, float, float]] = []
         for plan, delta, raw_weight in usable:
+            projection_weight = min(float(raw_weight), float(clip_weight))
+            if not (_finite(projection_weight) and projection_weight > sys.float_info.min):
+                projection_weight = 1.0
+            clipped_usable.append((plan, delta, raw_weight, projection_weight))
+            weighted_sum += projection_weight * delta
+            weight_total += projection_weight
+        if weight_total <= sys.float_info.min:
+            continue
+        common_mode_delta = float(weighted_sum / weight_total)
+        for plan, delta, raw_weight, projection_weight in clipped_usable:
             redistribution_delta = float(delta - common_mode_delta)
             if abs(redistribution_delta - delta) > 1.0e-12:
                 _set_plan_q_target_from_delta(plan, redistribution_delta)
@@ -2257,9 +2064,9 @@ def _project_branch_secant_to_side_redistribution(
             plan["hybrid_branch_common_mode_component"] = float(common_mode_delta)
             plan["hybrid_branch_redistribution_delta"] = float(redistribution_delta)
             plan["hybrid_branch_projection_weight_raw"] = float(raw_weight)
-            plan["hybrid_branch_projection_weight"] = float(raw_weight)
-            plan["hybrid_branch_projection_weight_clip"] = float("nan")
-            plan["hybrid_branch_projection_weight_mode"] = "raw_flow"
+            plan["hybrid_branch_projection_weight"] = float(projection_weight)
+            plan["hybrid_branch_projection_weight_clip"] = float(clip_weight)
+            plan["hybrid_branch_projection_weight_mode"] = "flow_clipped_to_side_median"
 
 
 def _mark_branch_secant_projection_disabled(plans: list[dict[str, Any]]) -> None:
@@ -2282,10 +2089,10 @@ def _apply_final_trust_region_caps(plans: list[dict[str, Any]]) -> None:
     """Clip the final composed terminal move to the terminal trust region.
 
     The hybrid controller composes several log-flow corrections: branch
-    sensitivity, side redistribution, alternating-side damping, and optional
-    side-gauge common mode.  The adaptive cap should bound the final terminal
-    move that is actually handed to the algebraic 0D realization, not an
-    intermediate branch-only correction.
+    sensitivity, alternating-side damping, and optional side-gauge common mode.
+    The adaptive cap should bound the final terminal move that is actually
+    handed to the algebraic 0D realization, not an intermediate branch-only
+    correction.
     """
 
     for plan in plans:
@@ -2803,6 +2610,12 @@ def _build_hybrid_override(config: argparse.Namespace):
                 continue
 
             q_drive = float(row.get("Q_for_R", float("nan")))
+            q_0d_previous_raw = row.get("Q_0D", float("nan"))
+            row["Q_0D_previous"] = (
+                float(q_0d_previous_raw)
+                if _finite(q_0d_previous_raw)
+                else float("nan")
+            )
             branch_id = int(row.get("branch_id", -1))
             if not _finite(q_drive):
                 continue
@@ -2866,6 +2679,7 @@ def _build_hybrid_override(config: argparse.Namespace):
             row["hybrid_target_flow_raw"] = float(
                 q_target if side_label == "arterial" else -float(q_target)
             )
+            row["Q_target_commanded"] = float(row["hybrid_target_flow_raw"])
             row["hybrid_q_drive"] = float(q_drive)
             row["hybrid_action"] = str(action)
             row["hybrid_delta_log10_q"] = float(delta_log)
@@ -2951,44 +2765,22 @@ def _build_hybrid_override(config: argparse.Namespace):
         # CSV is written. Read the older completed files only, then append the
         # current in-memory observation so confirmation does not cost a
         # repeated no-move solve.
-        historical_deltap_in_band_streak = _completed_deltap_only_in_band_streak(
-            coupled_root,
-            current_run=int(current_run_idx),
-            first_run=int(start_run),
-            expected_organoids=expected_organoids,
-            ratio_lower=float(config.hybrid_organoid_deltap_ratio_lower),
-            ratio_upper=float(config.hybrid_organoid_deltap_ratio_upper),
-        )
         historical_in_band_streak = _completed_deltap_in_band_streak(
             coupled_root,
-            current_run=int(current_run_idx),
+            current_run=int(current_run_idx) - 1,
             first_run=int(start_run),
             expected_organoids=expected_organoids,
             ratio_lower=float(config.hybrid_organoid_deltap_ratio_lower),
             ratio_upper=float(config.hybrid_organoid_deltap_ratio_upper),
         )
-        current_alignment_ratios = _organoid_pressure_alignment_ratios_from_plans(
-            all_plans
-        )
         current_deltap_ratios = _organoid_deltap_ratios_from_plans(all_plans)
-        current_deltap_in_band = (
+        current_in_band = (
             set(current_deltap_ratios) == expected_organoids
             and all(
                 float(config.hybrid_organoid_deltap_ratio_lower) <= ratio
                 <= float(config.hybrid_organoid_deltap_ratio_upper)
                 for ratio in current_deltap_ratios.values()
             )
-        )
-        deltap_in_band_streak = (
-            int(historical_deltap_in_band_streak) + 1
-            if current_deltap_in_band
-            else 0
-        )
-        current_in_band = _pressure_alignment_ratios_in_band(
-            current_alignment_ratios,
-            expected_organoids=expected_organoids,
-            ratio_lower=float(config.hybrid_organoid_deltap_ratio_lower),
-            ratio_upper=float(config.hybrid_organoid_deltap_ratio_upper),
         )
         in_band_streak = (
             int(historical_in_band_streak) + 1 if current_in_band else 0
@@ -3035,24 +2827,6 @@ def _build_hybrid_override(config: argparse.Namespace):
                 all_plans,
                 gamma=float(config.hybrid_organoid_deltap_gamma),
                 max_log_shift=float(config.hybrid_organoid_deltap_max_log_shift),
-                ratio_lower=float(config.hybrid_organoid_deltap_ratio_lower),
-                ratio_upper=float(config.hybrid_organoid_deltap_ratio_upper),
-                release_ready=(deltap_in_band_streak >= required_in_band_runs),
-            )
-        if (
-            bool(config.hybrid_organoid_deltap_scaling)
-            and not run2_equalization
-            and not probe_cycle_locked
-            and not baseline_restored_for_sensitivity
-            and not coarse_phase_completed
-            and not coarse_deltap_scaling
-            and deltap_in_band_streak >= required_in_band_runs
-        ):
-            coarse_deltap_scaling = _apply_coarse_organoid_gauge_centering(
-                all_plans,
-                arterial_gain=float(config.hybrid_arterial_side_gauge_common_mode_gain),
-                venous_gain=float(config.hybrid_venous_side_gauge_common_mode_gain),
-                max_log_step=float(config.hybrid_side_gauge_common_mode_max_log_step),
                 ratio_lower=float(config.hybrid_organoid_deltap_ratio_lower),
                 ratio_upper=float(config.hybrid_organoid_deltap_ratio_upper),
                 release_ready=(in_band_streak >= required_in_band_runs),
@@ -3181,7 +2955,7 @@ def _build_hybrid_override(config: argparse.Namespace):
                 arterial_gain=config.hybrid_q_sensitivity_alpha_arterial,
                 venous_gain=config.hybrid_q_sensitivity_alpha_venous,
             )
-            _project_branch_secant_to_side_redistribution(all_plans)
+            _mark_branch_secant_projection_disabled(all_plans)
         if (
             bool(config.hybrid_alternate_sides)
             and not run2_equalization
@@ -3280,6 +3054,13 @@ def _build_hybrid_override(config: argparse.Namespace):
             row["hybrid_controller_mode"] = "base_R_plus_log_q_target"
             row["hybrid_target_flow"] = float(plan["q_target"])
             row["hybrid_target_flow_raw"] = float(plan["q_target"] if str(plan["side_label"]) == "arterial" else -float(plan["q_target"]))
+            q_0d_previous_raw = row.get("Q_0D", float("nan"))
+            row["Q_0D_previous"] = (
+                float(q_0d_previous_raw)
+                if _finite(q_0d_previous_raw)
+                else float("nan")
+            )
+            row["Q_target_commanded"] = float(row["hybrid_target_flow_raw"])
             row["hybrid_q_drive"] = float(plan["q_drive"])
             row["hybrid_action"] = str(plan["action"])
             row["hybrid_delta_log10_q"] = float(plan["delta_log"])
@@ -3300,9 +3081,6 @@ def _build_hybrid_override(config: argparse.Namespace):
             )
             row["hybrid_organoid_deltap_ratio"] = float(
                 plan.get("hybrid_organoid_deltap_ratio", float("nan"))
-            )
-            row["hybrid_organoid_gauge_ratio"] = float(
-                plan.get("hybrid_organoid_gauge_ratio", float("nan"))
             )
             row["hybrid_initial_side_total_ratio"] = float(
                 plan.get("hybrid_initial_side_total_ratio", float("nan"))
