@@ -47,10 +47,12 @@ class PerfusionSolver(CGPerfusionSolver):
         stl_anisotropy_factor: float = 5.0,
         output_mode: str = "full",
         diagnostics_mode: str = "minimal",
+        response_map_output: str = "",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._mesh_source_path = str(args[0]) if args else ""
+        self._facet_source_path = str(args[1]) if len(args) > 1 else ""
         self.perm_region_path = str(perm_region_path).strip()
         self.perm_low = float(perm_low)
         self.perm_high = float(perm_high)
@@ -66,6 +68,7 @@ class PerfusionSolver(CGPerfusionSolver):
         if diagnostics_mode not in {"minimal", "full"}:
             raise ValueError("--diagnostics-mode must be one of: minimal, full")
         self.diagnostics_mode = diagnostics_mode
+        self.response_map_output = str(response_map_output or "").strip()
 
     @staticmethod
     def _resolve_perm_region_stls(path_str: str):
@@ -78,6 +81,22 @@ class PerfusionSolver(CGPerfusionSolver):
             return [path]
         matches = [Path(p) for p in sorted(glob.glob(str(path)))]
         return [p for p in matches if p.suffix.lower() == ".stl"]
+
+    @staticmethod
+    def _geometry_file_fingerprints(*xdmf_paths: str) -> dict[str, str]:
+        fingerprints: dict[str, str] = {}
+        for raw in xdmf_paths:
+            path = Path(raw).expanduser().resolve()
+            candidates = [path, path.with_suffix(".h5")]
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                digest = hashlib.sha256()
+                with candidate.open("rb") as fp:
+                    for chunk in iter(lambda: fp.read(8 * 1024 * 1024), b""):
+                        digest.update(chunk)
+                fingerprints[candidate.name] = digest.hexdigest()
+        return fingerprints
 
     @staticmethod
     def _build_stl_distance_tester(stl_file: Path, tol: float = 1e-9):
@@ -470,6 +489,326 @@ class PerfusionSolver(CGPerfusionSolver):
         x.set(0.0)
         ksp.solve(rhs, x)
         return x
+
+    @staticmethod
+    def _assemble_response_rhs(linear_form, a_form, bcs):
+        rhs = assemble_vector(fem.form(linear_form))
+        apply_lifting(rhs, [a_form], [bcs])
+        rhs.ghostUpdate(
+            addv=PETSc.InsertMode.ADD_VALUES,
+            mode=PETSc.ScatterMode.REVERSE,
+        )
+        set_bc(rhs, bcs)
+        return rhs
+
+    def _response_output_vectors(self, M, inlet_marks, outlet_marks):
+        """Build D rows for branch-ordered terminal pressures and wall fluxes."""
+        mesh = self.mesh
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+        dS = ufl.Measure("dS", domain=mesh, subdomain_data=self.facet_tags)
+        n = ufl.FacetNormal(mesh)
+        one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
+        w, v = ufl.TestFunctions(M)
+
+        def pressure_vector(marker: int, kind: str):
+            n_ext, n_int = self._marker_global_facet_counts(int(marker))
+            if n_ext > 0:
+                area = float(
+                    mesh.comm.allreduce(
+                        fem.assemble_scalar(fem.form(one * ds(int(marker)))),
+                        op=MPI.SUM,
+                    )
+                )
+                expr = v * ds(int(marker))
+            elif n_int > 0:
+                area = float(
+                    mesh.comm.allreduce(
+                        fem.assemble_scalar(fem.form(one * dS(int(marker)))),
+                        op=MPI.SUM,
+                    )
+                )
+                expr = self._embedded_tissue_trace(v, int(marker), kind) * dS(int(marker))
+            else:
+                raise RuntimeError(f"Terminal marker {int(marker)} has no facets")
+            if not np.isfinite(area) or area <= 0.0:
+                raise RuntimeError(f"Terminal marker {int(marker)} has invalid area {area}")
+            vec = assemble_vector(fem.form((1.0 / area) * expr))
+            vec.ghostUpdate(
+                addv=PETSc.InsertMode.ADD_VALUES,
+                mode=PETSc.ScatterMode.REVERSE,
+            )
+            return vec
+
+        inlet_raw = [pressure_vector(int(marker), "inlet") for marker in inlet_marks]
+        outlet_raw = [pressure_vector(int(marker), "outlet") for marker in outlet_marks]
+        _im, _om, inlet_coords, outlet_coords, _ii, _io = self._get_terminal_marker_data()
+        idx_in = (
+            self._build_reordering_indices(inlet_coords, self.branch_coords_in)
+            if self.branch_coords_in is not None and len(self.branch_coords_in) > 0
+            else np.arange(len(inlet_raw), dtype=int)
+        )
+        idx_out = (
+            self._build_reordering_indices(outlet_coords, self.branch_coords_out)
+            if self.branch_coords_out is not None and len(self.branch_coords_out) > 0
+            else np.arange(len(outlet_raw), dtype=int)
+        )
+        vectors = [inlet_raw[int(i)] for i in np.asarray(idx_in, dtype=int)]
+        vectors.extend(outlet_raw[int(i)] for i in np.asarray(idx_out, dtype=int))
+        inlet_ids = (
+            np.asarray(self.branch_ids_in, dtype=int)
+            if self.branch_ids_in is not None and len(self.branch_ids_in) == len(inlet_raw)
+            else np.asarray(inlet_marks, dtype=int)[np.asarray(idx_in, dtype=int)]
+        )
+        outlet_ids = (
+            np.asarray(self.branch_ids_out, dtype=int)
+            if self.branch_ids_out is not None and len(self.branch_ids_out) == len(outlet_raw)
+            else np.asarray(outlet_marks, dtype=int)[np.asarray(idx_out, dtype=int)]
+        )
+        names = [f"p_arterial_branch_{int(branch)}" for branch in inlet_ids]
+        names.extend(f"p_venous_branch_{int(branch)}" for branch in outlet_ids)
+
+        for marker, name in (
+            (int(self.arterial_concave_marker), "q_concave_arterial"),
+            (int(self.venous_concave_marker), "q_concave_venous"),
+        ):
+            vec = assemble_vector(fem.form(ufl.dot(w, n) * ds(marker)))
+            vec.ghostUpdate(
+                addv=PETSc.InsertMode.ADD_VALUES,
+                mode=PETSc.ScatterMode.REVERSE,
+            )
+            vectors.append(vec)
+            names.append(name)
+        return vectors, names
+
+    def _solve_constrained_response(self, ksp, rhs_vec, targets, c_vecs, z_list, S):
+        z0 = self._solve_linear(ksp, rhs_vec)
+        nt = len(c_vecs)
+        if nt:
+            reduced_rhs = np.asarray(targets, dtype=float).reshape(nt).copy()
+            for i in range(nt):
+                reduced_rhs[i] -= c_vecs[i].dot(z0)
+            lam, *_ = np.linalg.lstsq(S, reduced_rhs, rcond=None)
+        else:
+            lam = np.zeros(0, dtype=float)
+        x = z0.copy()
+        for basis, value in zip(z_list, lam):
+            x.axpy(float(value), basis)
+        return x
+
+    def _build_exact_response_map(
+        self,
+        *,
+        M,
+        a_form,
+        bcs,
+        ksp,
+        actual_rhs,
+        actual_targets,
+        c_vecs,
+        z_list,
+        S,
+        flux_constraints,
+        inlet_marks,
+        outlet_marks,
+        inlet_marks_int,
+        outlet_marks_int,
+    ) -> None:
+        """Build the globally identified affine map while LU factors are live."""
+        if not self.response_map_output:
+            return
+        mesh = self.mesh
+        if mesh.comm.rank == 0:
+            print("[response] Building exact Darcy input/output basis", flush=True)
+        _u, v = ufl.TestFunctions(M)
+        nt = len(flux_constraints)
+        basis_rhs = []
+        basis_scales = []
+        input_names = []
+        input_values = []
+
+        inlet_internal_index = {
+            int(marker): i for i, marker in enumerate(np.asarray(inlet_marks_int, dtype=int))
+        }
+        outlet_internal_index = {
+            int(marker): i for i, marker in enumerate(np.asarray(outlet_marks_int, dtype=int))
+        }
+        for constraint_idx, constraint in enumerate(flux_constraints):
+            marker = int(constraint["marker"])
+            description = str(constraint.get("description", "terminal_flux"))
+            q_in = np.zeros(len(inlet_marks_int), dtype=float)
+            q_out = np.zeros(len(outlet_marks_int), dtype=float)
+            flow_basis_scale = 1.0e-9
+            if marker in inlet_internal_index:
+                q_in[inlet_internal_index[marker]] = flow_basis_scale
+            if marker in outlet_internal_index:
+                q_out[outlet_internal_index[marker]] = flow_basis_scale
+            linear_form = self._build_embedded_port_flow_rhs(
+                v,
+                inlet_marks_int,
+                q_in,
+                outlet_marks_int,
+                q_out,
+            )
+            basis_rhs.append(self._assemble_response_rhs(linear_form, a_form, bcs))
+            basis_scales.append(flow_basis_scale)
+            input_names.append(f"terminal_flux:{description}:marker_{marker}")
+            input_values.append(float(actual_targets[constraint_idx]))
+
+        ds = ufl.Measure("ds", domain=mesh, subdomain_data=self.facet_tags)
+        n = ufl.FacetNormal(mesh)
+
+        def add_pressure_basis(name: str, marker: int, shape, value: float) -> None:
+            linear_form = -shape * ufl.dot(_u, n) * ds(int(marker))
+            basis_rhs.append(self._assemble_response_rhs(linear_form, a_form, bcs))
+            basis_scales.append(1.0)
+            input_names.append(name)
+            input_values.append(float(value))
+
+        if self.concave_pressure_profile == "linear":
+            for side, marker, low, high in (
+                (
+                    "arterial",
+                    int(self.arterial_concave_marker),
+                    float(self.concave_art_pressure_low),
+                    float(self.concave_art_pressure_high),
+                ),
+                (
+                    "venous",
+                    int(self.venous_concave_marker),
+                    float(self.concave_ven_pressure_low),
+                    float(self.concave_ven_pressure_high),
+                ),
+            ):
+                bounds = self._marker_axis_interval(marker)
+                if bounds is None or abs(float(bounds[1] - bounds[0])) <= 1.0e-14:
+                    low_shape = high_shape = 0.5
+                else:
+                    coord = ufl.SpatialCoordinate(mesh)[int(self.concave_pressure_profile_axis)]
+                    xi = (coord - float(bounds[0])) / float(bounds[1] - bounds[0])
+                    low_shape = 1.0 - xi
+                    high_shape = xi
+                add_pressure_basis(f"p_concave_{side}_low", marker, low_shape, low)
+                add_pressure_basis(f"p_concave_{side}_high", marker, high_shape, high)
+        else:
+            one = fem.Constant(mesh, dfx.default_scalar_type(1.0))
+            add_pressure_basis(
+                "p_concave_arterial",
+                int(self.arterial_concave_marker),
+                one,
+                float(self.p_in_BC),
+            )
+            add_pressure_basis(
+                "p_concave_venous",
+                int(self.venous_concave_marker),
+                one,
+                float(self.p_out_BC),
+            )
+
+        output_vectors, output_names = self._response_output_vectors(
+            M, inlet_marks, outlet_marks
+        )
+        n_inputs = len(input_names)
+        n_outputs = len(output_names)
+        actual_u = np.asarray(input_values, dtype=float)
+
+        # Recover forcing independent of the declared inputs. This is normally
+        # zero, but retaining it makes the affine intercept exact if a fixed
+        # source is introduced later.
+        fixed_rhs = actual_rhs.copy()
+        for value, scale, rhs_basis in zip(actual_u, basis_scales, basis_rhs):
+            fixed_rhs.axpy(-float(value) / float(scale), rhs_basis)
+        fixed_targets = np.asarray(actual_targets, dtype=float).copy()
+        fixed_targets[:nt] -= actual_u[:nt]
+        x0 = self._solve_constrained_response(
+            ksp, fixed_rhs, fixed_targets, c_vecs, z_list, S
+        )
+        h0 = np.asarray([vec.dot(x0) for vec in output_vectors], dtype=float)
+        H = np.zeros((n_outputs, n_inputs), dtype=float)
+        for column, rhs_basis in enumerate(basis_rhs):
+            targets = np.zeros(nt, dtype=float)
+            if column < nt:
+                targets[column] = float(basis_scales[column])
+            x_basis = self._solve_constrained_response(
+                ksp, rhs_basis, targets, c_vecs, z_list, S
+            )
+            H[:, column] = np.asarray(
+                [vec.dot(x_basis) for vec in output_vectors], dtype=float
+            ) / float(basis_scales[column])
+            if mesh.comm.rank == 0:
+                print(
+                    f"[response] Basis {column + 1}/{n_inputs}: {input_names[column]}",
+                    flush=True,
+                )
+
+        x_actual = self._solve_constrained_response(
+            ksp, actual_rhs, actual_targets, c_vecs, z_list, S
+        )
+        y_actual = np.asarray([vec.dot(x_actual) for vec in output_vectors], dtype=float)
+        y_predicted = h0 + H @ actual_u
+        validation_abs = np.abs(y_predicted - y_actual)
+        response_rank = int(np.linalg.matrix_rank(H))
+        response_singular_values = np.linalg.svd(H, compute_uv=False)
+        output_path = Path(self.response_map_output).expanduser().resolve()
+        metadata_path = output_path.with_suffix(".json")
+        if mesh.comm.rank == 0:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                output_path,
+                h0=h0,
+                H=H,
+                input_center=np.zeros(n_inputs, dtype=float),
+                input_scale=np.ones(n_inputs, dtype=float),
+                singular_values=response_singular_values,
+                identified_rank=np.asarray([n_inputs], dtype=np.int64),
+                response_matrix_rank=np.asarray([response_rank], dtype=np.int64),
+                condition_number=np.asarray([float(np.linalg.cond(H))], dtype=float),
+                baseline_inputs=actual_u,
+                baseline_outputs=y_actual,
+                basis_scales=np.asarray(basis_scales, dtype=float),
+            )
+            metadata = {
+                "format": "darcy-affine-response-v1",
+                "construction": "exact_pde_one_hot_basis",
+                "globally_identified": True,
+                "input_dimension": n_inputs,
+                "output_dimension": n_outputs,
+                "identified_rank": n_inputs,
+                "response_matrix_rank": response_rank,
+                "basis_column_count": n_inputs,
+                "basis_scales": [float(value) for value in basis_scales],
+                "input_names": input_names,
+                "output_names": output_names,
+                "baseline_validation": {
+                    "max_abs": float(np.max(validation_abs)),
+                    "pressure_max_abs": float(np.max(validation_abs[:-2])),
+                    "concave_flow_max_abs": float(np.max(validation_abs[-2:])),
+                },
+                "mesh_source": str(self._mesh_source_path),
+                "facet_source": str(self._facet_source_path),
+                "geometry_sha256": self._geometry_file_fingerprints(
+                    self._mesh_source_path,
+                    self._facet_source_path,
+                ),
+                "permeability": dict(self.permeability_metadata),
+                "concave_bc_mode": str(self.concave_bc_mode),
+                "concave_pressure_profile": str(self.concave_pressure_profile),
+                "concave_pressure_profile_axis": str(self.concave_pressure_profile_axis_name),
+                "terminal_flux_constraint_count": nt,
+                "terminal_flux_constraint_markers": [int(item["marker"]) for item in flux_constraints],
+                "terminal_flux_constraint_descriptions": [
+                    str(item.get("description", "")) for item in flux_constraints
+                ],
+                "branch_ids_inlet": [int(value) for value in np.asarray(self.branch_ids_in, dtype=int)],
+                "branch_ids_outlet": [int(value) for value in np.asarray(self.branch_ids_out, dtype=int)],
+            }
+            with metadata_path.open("w", encoding="utf-8") as fp:
+                json.dump(metadata, fp, indent=2)
+                fp.write("\n")
+            print(
+                f"[response] Exact map written to {output_path}; "
+                f"baseline max error={float(np.max(validation_abs)):.3e}",
+                flush=True,
+            )
 
     def _split_marker_facets(self, marker: int):
         mesh = self.mesh
@@ -2053,7 +2392,7 @@ class PerfusionSolver(CGPerfusionSolver):
         if mesh.comm.rank == 0:
             print("[solve] Assembling mixed Darcy system", flush=True)
         t0 = time.perf_counter()
-        A, b, _ = self._assemble_system(a, L, bcs)
+        A, b, a_form = self._assemble_system(a, L, bcs)
         bc_dofs = self._collect_bc_dofs(bcs)
         c_vecs = self._build_constraint_vectors(M, flux_constraints, bc_dofs)
         if mesh.comm.rank == 0:
@@ -2094,6 +2433,23 @@ class PerfusionSolver(CGPerfusionSolver):
             rhs[i] = flux_constraint_targets[i] - c_vecs[i].dot(z0)
             for j in range(nt):
                 S[i, j] = c_vecs[i].dot(z_list[j])
+
+        self._build_exact_response_map(
+            M=M,
+            a_form=a_form,
+            bcs=bcs,
+            ksp=ksp,
+            actual_rhs=b,
+            actual_targets=flux_constraint_targets,
+            c_vecs=c_vecs,
+            z_list=z_list,
+            S=S,
+            flux_constraints=flux_constraints,
+            inlet_marks=inlet_marks,
+            outlet_marks=outlet_marks,
+            inlet_marks_int=inlet_marks_int,
+            outlet_marks_int=outlet_marks_int,
+        )
 
         if nt > 0:
             lam, *_ = np.linalg.lstsq(S, rhs, rcond=None)
@@ -2357,6 +2713,14 @@ if __name__ == "__main__":
             "diagnostics; full restores the previous diagnostic computations."
         ),
     )
+    ap.add_argument(
+        "--response-map-output",
+        default="",
+        help=(
+            "Optional .npz path. When set, compute the globally exact affine Darcy "
+            "input/output map from one PDE solve for every independent input basis."
+        ),
+    )
     args = ap.parse_args()
 
     if args.out_dir:
@@ -2406,5 +2770,6 @@ if __name__ == "__main__":
         concave_outlet_pressure=args.concave_outlet_pressure,
         output_mode=args.output_mode,
         diagnostics_mode=args.diagnostics_mode,
+        response_map_output=args.response_map_output,
     )
     solver.setup()
