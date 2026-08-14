@@ -1,11 +1,18 @@
 import sys
-sys.path.insert(0, "../../clones/svVascularize")
+from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT / "clones" / "svVascularize"))
 import pyvista as pv
 import svv
 from svv.domain.domain import Domain
 from svv.tree.tree import Tree
 from svv.forest.forest import Forest
 from svv.tree.data.data import TreeParameters
+from svv.tree.branch.bifurcation import (
+    _terminal_face_intersects_finite_cylinder,
+    _terminal_face_sample_points,
+)
 import inspect
 from svv.simulation.simulation import Simulation
 import matplotlib.pyplot as plt
@@ -14,7 +21,6 @@ from itertools import chain
 from tqdm import trange
 import numpy as np
 import pandas as pd
-from pathlib import Path
 import json
 # from svcco.implicit.load import load3d_pv
 from time import perf_counter
@@ -56,13 +62,27 @@ class Generate:
         self.parameters['outdir'] = kwargs.get('outdir',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/src/synthetic-vasculature-generation")
         self.parameters['folder'] = kwargs.get('folder','tmp')
         self.parameters['implicit_geometry'] = kwargs.get('implicit_geometry', 'stl')
-        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/sphere/organoid-1.stl")
+        self.parameters['geom'] = kwargs.get('geom',"/Users/rakshakonanur/Documents/Research/Organoid-Project/coupled-multi-organoid-model/files/stl/organoid-growth-domains/different-shaped-domains/actual.stl")
+        # The main geometry contains all non-root vessel segments.  These
+        # optional geometries restrict only the points sampled for terminals.
+        self.parameters['tree_terminal_geom'] = kwargs.get('tree_terminal_geom', None)
+        self.parameters['forest_inlet_terminal_geom'] = kwargs.get('forest_inlet_terminal_geom', None)
+        self.parameters['forest_outlet_terminal_geom'] = kwargs.get('forest_outlet_terminal_geom', None)
+        self.parameters['tree_root_length'] = kwargs.get('tree_root_length', None)
+        self.parameters['forest_inlet_root_length'] = kwargs.get('forest_inlet_root_length', None)
+        self.parameters['forest_outlet_root_length'] = kwargs.get('forest_outlet_root_length', None)
+        self.parameters['show_tree'] = bool(kwargs.get('show_tree', True))
+        self.parameters['export_forest_solids'] = bool(kwargs.get('export_forest_solids', True))
+        self.parameters['forest_post_repair'] = bool(kwargs.get('forest_post_repair', True))
+        self.parameters['forest_repair_compete'] = bool(
+            kwargs.get('forest_repair_compete', kwargs.get('compete', True))
+        )
         self.parameters['sphere_center'] = np.asarray(kwargs.get('sphere_center', [0.0, 0.9, 0.55]), dtype=float)
         self.parameters['sphere_radius'] = float(kwargs.get('sphere_radius', 0.06))
         self.parameters['sphere_theta_resolution'] = int(kwargs.get('sphere_theta_resolution', 60))
         self.parameters['sphere_phi_resolution'] = int(kwargs.get('sphere_phi_resolution', 60))
         self.parameters['append_cylinders'] = bool(kwargs.get('append_cylinders', True))
-        self.parameters['left_cylinder_center'] = np.asarray(kwargs.get('left_cylinder_center', [-0.25, 0.9, 0.5375]), dtype=float)
+        self.parameters['left_cylinder_center'] = np.asarray(kwargs.get('left_cylinder_center', [.30, 0.9, 0.5375]), dtype=float)
         self.parameters['left_cylinder_direction'] = np.asarray(kwargs.get('left_cylinder_direction', [1.0, 0.0, 0.0]), dtype=float)
         self.parameters['left_cylinder_radius'] = float(kwargs.get('left_cylinder_radius', 0.03))
         self.parameters['left_cylinder_height'] = float(kwargs.get('left_cylinder_height', 0.11))
@@ -86,6 +106,16 @@ class Generate:
         self.parameters['physical_clearance'] = float(kwargs.get('physical_clearance', 1e-4))
         self.parameters['compete'] = bool(kwargs.get('compete', True))
         self.parameters['decay_probability'] = float(kwargs.get('decay_probability', 0.9))
+        self.parameters['distance_weight_exponent'] = float(
+            kwargs.get('distance_weight_exponent', 0.0)
+        )
+        if self.parameters['distance_weight_exponent'] < 0.0:
+            raise ValueError("distance_weight_exponent must be nonnegative")
+        self.parameters['distance_weight_relaxation_batches'] = int(
+            kwargs.get('distance_weight_relaxation_batches', 10)
+        )
+        if self.parameters['distance_weight_relaxation_batches'] < 0:
+            raise ValueError("distance_weight_relaxation_batches must be nonnegative")
         self.parameters['tree_threshold'] = kwargs.get('tree_threshold', 1e-1)
         self.parameters['forest_threshold'] = kwargs.get('forest_threshold', 2.5e-3)
         self.parameters['threshold_exponent'] = float(kwargs.get('threshold_exponent', 1.5))
@@ -94,8 +124,49 @@ class Generate:
         self.parameters['n_closest_vessels'] = int(kwargs.get('n_closest_vessels', 2))
         self.parameters['flow_ratio'] = kwargs.get('flow_ratio', 20)
         self.parameters['max_iter'] = int(kwargs.get('max_iter', 20))
+        self.parameters['max_candidate_batches'] = int(kwargs.get('max_candidate_batches', 50))
+        self.parameters['max_forest_collision_retries'] = int(
+            kwargs.get('max_forest_collision_retries', 100)
+        )
         self.parameters['use_brute'] = bool(kwargs.get('use_brute', False))
         self.parameters['nonconvex_sampling'] = int(kwargs.get('nonconvex_sampling', 10))
+        self.parameters['bifurcation_barycentric_margin'] = float(
+            kwargs.get('bifurcation_barycentric_margin', 0.05)
+        )
+        if not 0.0 <= self.parameters['bifurcation_barycentric_margin'] < (1.0 / 3.0):
+            raise ValueError("bifurcation_barycentric_margin must be in [0, 1/3)")
+        self.parameters['use_mesh_containment'] = bool(
+            kwargs.get('use_mesh_containment', False)
+        )
+        self.parameters['strict_collision_checks'] = bool(
+            kwargs.get('strict_collision_checks', False)
+        )
+        self.parameters['reject_embedded_outlet_faces'] = bool(
+            kwargs.get('reject_embedded_outlet_faces', True)
+        )
+        self.parameters['validate_forest_outlets'] = bool(
+            kwargs.get('validate_forest_outlets', True)
+        )
+        self.parameters['preserve_fixed_root_tip'] = bool(
+            kwargs.get('preserve_fixed_root_tip', True)
+        )
+        self.parameters['exact_nonlocal_collision_checks'] = bool(
+            kwargs.get('exact_nonlocal_collision_checks', False)
+        )
+        self.parameters['max_parent_daughter_turn_angle'] = kwargs.get(
+            'max_parent_daughter_turn_angle', None
+        )
+        self.parameters['min_daughter_separation_angle'] = kwargs.get(
+            'min_daughter_separation_angle', None
+        )
+        self.parameters['repair_max_parent_daughter_turn_angle'] = kwargs.get(
+            'repair_max_parent_daughter_turn_angle',
+            self.parameters['max_parent_daughter_turn_angle'],
+        )
+        self.parameters['repair_min_daughter_separation_angle'] = kwargs.get(
+            'repair_min_daughter_separation_angle',
+            self.parameters['min_daughter_separation_angle'],
+        )
         # Root placement controls
         self.parameters['root_volume_fraction'] = float(kwargs.get('root_volume_fraction', 1.0))
         self.parameters['root_threshold_adjuster'] = float(kwargs.get('root_threshold_adjuster', 0.9))
@@ -103,9 +174,9 @@ class Generate:
         self.parameters['root_attempts'] = int(kwargs.get('root_attempts', 100))
         self.parameters['root_start_on'] = kwargs.get('root_start_on', 'boundary')
         # Tree hemodynamic controls
-        self.parameters['tree_terminal_pressure'] = float(kwargs.get('tree_terminal_pressure', 50.0 * 1333.22))
-        self.parameters['tree_root_pressure'] = float(kwargs.get('tree_root_pressure', 120.0 * 1333.22))
-        self.parameters['tree_total_flow'] = float(kwargs.get('tree_total_flow', 0.03 / 60.0))
+        self.parameters['tree_terminal_pressure'] = float(kwargs.get('tree_terminal_pressure', 147.0))
+        self.parameters['tree_root_pressure'] = float(kwargs.get('tree_root_pressure', 181.0))
+        self.parameters['tree_total_flow'] = float(kwargs.get('tree_total_flow', 1.2e-3 / 60.0))
         self.parameters['tree_fluid_density'] = kwargs.get('tree_fluid_density', None)
         self.parameters['tree_kinematic_viscosity'] = kwargs.get('tree_kinematic_viscosity', None)
         self.parameters['tree_murray_exponent'] = kwargs.get('tree_murray_exponent', None)
@@ -154,13 +225,153 @@ class Generate:
             'n_closest_vessels': self.parameters['n_closest_vessels'],
             'flow_ratio': self.parameters['flow_ratio'],
             'max_iter': self.parameters['max_iter'],
+            'max_candidate_batches': self.parameters['max_candidate_batches'],
+            'max_forest_collision_retries': self.parameters[
+                'max_forest_collision_retries'
+            ],
             'use_brute': self.parameters['use_brute'],
             'nonconvex_sampling': self.parameters['nonconvex_sampling'],
+            'bifurcation_barycentric_margin': self.parameters[
+                'bifurcation_barycentric_margin'
+            ],
+            'use_mesh_containment': self.parameters['use_mesh_containment'],
+            'strict_collision_checks': self.parameters['strict_collision_checks'],
+            'reject_embedded_outlet_faces': self.parameters[
+                'reject_embedded_outlet_faces'
+            ],
+            'exact_nonlocal_collision_checks': self.parameters[
+                'exact_nonlocal_collision_checks'
+            ],
+            'max_parent_daughter_turn_angle': self.parameters['max_parent_daughter_turn_angle'],
+            'min_daughter_separation_angle': self.parameters['min_daughter_separation_angle'],
+            'repair_max_parent_daughter_turn_angle': self.parameters[
+                'repair_max_parent_daughter_turn_angle'
+            ],
+            'repair_min_daughter_separation_angle': self.parameters[
+                'repair_min_daughter_separation_angle'
+            ],
             'decay_probability': self.parameters['decay_probability'],
+            'distance_weight_exponent': self.parameters['distance_weight_exponent'],
+            'distance_weight_relaxation_batches': self.parameters[
+                'distance_weight_relaxation_batches'
+            ],
         }
 
     def _terminal_flow_from_total(self, total_flow, num_branches):
         return float(total_flow) / max(int(num_branches) + 1, 1)
+
+    @staticmethod
+    def _point_inside_finite_cylinder(point, vessel, tolerance=1e-10):
+        embedded, penetration = Generate._points_inside_finite_cylinder(
+            np.asarray(point).reshape(1, 3), vessel, tolerance=tolerance
+        )
+        return bool(embedded[0]), float(penetration[0])
+
+    @staticmethod
+    def _points_inside_finite_cylinder(points, vessel, tolerance=1e-10):
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        axis = vessel[3:6] - vessel[0:3]
+        length_squared = float(np.dot(axis, axis))
+        if length_squared <= tolerance * tolerance:
+            return (
+                np.zeros((len(points),), dtype=bool),
+                np.full((len(points),), -np.inf),
+            )
+        axial_fraction = ((points - vessel[0:3]) @ axis) / length_squared
+        within_caps = (
+            (axial_fraction > tolerance)
+            & (axial_fraction < 1.0 - tolerance)
+        )
+        closest = vessel[0:3] + axial_fraction.reshape(-1, 1) * axis
+        radial_distance = np.linalg.norm(points - closest, axis=1)
+        penetration = float(vessel[21]) - radial_distance
+        return within_caps & (penetration > tolerance), penetration
+
+    def _forest_outlet_embedding_conflicts(self, forest):
+        """Return terminal faces with any sampled area swallowed by a vessel."""
+        conflicts = []
+        trees = [
+            (network_id, tree_id, tree)
+            for network_id, network in enumerate(forest.networks)
+            for tree_id, tree in enumerate(network)
+        ]
+        tolerance = 1e-10
+        for network_id, tree_id, tree in trees:
+            data = np.asarray(tree.data)
+            leaves = np.flatnonzero(
+                np.isnan(data[:, 15]) & np.isnan(data[:, 16])
+            )
+            for leaf_id in leaves:
+                parent = data[leaf_id, 17]
+                parent_id = None if np.isnan(parent) else int(parent)
+                face_points = _terminal_face_sample_points(
+                    data[leaf_id:leaf_id + 1, :],
+                    radial_levels=np.linspace(0.0, 1.0, 9),
+                    n_theta=72,
+                )
+                for obstacle_network, obstacle_tree_id, obstacle_tree in trees:
+                    obstacle_data = np.asarray(obstacle_tree.data)
+                    for obstacle_id, obstacle in enumerate(obstacle_data):
+                        if (
+                            obstacle_network == network_id
+                            and obstacle_tree_id == tree_id
+                            and obstacle_id in (int(leaf_id), parent_id)
+                        ):
+                            continue
+                        embedded, penetrations = self._points_inside_finite_cylinder(
+                            face_points, obstacle, tolerance=tolerance
+                        )
+                        embedded_ids = np.flatnonzero(embedded)
+                        face_intersects = _terminal_face_intersects_finite_cylinder(
+                            data[leaf_id, :], obstacle, eps=tolerance
+                        )
+                        if face_intersects:
+                            if len(embedded_ids):
+                                sample_id = int(embedded_ids[
+                                    np.argmax(penetrations[embedded_ids])
+                                ])
+                                penetration = float(penetrations[sample_id])
+                            else:
+                                sample_id = -1
+                                penetration = 0.0
+                            distance = float(obstacle[21]) - penetration
+                            conflicts.append({
+                                'network': int(network_id),
+                                'tree': int(tree_id),
+                                'terminal_vessel': int(leaf_id),
+                                'obstacle_network': int(obstacle_network),
+                                'obstacle_tree': int(obstacle_tree_id),
+                                'obstacle_vessel': int(obstacle_id),
+                                'centerline_distance': distance,
+                                'obstacle_radius': float(obstacle[21]),
+                                'penetration': penetration,
+                                'embedded_face_samples': len(embedded_ids),
+                                'face_samples': len(face_points),
+                                'embedded_fraction': len(embedded_ids) / len(face_points),
+                                'deepest_sample': int(sample_id),
+                            })
+                            break
+                    if conflicts and conflicts[-1]['network'] == network_id \
+                            and conflicts[-1]['tree'] == tree_id \
+                            and conflicts[-1]['terminal_vessel'] == int(leaf_id):
+                        break
+        return conflicts
+
+    def _validate_forest_outlets(self, forest):
+        conflicts = self._forest_outlet_embedding_conflicts(forest)
+        if not conflicts:
+            print("Forest outlet-face validation passed")
+            return
+        details = "; ".join(
+            "tree {network}-{tree} terminal {terminal_vessel} inside "
+            "tree {obstacle_network}-{obstacle_tree} vessel {obstacle_vessel} "
+            "by {penetration:.6g} (sampled overlap {embedded_fraction:.1%})".format(**conflict)
+            for conflict in conflicts[:10]
+        )
+        raise RuntimeError(
+            f"Forest outlet-face validation failed with {len(conflicts)} "
+            f"embedded terminal face(s): {details}. No geometry was exported."
+        )
 
     def _tree_parameter_kwargs(self, prefix: str, num_branches: int):
         params = {
@@ -187,6 +398,31 @@ class Generate:
             return
         domain.set_random_seed(int(seed))
         domain.set_random_generator()
+
+    @staticmethod
+    def _root_endpoint(start, direction, length):
+        """Return the endpoint of a fixed-length root, if one was requested."""
+        if length is None:
+            return None
+        length = float(length)
+        if length <= 0.0:
+            raise ValueError(f"root length must be positive, got {length}")
+        start = np.asarray(start, dtype=float).reshape(3,)
+        direction = np.asarray(direction, dtype=float).reshape(3,)
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0.0:
+            raise ValueError("root direction must be nonzero")
+        return (start + length * direction / norm).reshape(1, -1)
+
+    def _construct_domain(self, mesh, label):
+        domain = Domain()
+        domain.set_data(mesh)
+        self._apply_random_seed(domain)
+        domain.create()
+        domain.solve()
+        domain.build()
+        print(f"{label} domain constructed")
+        return domain
 
     def _save_generation_config(self, filename="generation_config.json"):
         serializable = {}
@@ -261,14 +497,23 @@ class Generate:
             plotter.add_axes()
             plotter.show_grid()
             plotter.show()
-        cermSurf = Domain()
-        cermSurf.set_data(mesh)
-        self._apply_random_seed(cermSurf)
-        cermSurf.create()
-        cermSurf.solve()
-        cermSurf.build()
-        print('domain constructed')
-        self.cermSurf = cermSurf
+        self.cermSurf = self._construct_domain(mesh, "containment")
+        self.terminal_domains = {}
+        terminal_paths = {
+            'tree': self.parameters.get('tree_terminal_geom'),
+            'forest_inlet': self.parameters.get('forest_inlet_terminal_geom'),
+            'forest_outlet': self.parameters.get('forest_outlet_terminal_geom'),
+        }
+        domain_cache = {}
+        for name, path in terminal_paths.items():
+            if path is None:
+                continue
+            resolved = str(Path(path).expanduser().resolve())
+            if resolved not in domain_cache:
+                domain_cache[resolved] = self._construct_domain(
+                    pv.read(resolved), f"terminal ({name})"
+                )
+            self.terminal_domains[name] = domain_cache[resolved]
     
     def tree_build(self): # build vascular tree
         cermSurf = self.cermSurf
@@ -281,11 +526,16 @@ class Generate:
         cerm_tree.physical_clearance = self.parameters['physical_clearance']
         cerm_tree.random_seed = self.parameters['random_seed']
         cerm_tree.set_domain(cermSurf)
+        if 'tree' in self.terminal_domains:
+            cerm_tree.set_terminal_domain(self.terminal_domains['tree'])
         cerm_tree.convex = self.convex
-        cerm_tree.set_root(start=root, direction=direction, **self._root_kwargs())
+        root_end = self._root_endpoint(root, direction, self.parameters['tree_root_length'])
+        cerm_tree.set_root(start=root, end=root_end, direction=direction, **self._root_kwargs())
+        cerm_tree.preserve_fixed_root_tip = self.parameters['preserve_fixed_root_tip']
         cerm_tree.n_add(num_branches, **self._growth_kwargs('tree'))
         print("Tree growth debug:", cerm_tree.growth_debug_summary())
-        cerm_tree.show(plot_domain=True)
+        if self.parameters['show_tree']:
+            cerm_tree.show(plot_domain=True)
         self.cerm_tree = cerm_tree
         self.data = cerm_tree.data
         self._save_generation_config()
@@ -321,8 +571,35 @@ class Generate:
             for tree in network:
                 tree.random_seed = self.parameters['random_seed']
                 tree.physical_clearance = self.parameters['physical_clearance']
-        cerm_forest.set_roots(start_points, directions, **self._root_kwargs())
-        cerm_forest.add(num_branches, **self._growth_kwargs('forest'))
+                tree.convex = self.convex
+        if 'forest_inlet' in self.terminal_domains:
+            cerm_forest.networks[0][0].set_terminal_domain(self.terminal_domains['forest_inlet'])
+        if 'forest_outlet' in self.terminal_domains:
+            cerm_forest.networks[0][1].set_terminal_domain(self.terminal_domains['forest_outlet'])
+        end_points = [[
+            self._root_endpoint(
+                start_points[0][0], directions[0][0],
+                self.parameters['forest_inlet_root_length'],
+            ),
+            self._root_endpoint(
+                start_points[0][1], directions[0][1],
+                self.parameters['forest_outlet_root_length'],
+            ),
+        ]]
+        cerm_forest.set_roots(
+            start_points, directions, end_points=end_points, **self._root_kwargs()
+        )
+        for network in cerm_forest.networks:
+            for tree in network:
+                tree.preserve_fixed_root_tip = self.parameters['preserve_fixed_root_tip']
+        cerm_forest.add(
+            num_branches,
+            post_repair=self.parameters['forest_post_repair'],
+            repair_compete=self.parameters['forest_repair_compete'],
+            **self._growth_kwargs('forest'),
+        )
+        if self.parameters['validate_forest_outlets']:
+            self._validate_forest_outlets(cerm_forest)
         networks = cerm_forest.networks
         for i in range(number_of_networks):
             for j in range(trees_per_network[i]):
@@ -332,14 +609,15 @@ class Generate:
             for j in range(trees_per_network[i]): # currently only writes the first network, can be modified to write all networks
                 self.data = networks[0][j].data
                 self.save_data(filename="branchingData_{}.csv".format(j))
-                solid_outdir = outdir + os.sep + "3d_tmp"
-                os.makedirs(solid_outdir, exist_ok=True)
-                merged_model = networks[0][j].export_solid(
-                    outdir=solid_outdir,
-                    shell_thickness=self.parameters['export_shell_thickness'],
-                    watertight=self.parameters['export_watertight'],
-                )
-                merged_model.save(solid_outdir + os.sep + "geom3D_{}.vtp".format(j))
+                if self.parameters['export_forest_solids']:
+                    solid_outdir = outdir + os.sep + "3d_tmp"
+                    os.makedirs(solid_outdir, exist_ok=True)
+                    merged_model = networks[0][j].export_solid(
+                        outdir=solid_outdir,
+                        shell_thickness=self.parameters['export_shell_thickness'],
+                        watertight=self.parameters['export_watertight'],
+                    )
+                    merged_model.save(solid_outdir + os.sep + "geom3D_{}.vtp".format(j))
 
         # cerm_forest.connect() # suppressed for now
         # cerm_forest.connections.tree_connections[0].show().show()
@@ -468,7 +746,6 @@ class Generate:
         networks = export_0d_simulation(forest=cerm_forest, network_id=0, inlets=[0,], get_0d_solver=True, path_to_0d_solver=path_to_0d_solver, outdir=outdir, folder=folder, number_cardiac_cycles=num_cardiac_cycles, number_time_pts_per_cycle=num_time_pts_per_cycle, distal_pressure=distal_pressure)
 
     def run_0d_simulation(self, modify_bc=False, forest=False, treeID=1): # run 0d simulation
-        import pysvzerod
         outputDir = self.parameters['outdir'] + os.sep + self.parameters['folder']
         if forest:
             if treeID == 0:
@@ -477,37 +754,76 @@ class Generate:
                 folder = "outlet"
             outputDir = outputDir + os.sep + folder
 
-        exe = "svzerodsolver"
+        configured_solver = Path(self.parameters['path_to_0d_solver']).expanduser()
+        if configured_solver.is_dir():
+            configured_solver = configured_solver / "svzerodsolver"
+        if configured_solver.is_file():
+            exe = str(configured_solver)
+        else:
+            from svv.utils.solvers.solver_0d import get_solver_0d_exe
+            try:
+                exe = str(get_solver_0d_exe())
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    "svZeroDSolver executable was not found. Checked configured "
+                    f"path {configured_solver} and the svVascularize packaged paths."
+                ) from exc
         if modify_bc:
             input_file = os.path.join(outputDir, "solver_0d_new.in")
         else:
             input_file = os.path.join(outputDir, "solver_0d.in")
         output_file = os.path.join(outputDir, "output.csv")
 
-        subprocess.run([exe, input_file, output_file],
-                        cwd= self.parameters['outdir'] ,
-                        stdout=None,  # Display stdout in the terminal
-                        stderr=None,  # Display stderr in the terminal
-                        shell=False)  # shell=False is usually safer
+        if not os.path.isfile(input_file):
+            raise FileNotFoundError(
+                f"0D solver input does not exist: {input_file}. "
+                f"forest={forest}, treeID={treeID}"
+            )
+        try:
+            with open(input_file) as stream:
+                json.load(stream)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid 0D solver JSON: {input_file}") from exc
+
+        subprocess.run(
+            [exe, input_file, output_file],
+            cwd=self.parameters['outdir'],
+            stdout=None,  # Display stdout in the terminal
+            stderr=None,  # Display stderr in the terminal
+            shell=False,
+            check=True,
+        )
 
     def plot_0d_results_to_3d(self): # export 0d results to 3d
-        os.chdir(self.parameters['outdir'] + os.sep + self.parameters['folder'])
-        fileName = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'plot_0d_results_to_3d.py'
-        subprocess.run(['python', fileName])
+        directory = self.parameters['outdir'] + os.sep + self.parameters['folder']
+        fileName = directory + os.sep + 'plot_0d_results_to_3d.py'
+        environment = os.environ.copy()
+        environment.setdefault('SVV_0D_RENDER_SCREENSHOTS', '0')
+        subprocess.run(
+            [sys.executable, fileName], cwd=directory, env=environment, check=True
+        )
 
     def plot_0d_results_to_3d_forest(self): # export 0d results to 3d
-        os.chdir(self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'outlet')
-        fileName = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'outlet' + os.sep + 'plot_0d_results_to_3d.py'
-        subprocess.run(['python', fileName])
+        directory = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'outlet'
+        fileName = directory + os.sep + 'plot_0d_results_to_3d.py'
+        environment = os.environ.copy()
+        environment.setdefault('SVV_0D_RENDER_SCREENSHOTS', '0')
+        subprocess.run(
+            [sys.executable, fileName], cwd=directory, env=environment, check=True
+        )
 
 
     def plot_0d_results_to_3d_forest_both(self): # export 0d results to 3d
-        os.chdir(self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'inlet')
-        fileName = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'inlet' + os.sep + 'plot_0d_results_to_3d.py'
-        subprocess.run(['python', fileName])
-        os.chdir(self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'outlet')
-        fileName = self.parameters['outdir'] + os.sep + self.parameters['folder'] + os.sep + 'outlet' + os.sep + 'plot_0d_results_to_3d.py'
-        subprocess.run(['python', fileName])
+        base_directory = self.parameters['outdir'] + os.sep + self.parameters['folder']
+        environment = os.environ.copy()
+        environment.setdefault('SVV_0D_RENDER_SCREENSHOTS', '0')
+        for name in ('inlet', 'outlet'):
+            directory = base_directory + os.sep + name
+            fileName = directory + os.sep + 'plot_0d_results_to_3d.py'
+            subprocess.run(
+                [sys.executable, fileName], cwd=directory,
+                env=environment, check=True,
+            )
 
     def export_tree_1d_files(self,number_cardiac_cycles = 5,num_points=1000): # export 1d files required for simulation
         outdir = self.parameters['outdir']
@@ -732,6 +1048,10 @@ class Generate:
             folder += '1D_Output'
         elif rom == 0:
             folder += '0D_Output'
+        elif rom == 2:
+            folder += 'Tree_Output'
+        else:
+            raise ValueError("rom must be 0 (0D), 1 (1D), or 2 (generation only)")
 
         # Current path
         dir = self.parameters['outdir']
@@ -760,6 +1080,8 @@ class Generate:
             self.parameters['folder'] = '0D_Input_Files'
         elif rom == 1:
             self.parameters['folder'] = '1D_Input_Files'
+        elif rom == 2:
+            self.parameters['folder'] = ''
 
     def save_data(self, filename="branchingData.csv"):
         """" From Zach's code...
