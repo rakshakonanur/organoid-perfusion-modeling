@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import importlib
 import json
 import re
@@ -12,10 +13,14 @@ import subprocess
 import sys
 import csv
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, List, Optional
 
 import numpy as np
+
+
+_FILE_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 def die(msg: str) -> None:
@@ -190,6 +195,33 @@ def initialize_iteration_run(prev: Path, cur: Path, overwrite: bool) -> None:
     if not src_combined.exists():
         die(f"Missing previous combined.in: {src_combined}")
     shutil.copy2(src_combined, cur / "combined.in")
+
+
+def validate_fresh_run0_layout(seed_run0: Path, run0: Path, n_organoids: int) -> None:
+    """Reject a start-run=1 that would mix an existing history with a new seed."""
+    mismatches: list[str] = []
+    for organoid_idx in range(1, int(n_organoids) + 1):
+        seed_path = seed_run0 / f"organoid_{organoid_idx}" / "out_darcy" / "interface_bc.json"
+        run_path = run0 / f"organoid_{organoid_idx}" / "out_darcy" / "interface_bc.json"
+        if not seed_path.exists() or not run_path.exists():
+            continue
+        seed_iface = load_json(seed_path)
+        run_iface = load_json(run_path)
+        for side, key in (
+            ("arterial", "branch_ids_inlet"),
+            ("venous", "branch_ids_outlet"),
+        ):
+            seed_ids = [int(value) for value in seed_iface.get(key, [])]
+            run_ids = [int(value) for value in run_iface.get(key, [])]
+            if seed_ids != run_ids:
+                mismatches.append(f"organoid_{organoid_idx} {side}")
+    if mismatches:
+        die(
+            "Existing run_0 terminal layout does not match --seed-run0 "
+            f"({', '.join(mismatches)}). The coupled root contains an older coupling "
+            "history. Use a new empty --coupled-root for --start-run 1; do not mix "
+            "the old run_0 with the new seed geometry/vasculature."
+        )
 
 
 def link_or_copy_tree(src: Path, dst: Path) -> None:
@@ -1400,6 +1432,10 @@ def write_terminal_resistance_summary(
         "hybrid_alternate_side_active",
         "hybrid_alternate_side_scale",
         "hybrid_organoid_deltap_ratio",
+        "hybrid_branch_pressure_error_raw",
+        "hybrid_branch_pressure_error_normalized",
+        "hybrid_branch_pressure_error_scale",
+        "hybrid_branch_side_common_error_raw",
         "hybrid_side_median_pressure_error_raw",
         "hybrid_side_median_pressure_error_normalized",
         "hybrid_side_median_pressure_error_scale",
@@ -1411,6 +1447,15 @@ def write_terminal_resistance_summary(
         "hybrid_side_gauge_common_mode_slope",
         "hybrid_side_gauge_common_mode_slope_source",
         "hybrid_side_gauge_common_mode_slope_samples",
+        "hybrid_side_gauge_independent_delta",
+        "hybrid_side_gauge_removed_throughput_delta",
+        "hybrid_pressure_drop_throughput_error",
+        "hybrid_pressure_drop_throughput_delta",
+        "hybrid_pressure_drop_throughput_delta_uncapped",
+        "hybrid_pressure_drop_throughput_active",
+        "hybrid_pressure_drop_throughput_slope",
+        "hybrid_pressure_drop_throughput_slope_source",
+        "hybrid_pressure_drop_throughput_slope_samples",
         "hybrid_q_error_sensitivity_applied",
         "hybrid_q_error_sensitivity_status",
         "hybrid_q_error_sensitivity_slope",
@@ -1478,6 +1523,10 @@ def write_terminal_resistance_summary(
         "hybrid_relative_pressure_error",
         "hybrid_adaptive_log10_cap",
         "hybrid_r_trial",
+        "hybrid_branch_pressure_error_raw",
+        "hybrid_branch_pressure_error_normalized",
+        "hybrid_branch_pressure_error_scale",
+        "hybrid_branch_side_common_error_raw",
         "hybrid_q_error_sensitivity_applied",
         "hybrid_q_error_sensitivity_status",
         "hybrid_q_error_sensitivity_slope",
@@ -1503,6 +1552,15 @@ def write_terminal_resistance_summary(
         "hybrid_side_gauge_common_mode_slope",
         "hybrid_side_gauge_common_mode_slope_source",
         "hybrid_side_gauge_common_mode_slope_samples",
+        "hybrid_side_gauge_independent_delta",
+        "hybrid_side_gauge_removed_throughput_delta",
+        "hybrid_pressure_drop_throughput_error",
+        "hybrid_pressure_drop_throughput_delta",
+        "hybrid_pressure_drop_throughput_delta_uncapped",
+        "hybrid_pressure_drop_throughput_active",
+        "hybrid_pressure_drop_throughput_slope",
+        "hybrid_pressure_drop_throughput_slope_source",
+        "hybrid_pressure_drop_throughput_slope_samples",
         "hybrid_postsolve_relaxation_alpha",
         "hybrid_predicted_bounded_error",
         "hybrid_sensitivity_applied",
@@ -3739,19 +3797,50 @@ def copy_seed_geometry(
             shutil.rmtree(dst_geom)
 
     def _copy_tmp_mesh_well(tmp_dir: Path, dst_geom: Path, k: int) -> None:
-        # Reuse run_all.py geometry copier to stay aligned with pipeline behavior.
-        repo_src = Path(__file__).resolve().parents[1]
-        sys.path.insert(0, str(repo_src / "prep"))
-        run_all_mod = importlib.import_module("run_all")
-        copy_shared_geometry_outputs = getattr(run_all_mod, "_copy_shared_geometry_outputs")
         dst_geom.mkdir(parents=True, exist_ok=True)
-        # Copy canonical geometry/checkpoint files exactly as run_all.py does.
-        copy_shared_geometry_outputs(
-            tmp_dir,
-            dst_geom,
-            well_idx=k,
-            copy_1d_artifacts=(not no_synthetic_vasculature),
-        )
+
+        # Copy well-specific checkpoint stores to the canonical names expected
+        # by the Darcy solver. Do this directly instead of importing run_all.py,
+        # whose top-level mesh import depends on the caller's working directory.
+        if not no_synthetic_vasculature:
+            required_bp = [
+                "tagged_branches_inlet.bp",
+                "tagged_branches_outlet.bp",
+                "pressure_checkpoint_inlet.bp",
+                "pressure_checkpoint_outlet.bp",
+                "flow_checkpoint_inlet.bp",
+                "flow_checkpoint_outlet.bp",
+            ]
+            optional_bp = [
+                "area_checkpoint_inlet.bp",
+                "area_checkpoint_outlet.bp",
+            ]
+            for name in required_bp + optional_bp:
+                src_well = tmp_dir / name.replace(".bp", f"_well{k}.bp")
+                src_plain = tmp_dir / name
+                src = src_well if src_well.exists() else src_plain
+                if not src.exists():
+                    if name in required_bp:
+                        raise FileNotFoundError(
+                            f"Missing shared geometry artifact for well{k}: "
+                            f"{src_well} (or fallback {src_plain})"
+                        )
+                    continue
+                dst = dst_geom / name
+                if src.is_dir():
+                    copy_tree(src, dst, overwrite=True)
+                else:
+                    shutil.copy2(src, dst)
+
+        src_bio = tmp_dir / f"bioreactor_well{k}.xdmf"
+        src_tags = tmp_dir / f"mesh_tags_well{k}.xdmf"
+        if not src_bio.exists() or not src_tags.exists():
+            raise FileNotFoundError(
+                f"Missing translated well files in {tmp_dir}: "
+                f"{src_bio.name}, {src_tags.name}"
+            )
+        copy_xdmf_with_sidecars(src_bio, dst_geom / "bioreactor.xdmf")
+        copy_xdmf_with_sidecars(src_tags, dst_geom / "mesh_tags.xdmf")
 
         # Also copy branched-network XDMFs (+h5 sidecars), needed by generate_1d_files.
         src_in = tmp_dir / f"branched_network_inlet_well{k}.xdmf"
@@ -4031,7 +4120,26 @@ def build_first_organoid_linear_profile_from_leaks(
 def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndarray, coords_outlet: np.ndarray, dy_step: float) -> None:
     repo_src = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_src / "geometry"))
+    print("[checkpoints] loading DOLFINx checkpoint generator", flush=True)
     mesh_mod = importlib.import_module("mesh")
+
+    stage_locally = bool(os.environ.get("SLURM_JOB_ID"))
+    tmp_root = os.environ.get("TMPDIR") or "/tmp"
+
+    def _publish_store(src: Path, dst: Path) -> None:
+        """Copy a completed local BP store to scratch, then rename it into place."""
+        if not src.exists():
+            raise FileNotFoundError(f"Checkpoint generator did not create {src}")
+        staged = dst.parent / f".{dst.name}.staging-{os.getpid()}"
+        if staged.exists():
+            shutil.rmtree(staged) if staged.is_dir() else staged.unlink()
+        if src.is_dir():
+            shutil.copytree(src, staged)
+        else:
+            shutil.copy2(src, staged)
+        if dst.exists():
+            shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+        os.replace(staged, dst)
 
     for k in range(1, n_organoids + 1):
         org = run_dir / f"organoid_{k}"
@@ -4097,8 +4205,55 @@ def update_1d_checkpoints(run_dir: Path, n_organoids: int, coords_inlet: np.ndar
         if outlet_generator is mesh_mod.generate_1d_files_from_csv:
             outlet_kwargs["rewrite_branch_tags"] = True
 
-        inlet_generator(**inlet_kwargs)
-        outlet_generator(**outlet_kwargs)
+        if not stage_locally:
+            print(f"[checkpoints] organoid_{k}: generating inlet checkpoints", flush=True)
+            inlet_generator(**inlet_kwargs)
+            print(f"[checkpoints] organoid_{k}: generating outlet checkpoints", flush=True)
+            outlet_generator(**outlet_kwargs)
+            continue
+
+        # ADIOS/BP creation can stall when it writes directly to Savio scratch.
+        # Generate complete stores on node-local storage and only then publish
+        # them to the run directory.
+        with tempfile.TemporaryDirectory(
+            prefix=f"coupler-checkpoints-organoid-{k}-",
+            dir=tmp_root,
+        ) as tmp_name:
+            local_geom = Path(tmp_name)
+            local_in = local_geom / xdmf_in.name
+            local_out = local_geom / xdmf_out.name
+            copy_xdmf_with_sidecars(xdmf_in, local_in)
+            copy_xdmf_with_sidecars(xdmf_out, local_out)
+
+            previous_current_dir = mesh_mod.current_dir
+            mesh_mod.current_dir = local_geom
+            try:
+                print(
+                    f"[checkpoints] organoid_{k}: generating inlet checkpoints in {local_geom}",
+                    flush=True,
+                )
+                inlet_generator(**inlet_kwargs)
+                print(
+                    f"[checkpoints] organoid_{k}: generating outlet checkpoints in {local_geom}",
+                    flush=True,
+                )
+                outlet_generator(**outlet_kwargs)
+            finally:
+                mesh_mod.current_dir = previous_current_dir
+
+            generated_prefixes = (
+                "tagged_branches",
+                "velocity_checkpoint",
+                "pressure_checkpoint",
+                "flow_checkpoint",
+                "area_checkpoint",
+            )
+            print(f"[checkpoints] organoid_{k}: publishing completed BP stores", flush=True)
+            for side in ("inlet", "outlet"):
+                for prefix in generated_prefixes:
+                    name = f"{prefix}_{side}.bp"
+                    _publish_store(local_geom / name, geom / name)
+            print(f"[checkpoints] organoid_{k}: complete", flush=True)
 
 
 def required_darcy_geometry_inputs(no_synthetic_vasculature: bool = False) -> list[str]:
@@ -4139,19 +4294,392 @@ def validate_darcy_geometry_inputs(run_dir: Path, n_organoids: int, no_synthetic
         )
 
 
+def resolve_darcy_response_map(raw_path: str, organoid_idx: int) -> Path:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        raise ValueError("Darcy response-map path is empty")
+    if "{organoid}" in raw:
+        raw = raw.format(organoid=int(organoid_idx))
+    elif "X" in raw:
+        raw = raw.replace("X", str(int(organoid_idx)))
+    path = Path(raw).expanduser().resolve()
+    if path.is_dir():
+        path = path / f"exact_global_organoid{int(organoid_idx)}.npz"
+    return path
+
+
+def prepare_automatic_darcy_response_maps(
+    args: argparse.Namespace,
+    seed_run0: Path,
+    scaled_cfg: Optional[dict[str, Any]],
+) -> None:
+    """Build missing/stale exact maps from the prepared run-0 seed."""
+    if str(getattr(args, "darcy_response_map", "")).strip().lower() != "auto":
+        return
+    response_dir = seed_run0 / "response_maps"
+    response_dir.mkdir(parents=True, exist_ok=True)
+    organoid_ids = (
+        [int(scaled_cfg["reference_organoid"])]
+        if scaled_cfg is not None
+        else list(range(1, int(args.n_organoids) + 1))
+    )
+    builder = Path(__file__).resolve().parents[1] / "solves" / "build_darcy_response_map.py"
+    for organoid_idx in organoid_ids:
+        baseline = seed_run0 / f"organoid_{int(organoid_idx)}"
+        output = response_dir / f"exact_global_organoid{int(organoid_idx)}.npz"
+        rebuild = bool(getattr(args, "rebuild_darcy_response_map", False))
+        metadata_path = output.with_suffix(".json")
+        if not rebuild and output.exists() and metadata_path.exists():
+            try:
+                metadata = load_json(metadata_path)
+                expected = metadata.get("geometry_sha256", {})
+                geometry = baseline / "geometry"
+                rebuild = not bool(expected) or any(
+                    not (geometry / str(name)).is_file()
+                    or _sha256_cached(geometry / str(name)) != str(digest)
+                    for name, digest in expected.items()
+                )
+                permeability = metadata.get("permeability", {})
+                requested_region = Path(
+                    resolve_perm_region_for_organoid(
+                        args.perm_region_root, int(organoid_idx)
+                    )
+                ).expanduser().resolve()
+                mapped_region = Path(
+                    str(permeability.get("requested_path", ""))
+                ).expanduser().resolve()
+                expected_physics = {
+                    "perm_low": float(args.perm_low),
+                    "perm_high": float(args.perm_high),
+                    "perm_transition_width": float(args.perm_transition_width),
+                    "anisotropy_factor_inside_stl": float(args.darcy_stl_anisotropy_factor),
+                }
+                rebuild = rebuild or mapped_region != requested_region
+                rebuild = rebuild or any(
+                    not np.isclose(
+                        float(permeability.get(name, float("nan"))),
+                        value,
+                        rtol=1.0e-12,
+                        atol=0.0,
+                    )
+                    for name, value in expected_physics.items()
+                )
+                rebuild = rebuild or str(
+                    metadata.get("concave_bc_mode", "dirichlet")
+                ) != str(args.concave_bc_mode)
+            except Exception:
+                rebuild = True
+        else:
+            rebuild = True
+        if rebuild:
+            print(
+                f"[darcy-map] Building globally exact map for organoid_{organoid_idx} "
+                f"from {baseline}",
+                flush=True,
+            )
+            run([
+                sys.executable,
+                str(builder),
+                "exact",
+                "--baseline-run-dir",
+                str(baseline),
+                "--organoid",
+                str(int(organoid_idx)),
+                "--output",
+                str(output),
+                "--darcy-script",
+                str(Path(args.darcy_script).expanduser().resolve()),
+                "--concave-bc-mode",
+                str(args.concave_bc_mode),
+                "--lp-arterial",
+                str(args.lp_arterial),
+                "--lp-venous",
+                str(args.lp_venous),
+                "--perm-region-path",
+                resolve_perm_region_for_organoid(
+                    args.perm_region_root, int(organoid_idx)
+                ),
+                "--perm-low",
+                str(args.perm_low),
+                "--perm-high",
+                str(args.perm_high),
+                "--perm-transition-width",
+                str(args.perm_transition_width),
+                "--stl-anisotropy-factor",
+                str(args.darcy_stl_anisotropy_factor),
+            ])
+        else:
+            print(f"[darcy-map] Reusing geometry-matched map {output}", flush=True)
+    args.darcy_response_map = str(response_dir)
+
+
+def _sha256_cached(path: Path) -> str:
+    stat = path.stat()
+    key = (path.name, int(stat.st_size), int(stat.st_mtime_ns))
+    if key not in _FILE_SHA256_CACHE:
+        digest = hashlib.sha256()
+        with path.open("rb") as fp:
+            for chunk in iter(lambda: fp.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        _FILE_SHA256_CACHE[key] = digest.hexdigest()
+    return _FILE_SHA256_CACHE[key]
+
+
+def _validate_response_map_configuration(
+    metadata: dict,
+    model_path: Path,
+    org: Path,
+    concave_profile: Optional[dict[str, Any]],
+    organoid_idx: int,
+    args: argparse.Namespace,
+) -> None:
+    mapped_bc_mode = str(metadata.get("concave_bc_mode", "dirichlet"))
+    if mapped_bc_mode != str(args.concave_bc_mode):
+        die(
+            f"Response map {model_path} uses concave BC mode {mapped_bc_mode}, but "
+            f"the coupler requests {args.concave_bc_mode}."
+        )
+    expected_profile = "linear" if concave_profile is not None else "constant"
+    if str(metadata.get("concave_pressure_profile", "constant")) != expected_profile:
+        die(
+            f"Response map {model_path} uses {metadata.get('concave_pressure_profile')} "
+            f"concave pressures, but organoid_{organoid_idx} currently uses {expected_profile}."
+        )
+    permeability = metadata.get("permeability", {})
+    numeric_checks = {
+        "perm_low": float(args.perm_low),
+        "perm_high": float(args.perm_high),
+        "perm_transition_width": float(args.perm_transition_width),
+        "anisotropy_factor_inside_stl": float(args.darcy_stl_anisotropy_factor),
+    }
+    for key, expected in numeric_checks.items():
+        actual = float(permeability.get(key, float("nan")))
+        if not np.isclose(actual, expected, rtol=1.0e-12, atol=0.0):
+            die(
+                f"Response map {model_path} has {key}={actual}, but the coupler requests "
+                f"{expected}. Build a matching exact map."
+            )
+    expected_region = Path(
+        resolve_perm_region_for_organoid(args.perm_region_root, int(organoid_idx))
+    ).expanduser().resolve()
+    mapped_region = Path(str(permeability.get("requested_path", ""))).expanduser().resolve()
+    if mapped_region != expected_region:
+        die(
+            f"Response map permeability region {mapped_region} does not match {expected_region}."
+        )
+    expected_hashes = metadata.get("geometry_sha256", {})
+    if not isinstance(expected_hashes, dict) or not expected_hashes:
+        die(
+            f"Response map {model_path} has no geometry fingerprint. Rebuild it with the "
+            "current exact-map builder before coupling."
+        )
+    geometry = org / "geometry"
+    for filename, expected_hash in expected_hashes.items():
+        current = geometry / str(filename)
+        if not current.is_file() or _sha256_cached(current) != str(expected_hash):
+            die(
+                f"Response map geometry mismatch for organoid_{organoid_idx}: {filename}. "
+                "Build the exact map from this coupling geometry."
+            )
+
+
+def _marker_order_values(
+    iface: dict,
+    side: str,
+    branch_values: np.ndarray,
+) -> dict[int, float]:
+    if side == "inlet":
+        markers = iface.get("terminal_markers_inlet", [])
+    else:
+        markers = iface.get("terminal_markers_outlet", [])
+    # terminal_markers_{inlet,outlet} are written in the same branch-reordered
+    # order as q_*_target_* and branch_ids_*. The marker-to-1D arrays describe
+    # the earlier raw checkpoint layout and must not be applied a second time.
+    if len(markers) != len(branch_values):
+        raise RuntimeError(f"Terminal marker/value counts differ for {side} response map")
+    out: dict[int, float] = {}
+    for marker, value in zip(markers, branch_values):
+        out[int(marker)] = float(value)
+    return out
+
+
+def apply_darcy_response_map(
+    *,
+    run_dir: Path,
+    organoid_idx: int,
+    model_path: Path,
+    concave_profile: Optional[dict[str, Any]],
+    p_art: Optional[float],
+    p_ven: Optional[float],
+    fallback_inlet_pressure: float,
+    fallback_outlet_pressure: float,
+    args: argparse.Namespace,
+) -> None:
+    """Write the current Darcy interface by evaluating a globally exact affine map."""
+    if not model_path.exists() or not model_path.with_suffix(".json").exists():
+        die(f"Missing Darcy response map or metadata: {model_path}")
+    previous_run = run_dir.parent / f"run_{_run_index_from_path(run_dir) - 1}"
+    previous_iface_path = (
+        previous_run / f"organoid_{int(organoid_idx)}" / "out_darcy" / "interface_bc.json"
+    )
+    if not previous_iface_path.exists():
+        die(f"Missing previous interface layout for response-map evaluation: {previous_iface_path}")
+    iface = load_json(previous_iface_path)
+    iface.pop("__source_path__", None)
+    metadata = load_json(model_path.with_suffix(".json"))
+    metadata.pop("__source_path__", None)
+    with np.load(model_path) as arrays:
+        h0 = np.asarray(arrays["h0"], dtype=float)
+        response = np.asarray(arrays["H"], dtype=float)
+
+    org = run_dir / f"organoid_{int(organoid_idx)}"
+    _validate_response_map_configuration(
+        metadata,
+        model_path,
+        org,
+        concave_profile,
+        int(organoid_idx),
+        args,
+    )
+
+    input_names = [str(value) for value in metadata.get("input_names", [])]
+    output_names = [str(value) for value in metadata.get("output_names", [])]
+    if response.shape != (len(output_names), len(input_names)):
+        die(f"Invalid Darcy response-map dimensions in {model_path}: {response.shape}")
+    if not bool(metadata.get("globally_identified", False)):
+        die(f"Refusing non-global Darcy response map: {model_path}")
+
+    branch_ids_in = [int(value) for value in iface.get("branch_ids_inlet", [])]
+    branch_ids_out = [int(value) for value in iface.get("branch_ids_outlet", [])]
+    if branch_ids_in != [int(value) for value in metadata.get("branch_ids_inlet", [])]:
+        die(f"Arterial branch layout does not match response map {model_path}")
+    if branch_ids_out != [int(value) for value in metadata.get("branch_ids_outlet", [])]:
+        die(f"Venous branch layout does not match response map {model_path}")
+
+    inlet_csv = org / "0D_Input_Files" / "inlet" / "output.csv"
+    outlet_csv = org / "0D_Input_Files" / "outlet" / "output.csv"
+    q_in = read_terminal_physical_flows_from_0d_csv(inlet_csv, branch_ids_in, "inlet")
+    q_out = read_terminal_physical_flows_from_0d_csv(outlet_csv, branch_ids_out, "outlet")
+    p_target_in = read_terminal_distal_pressures_from_0d_csv(inlet_csv, branch_ids_in)
+    p_target_out = read_terminal_distal_pressures_from_0d_csv(outlet_csv, branch_ids_out)
+    p_parent_in = read_terminal_parent_pressures_from_0d_csv(inlet_csv, branch_ids_in)
+    p_parent_out = read_terminal_parent_pressures_from_0d_csv(outlet_csv, branch_ids_out)
+    if any(value is None for value in (q_in, q_out, p_target_in, p_target_out, p_parent_in, p_parent_out)):
+        die(f"Could not read current terminal inputs for organoid_{int(organoid_idx)}")
+
+    inlet_by_marker = _marker_order_values(iface, "inlet", q_in)
+    outlet_by_marker = _marker_order_values(iface, "outlet", q_out)
+    if concave_profile is not None:
+        profile_values = {
+            "p_concave_arterial_low": float(concave_profile["arterial_low"]),
+            "p_concave_arterial_high": float(concave_profile["arterial_high"]),
+            "p_concave_venous_low": float(concave_profile["venous_low"]),
+            "p_concave_venous_high": float(concave_profile["venous_high"]),
+        }
+        p_art_value = 0.5 * (profile_values["p_concave_arterial_low"] + profile_values["p_concave_arterial_high"])
+        p_ven_value = 0.5 * (profile_values["p_concave_venous_low"] + profile_values["p_concave_venous_high"])
+    else:
+        p_art_value = float(p_art if p_art is not None else fallback_inlet_pressure)
+        p_ven_value = float(p_ven if p_ven is not None else fallback_outlet_pressure)
+        profile_values = {
+            "p_concave_arterial": p_art_value,
+            "p_concave_venous": p_ven_value,
+        }
+
+    input_values: list[float] = []
+    constraint_targets: list[float] = []
+    for name in input_names:
+        if name.startswith("terminal_flux:"):
+            try:
+                marker = int(name.rsplit("marker_", 1)[1])
+            except Exception as exc:
+                raise RuntimeError(f"Invalid terminal response input name {name!r}") from exc
+            if "embedded_inlet" in name or "exterior_inlet" in name:
+                value = inlet_by_marker[marker]
+            elif "embedded_outlet" in name:
+                value = outlet_by_marker[marker]
+            else:
+                raise RuntimeError(f"Unsupported terminal response input {name!r}")
+            constraint_targets.append(float(value))
+        elif name in profile_values:
+            value = profile_values[name]
+        else:
+            raise RuntimeError(f"Response-map input {name!r} is unavailable")
+        input_values.append(float(value))
+    predicted = h0 + response @ np.asarray(input_values, dtype=float)
+    output = {name: float(value) for name, value in zip(output_names, predicted)}
+    p_in = np.asarray([output[f"p_arterial_branch_{branch}"] for branch in branch_ids_in])
+    p_out = np.asarray([output[f"p_venous_branch_{branch}"] for branch in branch_ids_out])
+    q_art_leak = float(output["q_concave_arterial"])
+    q_ven_leak = float(output["q_concave_venous"])
+
+    for key in ("p_inlet_nodes", "p_inlet_nodes_raw", "p_inlet_nodes_coupled"):
+        iface[key] = p_in.tolist()
+    for key in ("p_outlet_nodes", "p_outlet_nodes_raw", "p_outlet_nodes_coupled"):
+        iface[key] = p_out.tolist()
+    iface.update({
+        "p_inlet_mean": float(np.mean(p_in)),
+        "p_outlet_mean": float(np.mean(p_out)),
+        "p_inlet_target": p_target_in.tolist(),
+        "p_outlet_target": p_target_out.tolist(),
+        "p_inlet_parent_0d": p_parent_in.tolist(),
+        "p_outlet_parent_0d": p_parent_out.tolist(),
+        "p_inlet_parent_0d_source": "0d_output_csv_pressure_in",
+        "p_outlet_parent_0d_source": "0d_output_csv_pressure_in",
+        "q_inlet_target": q_in.tolist(),
+        "q_inlet_target_in": q_in.tolist(),
+        "q_outlet_target_out": q_out.tolist(),
+        "q_inlet_port_in": q_in.tolist(),
+        "q_outlet_port_out": q_out.tolist(),
+        "q_artery_leak": q_art_leak,
+        "q_venous_leak": q_ven_leak,
+        "p_concave_inlet_bc": p_art_value,
+        "p_concave_outlet_bc": p_ven_value,
+        "p_concave_inlet_bc_low": float(profile_values.get("p_concave_arterial_low", p_art_value)),
+        "p_concave_inlet_bc_high": float(profile_values.get("p_concave_arterial_high", p_art_value)),
+        "p_concave_outlet_bc_low": float(profile_values.get("p_concave_venous_low", p_ven_value)),
+        "p_concave_outlet_bc_high": float(profile_values.get("p_concave_venous_high", p_ven_value)),
+        "concave_pressure_profile": "linear" if concave_profile is not None else "constant",
+        "concave_pressure_profile_axis": str(concave_profile.get("profile_axis", "y")) if concave_profile else "y",
+        "terminal_flux_constraint_targets": constraint_targets,
+        "darcy_backend": "exact_affine_response_map",
+        "darcy_response_map": str(model_path),
+        "darcy_response_map_input_values": input_values,
+        "darcy_response_map_globally_identified": True,
+        "skip_1d": False,
+    })
+    direct_residual = -q_art_leak + float(np.sum(q_in)) - q_ven_leak - float(np.sum(q_out))
+    direct_scale = max(abs(q_art_leak) + float(np.sum(np.abs(q_in))), np.finfo(float).tiny)
+    iface["mass_balance_direct_port_residual"] = float(direct_residual)
+    iface["mass_balance_direct_port_relative"] = float(abs(direct_residual) / direct_scale)
+    iface_path = org / "out_darcy" / "interface_bc.json"
+    iface_path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(iface_path, iface)
+    print(
+        f"[darcy-map] organoid_{int(organoid_idx)}: evaluated {response.shape[1]} inputs "
+        f"from {model_path.name}",
+        flush=True,
+    )
+
+
 def run_darcy_for_all(
     run_dir: Path,
     args: argparse.Namespace,
     scaled_cfg: Optional[dict[str, Any]] = None,
     replicate_reference_outputs: bool = False,
+    force_pde: bool = False,
+    output_mode_override: Optional[str] = None,
+    diagnostics_mode_override: Optional[str] = None,
 ) -> None:
-    validate_darcy_geometry_inputs(
-        run_dir,
-        int(args.n_organoids),
-        no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
-    )
+    use_response_map = bool(str(getattr(args, "darcy_response_map", "")).strip()) and not force_pde
+    if not use_response_map:
+        validate_darcy_geometry_inputs(
+            run_dir,
+            int(args.n_organoids),
+            no_synthetic_vasculature=bool(args.no_synthetic_vasculature),
+        )
     darcy_script = Path(args.darcy_script).expanduser().resolve()
-    if not darcy_script.exists():
+    if not use_response_map and not darcy_script.exists():
         die(f"Missing Darcy script: {darcy_script}")
     output_csv = run_dir / "output.csv"
     trial_output_csv = None
@@ -4236,6 +4764,20 @@ def run_darcy_for_all(
         if p_ven is not None:
             darcy_args.extend(["--concave-outlet-pressure", str(float(p_ven))])
         concave_profile = concave_profiles_by_organoid.get(int(k))
+        if use_response_map:
+            model_path = resolve_darcy_response_map(args.darcy_response_map, int(k))
+            apply_darcy_response_map(
+                run_dir=run_dir,
+                organoid_idx=int(k),
+                model_path=model_path,
+                concave_profile=concave_profile,
+                p_art=p_art,
+                p_ven=p_ven,
+                fallback_inlet_pressure=fallback_inlet_pressure,
+                fallback_outlet_pressure=fallback_outlet_pressure,
+                args=args,
+            )
+            continue
         if concave_profile is not None:
             darcy_args.extend([
                 "--concave-pressure-profile", str(concave_profile["profile_mode"]),
@@ -4257,8 +4799,14 @@ def run_darcy_for_all(
                     "--stl-anisotropy-factor", str(args.darcy_stl_anisotropy_factor),
                 ])
         if darcy_script.stem == "darcy_mixed":
-            darcy_args.extend(["--output-mode", str(args.darcy_output_mode)])
-            darcy_args.extend(["--diagnostics-mode", str(args.darcy_diagnostics_mode)])
+            darcy_args.extend([
+                "--output-mode",
+                str(output_mode_override or args.darcy_output_mode),
+            ])
+            darcy_args.extend([
+                "--diagnostics-mode",
+                str(diagnostics_mode_override or args.darcy_diagnostics_mode),
+            ])
         if int(args.darcy_mpi_procs) > 1:
             cmd = build_mpi_command(
                 str(args.darcy_mpirun_cmd),
@@ -4270,7 +4818,12 @@ def run_darcy_for_all(
         run(cmd)
 
     if scaled_cfg is not None:
-        minimal_output = str(getattr(args, "darcy_output_mode", "full")) == "minimal"
+        effective_output_mode = (
+            "minimal"
+            if use_response_map
+            else str(output_mode_override or getattr(args, "darcy_output_mode", "full"))
+        )
+        minimal_output = effective_output_mode == "minimal"
         if replicate_reference_outputs:
             # run_0 deliberately has zero channel/interface flow, so its 0D
             # reference pressure drop is zero and cannot define a multiplicative
@@ -4435,6 +4988,47 @@ def read_terminal_parent_pressures_from_0d_csv(
         idx = int(checkpoint_time_index)
         if idx < 0:
             idx = len(rows) + idx
+        idx = min(max(idx, 0), len(rows) - 1)
+        out.append(float(rows[idx][1]))
+    return np.asarray(out, dtype=float)
+
+
+def read_terminal_distal_pressures_from_0d_csv(
+    csv_path: Path,
+    branch_ids: list[Any],
+    checkpoint_time_index: int = -1,
+) -> Optional[np.ndarray]:
+    """Read terminal segment-0 ``pressure_out`` values in branch-ID order."""
+    if not csv_path.exists():
+        return None
+    rows_by_branch: dict[int, list[tuple[float, float]]] = {}
+    try:
+        with csv_path.open("r", newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                parsed = parse_0d_branch_segment_name(row.get("name", ""))
+                if parsed is None or int(parsed[1]) != 0:
+                    continue
+                try:
+                    time = float(row.get("time", 0.0))
+                    pressure = float(row["pressure_out"])
+                except Exception:
+                    continue
+                if np.isfinite(pressure):
+                    rows_by_branch.setdefault(int(parsed[0]), []).append((time, pressure))
+    except Exception:
+        return None
+    out = []
+    for raw_id in branch_ids:
+        try:
+            branch_id = int(raw_id)
+        except Exception:
+            return None
+        rows = sorted(rows_by_branch.get(branch_id, []), key=lambda item: item[0])
+        if not rows:
+            return None
+        idx = int(checkpoint_time_index)
+        if idx < 0:
+            idx += len(rows)
         idx = min(max(idx, 0), len(rows) - 1)
         out.append(float(rows[idx][1]))
     return np.asarray(out, dtype=float)
@@ -4807,6 +5401,44 @@ def convergence_for_organoid(
     return (rp <= tol_p), float("nan"), rp
 
 
+def check_coupling_convergence(
+    *,
+    run_dir: Path,
+    previous_run_dir: Path,
+    args: argparse.Namespace,
+    current_deck: Optional[dict] = None,
+    label: str = "coupling",
+) -> bool:
+    all_ok = True
+    print(f"\n[check] {label}", flush=True)
+    for k in range(1, int(args.n_organoids) + 1):
+        iface_prev = previous_run_dir / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
+        iface_cur = run_dir / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
+        ok, rq, rp = convergence_for_organoid(
+            iface_cur,
+            tol_q=args.tol_q,
+            tol_p=args.tol_p,
+            prev_iface_path=(
+                iface_prev
+                if (args.no_synthetic_vasculature or str(args.terminal_bc_mode) == "resistance")
+                else None
+            ),
+            current_deck=(current_deck if args.no_synthetic_vasculature else None),
+            organoid_idx=(k if args.no_synthetic_vasculature else None),
+            pressure_compare_mode="target",
+        )
+        all_ok = all_ok and ok
+        if args.no_synthetic_vasculature:
+            print(
+                f"  organoid_{k}: rel_q_concave={rq:.3e}, "
+                f"rel_p_bc_change={rp:.3e}, converged={ok}",
+                flush=True,
+            )
+        else:
+            print(f"  organoid_{k}: rel_p={rp:.3e}, converged={ok}", flush=True)
+    return all_ok
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Organoid coupling driver with geometry reuse + P1-LM Darcy.")
     ap.add_argument("--template-combined", default="../prep/scaled-screening/Run2_10branches/combined.in")
@@ -5046,6 +5678,22 @@ def parse_args() -> argparse.Namespace:
             "diagnostics, div(u) sampling, and reversal path diagnostics."
         ),
     )
+    ap.add_argument(
+        "--darcy-response-map",
+        default="",
+        help=(
+            "Globally exact Darcy response-map .npz used instead of PDE solves during "
+            "coupling. Use 'auto' to build/reuse geometry-matched maps from --seed-run0. "
+            "A directory resolves exact_global_organoidK.npz; paths may also contain "
+            "{organoid} or X. A converged mapped iteration is automatically rerun with "
+            "full Darcy outputs and diagnostics before termination."
+        ),
+    )
+    ap.add_argument(
+        "--rebuild-darcy-response-map",
+        action="store_true",
+        help="Force rebuilding maps selected by --darcy-response-map auto.",
+    )
     ap.add_argument("--scaled-screening-mode", choices=["auto", "on", "off"], default="auto",
                     help="When enabled, solve only the reference organoid with Darcy and synthesize the remaining repeated-geometry wells using 0D-based scaling. 'auto' enables this when trial_dir contains scaled_screening_summary.json.")
     ap.add_argument("--scaled-pressure-offset-anchor", choices=["arterial", "venous"], default="arterial",
@@ -5126,7 +5774,6 @@ def main() -> None:
             "with Darcy and regenerating scaled outputs for the remaining wells.",
             flush=True,
         )
-
     coupled_root = Path(args.coupled_root).expanduser().resolve()
     coupled_root.mkdir(parents=True, exist_ok=True)
 
@@ -5200,6 +5847,9 @@ def main() -> None:
     if start_run <= 1 and not run0.exists():
         print(f"[info] initializing {run0} from seed run_0: {seed_run0}", flush=True)
         copy_tree(seed_run0, run0, overwrite=False)
+    if start_run <= 1 and str(getattr(args, "darcy_response_map", "")).strip():
+        validate_fresh_run0_layout(seed_run0, run0, int(args.n_organoids))
+    prepare_automatic_darcy_response_maps(args, seed_run0, scaled_cfg)
     for i in range(start_run, total_steps + 1):
         scale = min(i / float(max(args.n_ramp, 1)), 1.0) if i <= args.n_ramp else 1.0
         prev = coupled_root / f"run_{i-1}"
@@ -6111,7 +6761,8 @@ def main() -> None:
             args.n_organoids,
             allow_missing=bool(args.no_synthetic_vasculature),
         )
-        if not args.no_synthetic_vasculature:
+        response_map_active = bool(str(getattr(args, "darcy_response_map", "")).strip())
+        if not args.no_synthetic_vasculature and not response_map_active:
             update_1d_checkpoints(cur, args.n_organoids, np.array(args.coords_inlet), np.array(args.coords_outlet), args.dy_step)
             validate_darcy_geometry_inputs(cur, args.n_organoids, no_synthetic_vasculature=False)
         run_darcy_for_all(cur, args, scaled_cfg=scaled_cfg)
@@ -6125,41 +6776,85 @@ def main() -> None:
             int(args.n_organoids),
             write_cumulative=bool(args.terminal_pd_convergence_csv),
         )
-        if str(getattr(args, "darcy_output_mode", "full")) == "minimal":
+        if (
+            str(getattr(args, "darcy_output_mode", "full")) == "minimal"
+            and not response_map_active
+        ):
             remove_run_geometry_dirs(cur, int(args.n_organoids))
         update_convergence_plots(args, coupled_root, i)
 
         # convergence after ramp
         if i > args.n_ramp:
-            all_ok = True
-            print(f"\n[check] coupling iteration {i - args.n_ramp}/{args.max_iter}")
-            for k in range(1, args.n_organoids + 1):
-                iface_prev = prev / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
-                iface_cur = cur / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
-                ok, rq, rp = convergence_for_organoid(
-                    iface_cur,
-                    tol_q=args.tol_q,
-                    tol_p=args.tol_p,
-                    prev_iface_path=(
-                        iface_prev
-                        if (args.no_synthetic_vasculature or str(args.terminal_bc_mode) == "resistance")
-                        else None
-                    ),
-                    current_deck=(deck if args.no_synthetic_vasculature else None),
-                    organoid_idx=(k if args.no_synthetic_vasculature else None),
-                    pressure_compare_mode="target",
-                )
-                all_ok = all_ok and ok
-                if args.no_synthetic_vasculature:
+            all_ok = check_coupling_convergence(
+                run_dir=cur,
+                previous_run_dir=prev,
+                args=args,
+                current_deck=deck,
+                label=f"coupling iteration {i - args.n_ramp}/{args.max_iter}",
+            )
+            if all_ok:
+                if response_map_active:
                     print(
-                        f"  organoid_{k}: rel_q_concave={rq:.3e}, rel_p_bc_change={rp:.3e}, converged={ok}",
+                        f"\n[verify] mapped convergence reached at run_{i}; "
+                        "rerunning the same iteration with full Darcy outputs and diagnostics.",
                         flush=True,
                     )
-                else:
-                    print(f"  organoid_{k}: rel_p={rp:.3e}, converged={ok}")
-            if all_ok:
+                    for k in range(1, int(args.n_organoids) + 1):
+                        iface_path = cur / f"organoid_{k}" / "out_darcy" / "interface_bc.json"
+                        if iface_path.exists():
+                            shutil.copy2(iface_path, iface_path.with_name("interface_bc.response_map.json"))
+                    for name in (
+                        "post_darcy_terminal_convergence.csv",
+                        "post_darcy_concave_convergence.csv",
+                    ):
+                        source = cur / name
+                        if source.exists():
+                            shutil.copy2(source, cur / name.replace(".csv", ".response_map.csv"))
+                    if not args.no_synthetic_vasculature:
+                        update_1d_checkpoints(
+                            cur,
+                            args.n_organoids,
+                            np.array(args.coords_inlet),
+                            np.array(args.coords_outlet),
+                            args.dy_step,
+                        )
+                    run_darcy_for_all(
+                        cur,
+                        args,
+                        scaled_cfg=scaled_cfg,
+                        force_pde=True,
+                        output_mode_override="full",
+                        diagnostics_mode_override="full",
+                    )
+                    write_post_darcy_terminal_convergence(
+                        cur,
+                        int(args.n_organoids),
+                        write_cumulative=bool(args.terminal_pd_convergence_csv),
+                    )
+                    write_post_darcy_concave_convergence(
+                        cur,
+                        int(args.n_organoids),
+                        write_cumulative=bool(args.terminal_pd_convergence_csv),
+                    )
+                    update_convergence_plots(args, coupled_root, i)
+                    all_ok = check_coupling_convergence(
+                        run_dir=cur,
+                        previous_run_dir=prev,
+                        args=args,
+                        current_deck=deck,
+                        label=f"full-Darcy verification for run_{i}",
+                    )
+                    if not all_ok:
+                        print(
+                            f"[verify] run_{i} did not pass with the full Darcy solve; "
+                            "continuing from the verified PDE interface.",
+                            flush=True,
+                        )
+                        continue
                 print(f"\n[done] converged at run_{i}.")
                 return
+            if response_map_active:
+                remove_run_geometry_dirs(cur, int(args.n_organoids))
 
     print(f"\n[done] reached max iterations ({args.max_iter}) after ramp without full convergence.")
 

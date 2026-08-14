@@ -18,16 +18,24 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 
-try:
-    import pandas as pd
-except Exception:  # pragma: no cover
+# The standard-library streaming splitter below is sufficient for batch runs.
+# Avoid importing pandas from a home-based Conda environment on Savio compute
+# nodes, where loading its many package files can block on the home filesystem.
+if os.environ.get("SLURM_JOB_ID"):
     pd = None
+else:
+    try:
+        import pandas as pd
+    except Exception:  # pragma: no cover
+        pd = None
 
 
 # -----------------------------
@@ -413,6 +421,25 @@ def split_output_csv(csv_path: Path, outdir: Path, debug: bool = False) -> List[
     split_dir = outdir / "split"
     split_dir.mkdir(parents=True, exist_ok=True)
 
+    # Like the solver CSV, split files are written incrementally. On Savio,
+    # perform that work on per-job local disk and copy only completed files to
+    # Lustre scratch.
+    if os.environ.get("SLURM_JOB_ID"):
+        with tempfile.TemporaryDirectory(prefix="svzero-split-", dir="/tmp") as tmp_dir:
+            local_root = Path(tmp_dir)
+            local_csv = local_root / csv_path.name
+            local_split_dir = local_root / "split"
+            shutil.copy2(csv_path, local_csv)
+            print(f"[svzero] splitting CSV in {local_split_dir}", flush=True)
+            local_written = split_csv_with_csv_module(local_csv, local_split_dir, debug=debug)
+            written: List[Path] = []
+            for local_path in local_written:
+                destination = split_dir / local_path.name
+                shutil.copy2(local_path, destination)
+                written.append(destination)
+            print(f"[svzero] copied {len(written)} completed split files to {split_dir}", flush=True)
+            return written
+
     if pd is not None:
         return split_csv_with_pandas(csv_path, split_dir, debug=debug)
     return split_csv_with_csv_module(csv_path, split_dir, debug=debug)
@@ -487,6 +514,22 @@ def copy_and_plot_organoid_files(
 # -----------------------------
 
 def run_solver(exe: str, input_file: Path, output_file: Path, cwd: Path) -> None:
+    # On Savio, incremental CSV writes from svzerodsolver to Lustre scratch can
+    # block. The completed CSV is small, so stage it through per-job local disk
+    # and copy it to the requested output path after the solve finishes.
+    if os.environ.get("SLURM_JOB_ID"):
+        with tempfile.TemporaryDirectory(prefix="svzero-", dir="/tmp") as tmp_dir:
+            local_output = Path(tmp_dir) / output_file.name
+            cmd = [exe, str(input_file), str(local_output)]
+            print(f"[svzero] staging solver output through {local_output}", flush=True)
+            subprocess.run(cmd, cwd=str(cwd), stdout=None, stderr=None, shell=False, check=True)
+            if not local_output.exists():
+                raise SystemExit(f"svzerodsolver did not create expected output: {local_output}")
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_output, output_file)
+            print(f"[svzero] copied completed output to {output_file}", flush=True)
+        return
+
     cmd = [exe, str(input_file), str(output_file)]
     subprocess.run(cmd, cwd=str(cwd), stdout=None, stderr=None, shell=False, check=True)
 

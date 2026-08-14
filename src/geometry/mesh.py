@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import csv
 import os, subprocess, shutil
+import importlib
 import re
 import glob
 import logging
@@ -41,25 +42,43 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-import gmsh
-import meshio
-import vtk
-from vtk.util.numpy_support import vtk_to_numpy
 from scipy.spatial import ConvexHull, cKDTree
 
 from mpi4py import MPI
 import adios4dolfinx
 import dolfinx as dfx
 from dolfinx.io import XDMFFile
-try:
-    from dolfinx.io import gmshio
-except ImportError:
-    try:
-        import dolfinx.io.gmshio as gmshio
-    except ImportError:
-        import dolfinx.io.gmsh as gmshio
 from dolfinx import mesh as dmesh
 from basix.ufl import element
+
+
+class _LazyModule:
+    """Import heavyweight, geometry-only dependencies on first use."""
+
+    def __init__(self, module_name: str):
+        self.module_name = module_name
+        self.module = None
+
+    def _load(self):
+        if self.module is None:
+            self.module = importlib.import_module(self.module_name)
+        return self.module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+
+# Checkpoint regeneration does not use these large meshing/visualization
+# packages. Loading them lazily keeps the Savio checkpoint path lightweight.
+gmsh = _LazyModule("gmsh")
+meshio = _LazyModule("meshio")
+vtk = _LazyModule("vtk")
+pv = _LazyModule("pyvista")
+
+
+def vtk_to_numpy(*args, **kwargs):
+    converter = importlib.import_module("vtk.util.numpy_support").vtk_to_numpy
+    return converter(*args, **kwargs)
 
 # ---------------------------------------------------------------------
 # Local imports (branch.py)
@@ -800,15 +819,6 @@ def vtu_to_xdmf(vtu_file: str, xdmf_file: str) -> None:
     # Prefer linear tetra for dolfinx import; keep connectivity as-is
     tet_mesh = meshio.Mesh(points=m.points, cells=[("tetra", tetra_cells[0].data.astype(np.int64))])
     meshio.write(current_dir / xdmf_file, tet_mesh)
-
-import subprocess
-from pathlib import Path
-import meshio
-
-import numpy as np
-import meshio
-import pyvista as pv
-from pathlib import Path
 
 def vtu_volume_to_surface_stl(vtu_in: str, stl_out: str) -> str:
     m = meshio.read(vtu_in)
@@ -1675,6 +1685,10 @@ def stl_to_mesh_gmsh_with_embedded_disks(
 
 
 def read_3d_mesh_and_tags_from_msh(msh_file: str) -> Tuple[dfx.mesh.Mesh, dfx.mesh.MeshTags]:
+    try:
+        gmshio = importlib.import_module("dolfinx.io.gmshio")
+    except ImportError:
+        gmshio = importlib.import_module("dolfinx.io.gmsh")
     out = gmshio.read_from_msh(str(current_dir / msh_file), MPI.COMM_WORLD, 0, gdim=3)
     if not isinstance(out, tuple):
         raise RuntimeError(f"Unexpected gmshio.read_from_msh return type for {msh_file}: {type(out)!r}")
