@@ -267,7 +267,21 @@ def import_3d_mesh_with_facets(mesh_file: str, facet_file: str):
 
 
 def import_mesh(bp_file: str):
-    mesh = adios4dolfinx.read_mesh(filename=Path(bp_file), comm=MPI.COMM_WORLD)
+    replicate_1d = os.environ.get(
+        "TRANSPORT_REPLICATE_1D_INPUTS", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    comm = (
+        MPI.COMM_SELF
+        if replicate_1d and MPI.COMM_WORLD.size > 1
+        else MPI.COMM_WORLD
+    )
+    if replicate_1d and MPI.COMM_WORLD.size > 1 and MPI.COMM_WORLD.rank == 0:
+        print(
+            "[transport] Replicating 1D BP mesh/checkpoint inputs on each MPI "
+            "rank to avoid parallel ADIOS redistribution errors.",
+            flush=True,
+        )
+    mesh = adios4dolfinx.read_mesh(filename=Path(bp_file), comm=comm)
     tags = adios4dolfinx.read_meshtags(
         filename=Path(bp_file), mesh=mesh, meshtag_name="mesh_tags"
     )
@@ -275,8 +289,12 @@ def import_mesh(bp_file: str):
 
 
 def import_flow_data(mesh_obj, bp_file: str):
+    # Use the mesh communicator here. In replicated-input mode this is
+    # COMM_SELF, which avoids adios4dolfinx's failing cross-rank redistribution
+    # for checkpoints whose global dof count lands on a partition boundary.
+    comm = mesh_obj.comm
     ts = adios4dolfinx.read_timestamps(
-        bp_file, comm=MPI.COMM_WORLD, function_name="f"
+        bp_file, comm=comm, function_name="f"
     )
     V = fem.functionspace(mesh_obj, element("Lagrange", mesh_obj.basix_cell(), 1))
     q_src = fem.Function(V)
@@ -929,8 +947,8 @@ class TransportSolver:
     PAPER_VMAX_MOL_PER_CM3_S = 2e-9
     # PAPER_VMAX_MOL_PER_CM3_S = 6.93e-9
     PAPER_CRITICAL_TRANSITION_WIDTH_MOL_PER_CM3 = 0.5 * PAPER_C_CRIT_MOL_PER_CM3
-    VELOCITY_SCALE_FACTOR = 82.5065
-    # VELOCITY_SCALE_FACTOR = 1.0
+    # VELOCITY_SCALE_FACTOR = 82.5065
+    VELOCITY_SCALE_FACTOR = 1.0
     # VELOCITY_SCALE_FACTOR = 44500.0
 
     def __init__(
@@ -3259,6 +3277,10 @@ class TransportSolver:
         crit = float(self.critical_oxygen_concentration)
         c_vals = np.asarray(c_h.x.array, dtype=float)
         below = (c_vals < crit).astype(np.float64)
+
+        # First use the domain-wide below-critical mask to retain the existing
+        # domain diagnostics.  The mask exported below is then restricted to
+        # the organoid so that surrounding gel/medium is shown as viable.
         critical_mask.x.array[:] = below
         critical_mask.x.scatter_forward()
 
@@ -3267,6 +3289,11 @@ class TransportSolver:
         total_vol = self._global_scalar(one * dx)
         organoid_vol = self._global_scalar(organoid_indicator * dx)
         organoid_below_vol = self._global_scalar(critical_mask * organoid_indicator * dx)
+
+        critical_mask.x.array[:] = (
+            below * np.asarray(organoid_indicator.x.array, dtype=float)
+        )
+        critical_mask.x.scatter_forward()
 
         local_min = float(np.min(c_vals)) if c_vals.size else float("inf")
         local_max = float(np.max(c_vals)) if c_vals.size else float("-inf")
