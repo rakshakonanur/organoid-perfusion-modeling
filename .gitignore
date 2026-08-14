@@ -111,3 +111,4 @@ src/Results/
 src/prep/scaled-screening-comparison/
 tmp/
 tests/
+src/synthetic-vasculature-generation/necrotic_experiment_output/
