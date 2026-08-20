@@ -140,6 +140,9 @@ def build_command(
     dt: float,
     output_format: str,
     coupled_1d_transport: bool,
+    two_way_1d_transport: bool,
+    network_cells_per_segment: int,
+    output_stride: int,
 ) -> list[str]:
     org = case.root / "organoid_1"
     paths = output_paths(case_dir, case)
@@ -174,6 +177,8 @@ def build_command(
         str(paths["summary"]),
         "--output-format",
         output_format,
+        "--output-stride",
+        str(output_stride),
     ]
 
     if case.synthetic:
@@ -197,6 +202,11 @@ def build_command(
         )
         if coupled_1d_transport:
             cmd.append("--coupled-1d-transport")
+        if two_way_1d_transport:
+            cmd.append("--two-way-1d-transport")
+        cmd.extend(
+            ["--network-cells-per-segment", str(network_cells_per_segment)]
+        )
     else:
         cmd.append("--diffusion-only")
 
@@ -420,6 +430,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Forwarded to 3d_transport.py. Use vtk for lighter visualization output.",
     )
     parser.add_argument(
+        "--output-stride",
+        type=int,
+        default=1,
+        help="Forwarded field/1D visualization output stride.",
+    )
+    parser.add_argument(
         "--necrotic-threshold",
         type=float,
         default=0.05,
@@ -473,6 +489,17 @@ def main(argv: list[str] | None = None) -> int:
         help="For synthetic case, omit --coupled-1d-transport.",
     )
     parser.add_argument(
+        "--two-way-1d-transport",
+        action="store_true",
+        help="Use conservative partitioned 1D-3D transport in synthetic cases.",
+    )
+    parser.add_argument(
+        "--network-cells-per-segment",
+        type=int,
+        default=50,
+        help="1D finite-volume intervals per segment (default: 50).",
+    )
+    parser.add_argument(
         "--always-run-3000um",
         action="store_true",
         help="Disable the 1000um critical-volume prescreen and run all cases.",
@@ -514,6 +541,9 @@ def main(argv: list[str] | None = None) -> int:
                         dt=args.dt,
                         output_format=args.output_format,
                         coupled_1d_transport=not args.disable_coupled_1d_transport,
+                        two_way_1d_transport=args.two_way_1d_transport,
+                        network_cells_per_segment=args.network_cells_per_segment,
+                        output_stride=args.output_stride,
                     )
                     print("[run] " + " ".join(cmd), flush=True)
                     if args.dry_run:
