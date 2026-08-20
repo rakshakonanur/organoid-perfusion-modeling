@@ -123,10 +123,10 @@ else:
         "inlet_normal": np.array([1.0, 0.0, 0.0]),
         "outlet": np.array([0.30, 0.9, 0.5375]),
         "outlet_normal": np.array([-1.0, 0.0, 0.0]),
-        "forest_inlet_root_length": 0.180,
-        "forest_outlet_root_length": 0.160,
-        "forest_inlet_terminal_geom": str(CORE_DOMAIN),
-        "forest_outlet_terminal_geom": str(DONUT_DOMAIN),
+        "forest_inlet_root_length": 0.150,
+        "forest_outlet_root_length": 0.220,
+        "forest_inlet_terminal_geom": str(DONUT_DOMAIN),
+        "forest_outlet_terminal_geom": str(CORE_DOMAIN),
         # The endpoint marks where the external connector enters the growth
         # domain; it must be allowed to bifurcate instead of remaining a
         # permanently protected terminal stump.
