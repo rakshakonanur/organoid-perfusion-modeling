@@ -20,7 +20,8 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
 from scipy import sparse
-from scipy.sparse.linalg import spsolve
+from scipy.optimize import root as scipy_root
+from scipy.sparse.linalg import splu, spsolve
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 
@@ -450,6 +451,7 @@ class NetworkTransport1D:
         self.root_flux_rate = 0.0
         self.storage_rate = 0.0
         self.balance_residual = 0.0
+        self._trial_factorizations = {}
 
     @staticmethod
     def _optional_int(value):
@@ -611,7 +613,13 @@ class NetworkTransport1D:
             + coeff_right * concentration[right]
         )
 
-    def step(self, root_concentration: float, terminal_concentrations):
+    def step(
+        self,
+        root_concentration: float,
+        terminal_concentrations,
+        *,
+        steady_state: bool = False,
+    ):
         terminal_values = np.asarray(terminal_concentrations, dtype=float).reshape(-1)
         if len(terminal_values) != len(self.terminal_nodes):
             raise ValueError(
@@ -620,7 +628,11 @@ class NetworkTransport1D:
             )
 
         old = self.concentration.copy()
-        mass_over_dt = self.node_volumes / self.dt
+        mass_over_dt = (
+            np.zeros_like(self.node_volumes)
+            if steady_state
+            else self.node_volumes / self.dt
+        )
         matrix = self._transport_matrix + sparse.diags(mass_over_dt, format="csr")
         rhs = mass_over_dt * old
 
@@ -656,12 +668,16 @@ class NetworkTransport1D:
         )
         dynamic_nodes = np.ones(self.n_nodes, dtype=bool)
         dynamic_nodes[dirichlet_nodes] = False
-        self.storage_rate = float(
-            np.dot(
-                self.node_volumes[dynamic_nodes],
-                concentration[dynamic_nodes] - old[dynamic_nodes],
+        self.storage_rate = (
+            0.0
+            if steady_state
+            else float(
+                np.dot(
+                    self.node_volumes[dynamic_nodes],
+                    concentration[dynamic_nodes] - old[dynamic_nodes],
+                )
+                / self.dt
             )
-            / self.dt
         )
         # Positive root flux enters the graph; positive terminal flux leaves it.
         self.balance_residual = float(
@@ -671,8 +687,167 @@ class NetworkTransport1D:
         )
         return self.terminal_flux_rates.copy()
 
+    def solve_trial(
+        self,
+        terminal_concentrations,
+        *,
+        old_concentration=None,
+        root_concentration=None,
+        root_mode="dirichlet",
+        steady_state: bool = False,
+    ):
+        """Solve one physical timestep without mutating the network state.
+
+        ``root_mode='dirichlet'`` is appropriate for an arterial advective
+        inflow. ``root_mode='natural_outflow'`` adds the signed advective
+        outflow at a venous root and imposes zero external diffusive flux.
+        Matrix factorizations are cached because coupling iterations change
+        only boundary values and the previous-state right-hand side.
+        """
+        terminal_values = np.asarray(terminal_concentrations, dtype=float).reshape(-1)
+        if len(terminal_values) != len(self.terminal_nodes):
+            raise ValueError(
+                f"{self.label}: expected {len(self.terminal_nodes)} terminal "
+                f"concentrations, received {len(terminal_values)}"
+            )
+        root_mode = str(root_mode).strip().lower()
+        if root_mode not in {"dirichlet", "natural_outflow"}:
+            raise ValueError(f"Unsupported root mode {root_mode!r}")
+        if root_mode == "dirichlet" and root_concentration is None:
+            raise ValueError("root_concentration is required for a Dirichlet root")
+
+        old = np.asarray(
+            self.concentration if old_concentration is None else old_concentration,
+            dtype=float,
+        ).copy()
+        if old.shape != self.concentration.shape:
+            raise ValueError(f"{self.label}: old concentration has the wrong shape")
+
+        mass_over_dt = (
+            np.zeros_like(self.node_volumes)
+            if steady_state
+            else self.node_volumes / self.dt
+        )
+        rhs = mass_over_dt * old
+        terminal_nodes = np.asarray(self.terminal_nodes, dtype=int)
+        dirichlet_nodes = terminal_nodes.copy()
+        dirichlet_values = terminal_values.copy()
+        if root_mode == "dirichlet":
+            dirichlet_nodes = np.concatenate(
+                (np.asarray([self.root_node], dtype=int), dirichlet_nodes)
+            )
+            dirichlet_values = np.concatenate(
+                (np.asarray([float(root_concentration)]), dirichlet_values)
+            )
+
+        cache_key = (root_mode, bool(steady_state))
+        factorization = self._trial_factorizations.get(cache_key)
+        if factorization is None:
+            matrix = (
+                self._transport_matrix
+                + sparse.diags(mass_over_dt, format="csr")
+            ).tolil()
+            if root_mode == "natural_outflow":
+                root_flow = float(self.branch_flows[self.root_branch])
+                if root_flow >= 0.0:
+                    raise ValueError(
+                        f"{self.label}: natural_outflow requires negative root flow, "
+                        f"got {root_flow:.6e}"
+                    )
+                matrix[int(self.root_node), int(self.root_node)] += -root_flow
+            for node in dirichlet_nodes:
+                matrix.rows[int(node)] = [int(node)]
+                matrix.data[int(node)] = [1.0]
+            factorization = splu(matrix.tocsc())
+            self._trial_factorizations[cache_key] = factorization
+
+        rhs[dirichlet_nodes] = dirichlet_values
+        concentration = np.asarray(factorization.solve(rhs), dtype=float)
+        if np.any(~np.isfinite(concentration)):
+            raise RuntimeError(f"Non-finite concentration in {self.label} trial solve")
+
+        terminal_flux_rates = np.asarray(
+            [
+                self._edge_flux(self.branch_final_edge[int(branch)], concentration)
+                for branch in self.terminal_branches
+            ],
+            dtype=float,
+        )
+        if root_mode == "dirichlet":
+            root_flux_rate = self._edge_flux(
+                self.branch_first_edge[self.root_branch], concentration
+            )
+        else:
+            root_flux_rate = float(
+                self.branch_flows[self.root_branch]
+                * concentration[int(self.root_node)]
+            )
+        dynamic_nodes = np.ones(self.n_nodes, dtype=bool)
+        dynamic_nodes[dirichlet_nodes] = False
+        storage_rate = (
+            0.0
+            if steady_state
+            else float(
+                np.dot(
+                    self.node_volumes[dynamic_nodes],
+                    concentration[dynamic_nodes] - old[dynamic_nodes],
+                )
+                / self.dt
+            )
+        )
+        balance_residual = float(
+            root_flux_rate - np.sum(terminal_flux_rates) - storage_rate
+        )
+        terminal_flows = self.branch_flows[self.terminal_branches]
+        terminal_advective_rates = terminal_flows * terminal_values
+        return {
+            "concentration": concentration,
+            "terminal_boundary_concentrations": terminal_values.copy(),
+            "terminal_flux_rates": terminal_flux_rates,
+            "terminal_advective_flux_rates": terminal_advective_rates,
+            "terminal_diffusive_flux_rates": (
+                terminal_flux_rates - terminal_advective_rates
+            ),
+            "root_flux_rate": root_flux_rate,
+            "storage_rate": storage_rate,
+            "balance_residual": balance_residual,
+            "root_mode": root_mode,
+        }
+
+    def commit_trial(self, trial) -> None:
+        """Commit a converged result returned by :meth:`solve_trial`."""
+        self.concentration = np.asarray(trial["concentration"], dtype=float).copy()
+        self.terminal_boundary_concentrations = np.asarray(
+            trial["terminal_boundary_concentrations"], dtype=float
+        ).copy()
+        self.terminal_flux_rates = np.asarray(
+            trial["terminal_flux_rates"], dtype=float
+        ).copy()
+        self.terminal_diffusive_flux_rates = np.asarray(
+            trial["terminal_diffusive_flux_rates"], dtype=float
+        ).copy()
+        self.root_flux_rate = float(trial["root_flux_rate"])
+        self.storage_rate = float(trial["storage_rate"])
+        self.balance_residual = float(trial["balance_residual"])
+
+    def stored_mass(self, *, concentration=None, root_mode="dirichlet") -> float:
+        """Return mass in dynamic control volumes for the chosen root model."""
+        values = np.asarray(
+            self.concentration if concentration is None else concentration,
+            dtype=float,
+        )
+        dynamic = np.ones(self.n_nodes, dtype=bool)
+        dynamic[np.asarray(self.terminal_nodes, dtype=int)] = False
+        if str(root_mode).strip().lower() == "dirichlet":
+            dynamic[int(self.root_node)] = False
+        return float(np.dot(self.node_volumes[dynamic], values[dynamic]))
+
     def step_with_diffusive_terminal_flux(
-        self, root_concentration: float, terminal_diffusive_flux_rates
+        self,
+        root_concentration: float,
+        terminal_diffusive_flux_rates,
+        *,
+        steady_state: bool = False,
     ):
         """Advance with natural terminal diffusion and unknown terminal values.
 
@@ -695,7 +870,11 @@ class NetworkTransport1D:
             )
 
         old = self.concentration.copy()
-        mass_over_dt = self.node_volumes / self.dt
+        mass_over_dt = (
+            np.zeros_like(self.node_volumes)
+            if steady_state
+            else self.node_volumes / self.dt
+        )
         matrix = (
             self._transport_matrix
             + sparse.diags(mass_over_dt, format="csr")
@@ -734,12 +913,16 @@ class NetworkTransport1D:
         )
         dynamic_nodes = np.ones(self.n_nodes, dtype=bool)
         dynamic_nodes[root] = False
-        self.storage_rate = float(
-            np.dot(
-                self.node_volumes[dynamic_nodes],
-                concentration[dynamic_nodes] - old[dynamic_nodes],
+        self.storage_rate = (
+            0.0
+            if steady_state
+            else float(
+                np.dot(
+                    self.node_volumes[dynamic_nodes],
+                    concentration[dynamic_nodes] - old[dynamic_nodes],
+                )
+                / self.dt
             )
-            / self.dt
         )
         self.balance_residual = float(
             self.root_flux_rate
@@ -984,12 +1167,21 @@ class TransportSolver:
         critical_summary_file="",
         velocity_debug_output_file="",
         output_format="vtk",
+        output_stride=1,
         branching_in_file="",
         branching_out_file="",
         couple_1d_transport=False,
+        two_way_1d_transport=False,
         network_cells_per_segment=20,
         network_coupling_relaxation=1.0,
+        network_coupling_tolerance=1.0e-6,
+        network_coupling_max_iterations=20,
         network_initial_concentration=0.0,
+        venous_root_bc="dirichlet",
+        steady_state=False,
+        steady_state_tolerance=1.0e-6,
+        steady_state_max_iterations=50,
+        steady_state_relaxation=0.5,
     ):
         # 3D tissue mesh + facet tags from the same geometry pipeline as Darcy.
         self.mesh, self.facet_tags = import_3d_mesh_with_facets(
@@ -999,6 +1191,9 @@ class TransportSolver:
         self.diffusion_only = bool(diffusion_only)
         self.skip_1d = bool(skip_1d or self.diffusion_only)
         self.couple_1d_transport = bool(couple_1d_transport)
+        self.two_way_1d_transport = bool(two_way_1d_transport)
+        if self.two_way_1d_transport:
+            self.couple_1d_transport = True
         if self.couple_1d_transport and self.skip_1d:
             raise ValueError(
                 "--coupled-1d-transport cannot be combined with --skip-1d or "
@@ -1010,9 +1205,30 @@ class TransportSolver:
         self.network_coupling_relaxation = float(network_coupling_relaxation)
         if not 0.0 < self.network_coupling_relaxation <= 1.0:
             raise ValueError("--network-coupling-relaxation must be in (0, 1]")
+        self.network_coupling_tolerance = float(network_coupling_tolerance)
+        if self.network_coupling_tolerance <= 0.0:
+            raise ValueError("--network-coupling-tolerance must be positive")
+        self.network_coupling_max_iterations = int(network_coupling_max_iterations)
+        if self.network_coupling_max_iterations < 1:
+            raise ValueError("--network-coupling-max-iterations must be at least 1")
         self.network_initial_concentration = float(network_initial_concentration)
         if self.network_initial_concentration < 0.0:
             raise ValueError("--network-initial-concentration must be non-negative")
+        self.venous_root_bc = str(venous_root_bc).strip().lower()
+        if self.venous_root_bc not in {"dirichlet", "natural_outflow"}:
+            raise ValueError(
+                "--venous-root-bc must be 'dirichlet' or 'natural_outflow'"
+            )
+        self.steady_state = bool(steady_state)
+        self.steady_state_tolerance = float(steady_state_tolerance)
+        if self.steady_state_tolerance <= 0.0:
+            raise ValueError("--steady-state-tolerance must be positive")
+        self.steady_state_max_iterations = int(steady_state_max_iterations)
+        if self.steady_state_max_iterations < 1:
+            raise ValueError("--steady-state-max-iterations must be at least 1")
+        self.steady_state_relaxation = float(steady_state_relaxation)
+        if not 0.0 < self.steady_state_relaxation <= 1.0:
+            raise ValueError("--steady-state-relaxation must be in (0, 1]")
         self.concave_exchange_mode = (
             "dirichlet"
             if self.diffusion_only
@@ -1177,6 +1393,9 @@ class TransportSolver:
                 "--output-format must be one of 'vtk', 'xdmf', or 'both'; "
                 f"got {self.output_format!r}."
             )
+        self.output_stride = int(output_stride)
+        if self.output_stride < 1:
+            raise ValueError("--output-stride must be at least 1")
 
         self.network_inlet = None
         self.network_outlet = None
@@ -1195,6 +1414,28 @@ class TransportSolver:
             "outlet": np.zeros(len(self.outlet_exchange), dtype=float),
         }
         self.network_history = []
+        steady_inlet_guess = (
+            self.c_in_value
+            if self.steady_state
+            else self.network_initial_concentration
+        )
+        steady_outlet_guess = (
+            self.c_in_value
+            if self.steady_state and self.marker_32_concentration is None
+            else self.marker_32_concentration
+            if self.steady_state
+            else self.network_initial_concentration
+        )
+        self._two_way_terminal_concentrations = {
+            "inlet": np.full(
+                len(self.inlet_exchange), steady_inlet_guess,
+                dtype=float,
+            ),
+            "outlet": np.full(
+                len(self.outlet_exchange), steady_outlet_guess,
+                dtype=float,
+            ),
+        }
         if self.couple_1d_transport:
             self._initialize_coupled_network_transport()
 
@@ -1391,6 +1632,7 @@ class TransportSolver:
             "concentration_units": "mol/cm^3",
             "diffusion_units": "cm^2/s",
             "time_units": "s",
+            "output_stride": int(self.output_stride),
             "region_mode": mode,
             "diffusion_region_path": str(self.diffusion_region_path),
             "resolved_stl_files": [str(p) for p in stl_files],
@@ -1412,29 +1654,56 @@ class TransportSolver:
             "diffusion_only": bool(self.diffusion_only),
             "skip_1d": bool(self.skip_1d),
             "coupled_1d_transport": bool(self.couple_1d_transport),
+            "two_way_1d_transport": bool(self.two_way_1d_transport),
             "network_cells_per_segment": int(self.network_cells_per_segment),
             "network_coupling_relaxation": float(
                 self.network_coupling_relaxation
             ),
+            "network_coupling_tolerance": float(
+                self.network_coupling_tolerance
+            ),
+            "network_coupling_max_iterations": int(
+                self.network_coupling_max_iterations
+            ),
             "network_initial_concentration_mol_per_cm3": float(
                 self.network_initial_concentration
             ),
+            "steady_state": bool(self.steady_state),
+            "steady_state_tolerance": float(self.steady_state_tolerance),
+            "steady_state_max_iterations": int(
+                self.steady_state_max_iterations
+            ),
+            "steady_state_relaxation": float(self.steady_state_relaxation),
             "network_coupling_scheme": (
+                "stationary_terminal_krylov_with_outer_relaxed_mm_picard"
+                if self.two_way_1d_transport and self.steady_state
+                else "conservative_partitioned_total_flux_with_lagged_mm_consumption"
+                if self.two_way_1d_transport
+                else
                 "directional_arterial_1d_concentration_imposition_without_diffusive_feedback_to_3d_to_venous_1d"
                 if self.couple_1d_transport
                 else "disabled"
             ),
             "arterial_network_root_concentration": "marker_31_c_in",
-            "venous_network_root_concentration": "marker_32",
+            "venous_network_root_concentration": (
+                "marker_32"
+                if self.venous_root_bc == "dirichlet"
+                else "natural_advective_outflow_zero_diffusive_flux"
+            ),
             "concave_exchange_mode": str(self.concave_exchange_mode),
             "arterial_synthetic_terminal_bc": (
                 "disabled_skip_1d"
                 if self.skip_1d
+                else "conservative_signed_total_flux"
+                if self.two_way_1d_transport
                 else "1d_terminal_concentration_nitsche_imposition_plus_advective_flux_no_1d_diffusive_feedback"
                 if self.couple_1d_transport
                 else "danckwerts_prescribed_total_flux"
             ),
             "arterial_synthetic_terminal_total_flux": (
+                "signed 1D total terminal flux Q*C plus network diffusion"
+                if self.two_way_1d_transport
+                else
                 "Q*C_terminal plus 3D Nitsche concentration-imposition flux; Nitsche reaction is reported as applied 3D flux but not returned to 1D"
                 if self.couple_1d_transport
                 else "(Q/A)*c_feed; zero total species flux when Q=0"
@@ -1442,6 +1711,8 @@ class TransportSolver:
             "venous_synthetic_terminal_bc": (
                 "disabled_skip_1d"
                 if self.skip_1d
+                else "conservative_signed_total_flux"
+                if self.two_way_1d_transport
                 else "advective_local_concentration_outflow_to_1d"
                 if self.couple_1d_transport
                 else "advective_local_concentration_outflow"
@@ -2554,6 +2825,46 @@ class TransportSolver:
             }
             self._coupled_terminal_flux_constants = {"inlet": [], "outlet": []}
 
+            if self.two_way_1d_transport:
+                # A single signed total species flux is exchanged at each
+                # terminal. Positive is network -> 3D. Concentration
+                # continuity is obtained by the partitioned iteration, so no
+                # additional Nitsche or advective terminal term is added here.
+                for kind, exchange in (
+                    ("inlet", self.inlet_exchange),
+                    ("outlet", self.outlet_exchange),
+                ):
+                    for data in exchange:
+                        marker = int(data["marker"])
+                        flux_density = fem.Constant(
+                            mesh, dfx.default_scalar_type(0.0)
+                        )
+                        self._coupled_terminal_flux_constants[kind].append(
+                            flux_density
+                        )
+                        if data["area_exterior"] > 0.0:
+                            L_exchange += (
+                                flux_density * w * ds_tagged(marker)
+                            )
+                        if data["area_interior"] > 0.0:
+                            direction = fem.Constant(
+                                mesh,
+                                dfx.default_scalar_type(
+                                    tuple(
+                                        float(value)
+                                        for value in data["distal_direction"]
+                                    )
+                                ),
+                            )
+                            use_minus = ufl.gt(ufl.dot(n("+"), direction), 0.0)
+                            w_tissue = ufl.conditional(
+                                use_minus, w("-"), w("+")
+                            )
+                            L_exchange += (
+                                flux_density * w_tissue * dS_tagged(marker)
+                            )
+                return a_exchange, L_exchange
+
             # Arterial network is upstream: solve it first and impose its
             # terminal concentrations on the 3D tissue-facing trace, while also
             # prescribing the advective species flux Q*c_terminal.
@@ -2698,7 +3009,9 @@ class TransportSolver:
                 marker_diffusive_rates[marker_index]
             )
         network.step_with_diffusive_terminal_flux(
-            float(arterial_root_concentration), network_diffusive_rates
+            float(arterial_root_concentration),
+            network_diffusive_rates,
+            steady_state=self.steady_state,
         )
 
         marker_total_rates = np.empty(len(self.inlet_exchange), dtype=float)
@@ -2897,7 +3210,9 @@ class TransportSolver:
                 float(venous_trace[marker_index]), 0.0
             )
         venous_network_total_rates = self.network_outlet.step(
-            float(venous_root_concentration), venous_terminal_values
+            float(venous_root_concentration),
+            venous_terminal_values,
+            steady_state=self.steady_state,
         )
 
         venous_returned_diffusion = np.empty(
@@ -2979,6 +3294,361 @@ class TransportSolver:
                     ),
                 }
             )
+
+    @staticmethod
+    def _trial_values_in_marker_order(trial, marker_to_terminal, field):
+        values = np.asarray(trial[field], dtype=float)
+        return np.asarray(
+            [values[int(index)] for index in marker_to_terminal], dtype=float
+        )
+
+    @staticmethod
+    def _marker_values_in_network_order(values, marker_to_terminal, count):
+        network_values = np.empty(int(count), dtype=float)
+        for marker_index, network_index in enumerate(marker_to_terminal):
+            network_values[int(network_index)] = float(values[marker_index])
+        return network_values
+
+    def _set_two_way_terminal_flux_constants(self, inlet_rates, outlet_rates):
+        for kind, rates, exchange in (
+            ("inlet", inlet_rates, self.inlet_exchange),
+            ("outlet", outlet_rates, self.outlet_exchange),
+        ):
+            constants = self._coupled_terminal_flux_constants[kind]
+            if len(constants) != len(exchange) or len(rates) != len(exchange):
+                raise RuntimeError(f"Incomplete two-way {kind} terminal data")
+            for rate, data, constant in zip(rates, exchange, constants):
+                area = float(data["area_total"])
+                constant.value = dfx.default_scalar_type(
+                    float(rate) / area if area > 0.0 else 0.0
+                )
+
+    def _append_two_way_network_history(
+        self,
+        *,
+        time_value,
+        iterations,
+        relative_residual,
+        arterial_trial,
+        venous_trial,
+        arterial_trace,
+        venous_trace,
+    ):
+        for kind, network, exchange, marker_to_terminal, trial, trace in (
+            (
+                "arterial",
+                self.network_inlet,
+                self.inlet_exchange,
+                self.inlet_marker_to_network_terminal,
+                arterial_trial,
+                arterial_trace,
+            ),
+            (
+                "venous",
+                self.network_outlet,
+                self.outlet_exchange,
+                self.outlet_marker_to_network_terminal,
+                venous_trial,
+                venous_trace,
+            ),
+        ):
+            for marker_index, data in enumerate(exchange):
+                network_terminal = int(marker_to_terminal[marker_index])
+                terminal_concentration = float(
+                    trial["terminal_boundary_concentrations"][network_terminal]
+                )
+                total_rate = float(trial["terminal_flux_rates"][network_terminal])
+                advective_rate = float(
+                    trial["terminal_advective_flux_rates"][network_terminal]
+                )
+                diffusive_rate = total_rate - advective_rate
+                self.network_history.append(
+                    {
+                        "coupling_iteration": int(np.rint(time_value / self.dt)),
+                        "coupling_subiterations": int(iterations),
+                        "coupling_relative_residual": float(relative_residual),
+                        "time_s": float(time_value),
+                        "network": kind,
+                        "marker": int(data["marker"]),
+                        "network_terminal_index": network_terminal,
+                        "root_concentration_mol_per_cm3": float(
+                            trial["concentration"][int(network.root_node)]
+                        ),
+                        "terminal_concentration_mol_per_cm3": terminal_concentration,
+                        "three_d_trace_concentration_mol_per_cm3": float(
+                            trace[marker_index]
+                        ),
+                        "concentration_continuity_residual_mol_per_cm3": float(
+                            trace[marker_index] - terminal_concentration
+                        ),
+                        "advective_network_to_3d_flux_mol_per_s": advective_rate,
+                        "imposed_diffusive_network_to_3d_flux_mol_per_s": diffusive_rate,
+                        "returned_diffusive_network_to_3d_flux_mol_per_s": diffusive_rate,
+                        "next_relaxed_diffusive_network_to_3d_flux_mol_per_s": diffusive_rate,
+                        "raw_network_to_3d_flux_mol_per_s": total_rate,
+                        "applied_network_to_3d_flux_mol_per_s": total_rate,
+                        "network_root_influx_mol_per_s": float(
+                            trial["root_flux_rate"]
+                        ),
+                        "network_storage_rate_mol_per_s": float(
+                            trial["storage_rate"]
+                        ),
+                        "network_balance_residual_mol_per_s": float(
+                            trial["balance_residual"]
+                        ),
+                    }
+                )
+
+    def _solve_two_way_network_coupling(
+        self,
+        *,
+        solver,
+        rhs_vector,
+        rhs_form,
+        c_h,
+        D,
+        ds_tagged,
+        dS_tagged,
+        time_value,
+        arterial_root_concentration,
+        venous_root_concentration,
+    ):
+        """Converge conservative 1D/3D terminal exchange for one timestep."""
+        arterial_old = self.network_inlet.concentration.copy()
+        venous_old = self.network_outlet.concentration.copy()
+        arterial_guess = self._two_way_terminal_concentrations["inlet"].copy()
+        venous_guess = self._two_way_terminal_concentrations["outlet"].copy()
+        omega = float(self.network_coupling_relaxation)
+        previous_residual = None
+        concentration_scale = max(
+            abs(float(arterial_root_concentration)),
+            float(self.critical_oxygen_concentration),
+            np.finfo(float).tiny,
+        )
+
+        def evaluate(arterial_values, venous_values):
+            arterial_terminal_values = self._marker_values_in_network_order(
+                arterial_values,
+                self.inlet_marker_to_network_terminal,
+                len(self.network_inlet.terminal_nodes),
+            )
+            venous_terminal_values = self._marker_values_in_network_order(
+                venous_values,
+                self.outlet_marker_to_network_terminal,
+                len(self.network_outlet.terminal_nodes),
+            )
+            arterial_trial = self.network_inlet.solve_trial(
+                arterial_terminal_values,
+                old_concentration=arterial_old,
+                root_concentration=float(arterial_root_concentration),
+                root_mode="dirichlet",
+                steady_state=self.steady_state,
+            )
+            venous_trial_kwargs = {
+                "old_concentration": venous_old,
+                "root_mode": self.venous_root_bc,
+            }
+            if self.venous_root_bc == "dirichlet":
+                venous_trial_kwargs["root_concentration"] = float(
+                    venous_root_concentration
+                )
+            venous_trial = self.network_outlet.solve_trial(
+                venous_terminal_values,
+                steady_state=self.steady_state,
+                **venous_trial_kwargs,
+            )
+            arterial_rates = self._trial_values_in_marker_order(
+                arterial_trial,
+                self.inlet_marker_to_network_terminal,
+                "terminal_flux_rates",
+            )
+            venous_rates = self._trial_values_in_marker_order(
+                venous_trial,
+                self.outlet_marker_to_network_terminal,
+                "terminal_flux_rates",
+            )
+            self._set_two_way_terminal_flux_constants(
+                arterial_rates, venous_rates
+            )
+
+            rhs_vector.zeroEntries()
+            assemble_vector(rhs_vector, rhs_form)
+            rhs_vector.ghostUpdate(
+                addv=PETSc.InsertMode.ADD_VALUES,
+                mode=PETSc.ScatterMode.REVERSE,
+            )
+            solver.solve(rhs_vector, c_h.x.petsc_vec)
+            c_h.x.scatter_forward()
+
+            arterial_trace = self._terminal_face_concentrations(
+                c_h, self.inlet_exchange, ds_tagged, dS_tagged
+            )
+            venous_trace = self._terminal_face_concentrations(
+                c_h, self.outlet_exchange, ds_tagged, dS_tagged
+            )
+            residual = np.concatenate(
+                (arterial_trace - arterial_values, venous_trace - venous_values)
+            )
+            return (
+                arterial_trial,
+                venous_trial,
+                arterial_trace,
+                venous_trace,
+                residual,
+            )
+
+        converged = False
+        arterial_trial = venous_trial = None
+        arterial_trace = venous_trace = None
+        relative_residual = float("inf")
+        iteration = 0
+
+        if self.steady_state:
+            inlet_count = len(arterial_guess)
+            initial_scaled = np.concatenate(
+                (arterial_guess, venous_guess)
+            ) / concentration_scale
+            evaluations = 0
+
+            def stationary_residual(scaled_values):
+                nonlocal evaluations
+                evaluations += 1
+                values = np.asarray(scaled_values, dtype=float) * concentration_scale
+                result = evaluate(values[:inlet_count], values[inlet_count:])
+                scaled_residual = result[-1] / concentration_scale
+                relative = (
+                    float(np.max(np.abs(scaled_residual)))
+                    if scaled_residual.size
+                    else 0.0
+                )
+                if self.mesh.comm.rank == 0:
+                    print(
+                        "[transport-coupling-steady] "
+                        f"evaluation={evaluations} relative concentration "
+                        f"residual={relative:.3e}",
+                        flush=True,
+                    )
+                return scaled_residual
+
+            root_result = scipy_root(
+                stationary_residual,
+                initial_scaled,
+                method="krylov",
+                options={
+                    "fatol": float(self.network_coupling_tolerance),
+                    "maxiter": int(self.network_coupling_max_iterations),
+                    "line_search": "armijo",
+                },
+            )
+            final_values = (
+                np.asarray(root_result.x, dtype=float) * concentration_scale
+            )
+            (
+                arterial_trial,
+                venous_trial,
+                arterial_trace,
+                venous_trace,
+                residual,
+            ) = evaluate(
+                final_values[:inlet_count], final_values[inlet_count:]
+            )
+            relative_residual = (
+                float(np.max(np.abs(residual)) / concentration_scale)
+                if residual.size
+                else 0.0
+            )
+            iteration = evaluations
+            converged = relative_residual <= self.network_coupling_tolerance
+        else:
+            for iteration in range(1, self.network_coupling_max_iterations + 1):
+                (
+                    arterial_trial,
+                    venous_trial,
+                    arterial_trace,
+                    venous_trace,
+                    residual,
+                ) = evaluate(arterial_guess, venous_guess)
+                relative_residual = (
+                    float(np.max(np.abs(residual)) / concentration_scale)
+                    if residual.size
+                    else 0.0
+                )
+                if self.mesh.comm.rank == 0:
+                    print(
+                        f"[transport-coupling] iteration={iteration} "
+                        f"relative concentration residual={relative_residual:.3e} "
+                        f"relaxation={omega:.3f}",
+                        flush=True,
+                    )
+                if relative_residual <= self.network_coupling_tolerance:
+                    converged = True
+                    break
+
+                if previous_residual is not None:
+                    delta = residual - previous_residual
+                    denominator = float(np.dot(delta, delta))
+                    if denominator > np.finfo(float).tiny:
+                        aitken = (
+                            -omega
+                            * float(np.dot(previous_residual, delta))
+                            / denominator
+                        )
+                        omega = float(np.clip(aitken, 0.005, 0.25))
+                arterial_guess += omega * residual[: len(arterial_guess)]
+                venous_guess += omega * residual[len(arterial_guess):]
+                arterial_guess = np.maximum(arterial_guess, 0.0)
+                venous_guess = np.maximum(venous_guess, 0.0)
+                previous_residual = residual.copy()
+
+        if not converged:
+            raise RuntimeError(
+                "Two-way 1D/3D terminal coupling did not converge after "
+                f"{self.network_coupling_max_iterations} iterations; "
+                f"relative residual={relative_residual:.3e}"
+            )
+
+        self.network_inlet.commit_trial(arterial_trial)
+        self.network_outlet.commit_trial(venous_trial)
+        self._two_way_terminal_concentrations["inlet"] = arterial_trace.copy()
+        self._two_way_terminal_concentrations["outlet"] = venous_trace.copy()
+        self._coupled_terminal_marker_rates["inlet"] = (
+            self._trial_values_in_marker_order(
+                arterial_trial,
+                self.inlet_marker_to_network_terminal,
+                "terminal_flux_rates",
+            )
+        )
+        self._coupled_terminal_marker_rates["outlet"] = (
+            self._trial_values_in_marker_order(
+                venous_trial,
+                self.outlet_marker_to_network_terminal,
+                "terminal_flux_rates",
+            )
+        )
+        self._coupled_terminal_diffusive_rates["inlet"] = (
+            self._trial_values_in_marker_order(
+                arterial_trial,
+                self.inlet_marker_to_network_terminal,
+                "terminal_diffusive_flux_rates",
+            )
+        )
+        self._coupled_terminal_diffusive_rates["outlet"] = (
+            self._trial_values_in_marker_order(
+                venous_trial,
+                self.outlet_marker_to_network_terminal,
+                "terminal_diffusive_flux_rates",
+            )
+        )
+        self._append_two_way_network_history(
+            time_value=time_value,
+            iterations=iteration,
+            relative_residual=relative_residual,
+            arterial_trial=arterial_trial,
+            venous_trial=venous_trial,
+            arterial_trace=arterial_trace,
+            venous_trace=venous_trace,
+        )
+        return iteration, relative_residual
 
     def _build_concave_exchange_forms(
         self, c, w, c_marker_31, c_marker_32, ds_tagged, n
@@ -3378,8 +4048,11 @@ class TransportSolver:
             c, w, c_in, c_marker_32, ds_tagged, n
         )
 
-        a = a_time + a_advect + a_diffuse + a_consumption + a_exchange + a_concave
-        L = (c_old / delta_t) * w * dx + L_exchange + L_concave
+        a = a_advect + a_diffuse + a_consumption + a_exchange + a_concave
+        L = L_exchange + L_concave
+        if not self.steady_state:
+            a += a_time
+            L += (c_old / delta_t) * w * dx
 
         # Upwind advection flux on all interior facets.
         un = (ufl.dot(self.velocity, n) + abs(ufl.dot(self.velocity, n))) / 2.0
@@ -3579,7 +4252,22 @@ class TransportSolver:
                 )
 
         t = 0.0
-        nt = int(np.round(self.T / self.dt))
+        nt = (
+            self.steady_state_max_iterations
+            if self.steady_state
+            else int(np.round(self.T / self.dt))
+        )
+        steady_converged = False
+        steady_relative_residual = float("inf")
+        steady_iterations = 0
+        if self.steady_state and mesh.comm.rank == 0:
+            print(
+                "[transport-steady] Solving without 1D/3D storage terms; "
+                f"outer tolerance={self.steady_state_tolerance:.3e}, "
+                f"max iterations={self.steady_state_max_iterations}, "
+                f"relaxation={self.steady_state_relaxation:.3f}.",
+                flush=True,
+            )
         injected_cumulative = 0.0
         removed_cumulative = 0.0
         consumed_cumulative = 0.0
@@ -3602,8 +4290,9 @@ class TransportSolver:
             venous_network_writer = NetworkTransportVTKWriter(
                 self.network_outlet, venous_network_pvd_path
             )
-            arterial_network_writer.write(0.0)
-            venous_network_writer.write(0.0)
+            if not self.steady_state:
+                arterial_network_writer.write(0.0)
+                venous_network_writer.write(0.0)
             print(
                 "[transport] Writing coupled 1D visualization time series: "
                 f"{arterial_network_pvd_path} and {venous_network_pvd_path}",
@@ -3631,17 +4320,32 @@ class TransportSolver:
             )
 
         for step in range(nt):
-            t += self.dt
+            if not self.steady_state:
+                t += self.dt
+            write_this_step = False if self.steady_state else (
+                (step + 1) % self.output_stride == 0 or step == nt - 1
+            )
             c_in.value = dfx.default_scalar_type(self._inlet_concentration(t))
+            steady_previous = np.asarray(c_old.x.array, dtype=float).copy()
+            three_d_mass_old = self._global_scalar(c_old * dx)
+            combined_mass_old = three_d_mass_old
+            if self.two_way_1d_transport:
+                combined_mass_old += self.network_inlet.stored_mass(
+                    root_mode="dirichlet"
+                )
+                combined_mass_old += self.network_outlet.stored_mass(
+                    root_mode=self.venous_root_bc
+                )
             self._update_mm_consumption_rate(mm_rate, c_old, organoid_indicator)
 
             if self.couple_1d_transport:
                 history_start = len(self.network_history)
-                self._advance_coupled_networks(
-                    t,
-                    float(c_in.value),
-                    float(c_marker_32.value),
-                )
+                if not self.two_way_1d_transport:
+                    self._advance_coupled_networks(
+                        t,
+                        float(c_in.value),
+                        float(c_marker_32.value),
+                    )
 
             velocity_changed = self._update_velocity_for_time(t)
             if velocity_changed:
@@ -3672,15 +4376,57 @@ class TransportSolver:
                     velocity_debug_csv_writer.writerows(debug_rows)
                     velocity_debug_csv_stream.flush()
 
-            b.zeroEntries()
-            assemble_vector(b, L_form)
-            b.ghostUpdate(
-                addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE
-            )
+            if self.two_way_1d_transport:
+                self._solve_two_way_network_coupling(
+                    solver=solver,
+                    rhs_vector=b,
+                    rhs_form=L_form,
+                    c_h=c_h,
+                    D=D,
+                    ds_tagged=ds_tagged,
+                    dS_tagged=dS_tagged,
+                    time_value=t,
+                    arterial_root_concentration=float(c_in.value),
+                    venous_root_concentration=float(c_marker_32.value),
+                )
+            else:
+                b.zeroEntries()
+                assemble_vector(b, L_form)
+                b.ghostUpdate(
+                    addv=PETSc.InsertMode.ADD_VALUES,
+                    mode=PETSc.ScatterMode.REVERSE,
+                )
+                solver.solve(b, c_h.x.petsc_vec)
+                c_h.x.scatter_forward()
 
-            solver.solve(b, c_h.x.petsc_vec)
-            c_h.x.scatter_forward()
-            if self.couple_1d_transport:
+            if self.steady_state:
+                local_delta = (
+                    float(np.max(np.abs(c_h.x.array - steady_previous)))
+                    if c_h.x.array.size
+                    else 0.0
+                )
+                global_delta = float(
+                    mesh.comm.allreduce(local_delta, op=MPI.MAX)
+                )
+                concentration_scale = max(
+                    abs(float(c_in.value)),
+                    float(self.critical_oxygen_concentration),
+                    np.finfo(float).tiny,
+                )
+                steady_relative_residual = global_delta / concentration_scale
+                steady_iterations = step + 1
+                steady_converged = (
+                    steady_relative_residual <= self.steady_state_tolerance
+                )
+                write_this_step = steady_converged or step == nt - 1
+                if mesh.comm.rank == 0:
+                    print(
+                        f"[transport-steady] iteration={step + 1} "
+                        f"relative concentration residual="
+                        f"{steady_relative_residual:.3e}",
+                        flush=True,
+                    )
+            if self.couple_1d_transport and not self.two_way_1d_transport:
                 self._update_coupled_terminal_diffusive_fluxes(
                     c_h,
                     D,
@@ -3692,13 +4438,26 @@ class TransportSolver:
                     float(c_in.value),
                     float(c_marker_32.value),
                 )
-                if mesh.comm.rank == 0:
-                    network_history_writer.update(
-                        self.network_history[history_start:]
-                    )
+            if self.couple_1d_transport and mesh.comm.rank == 0:
+                network_history_writer.update(
+                    self.network_history[history_start:]
+                )
+                if write_this_step:
                     arterial_network_writer.write(t)
                     venous_network_writer.write(t)
-            c_old.x.array[:] = c_h.x.array
+            applied_consumption_rate = (
+                self._global_scalar(mm_rate * c_h * dx)
+                if self.enable_mm_consumption
+                else 0.0
+            )
+            if self.steady_state and not steady_converged:
+                omega = float(self.steady_state_relaxation)
+                c_old.x.array[:] = (
+                    steady_previous + omega * (c_h.x.array - steady_previous)
+                )
+            else:
+                c_old.x.array[:] = c_h.x.array
+            c_old.x.scatter_forward()
 
             c_out.interpolate(c_h)
             # c_out.x.array[:] = c_h.x.array
@@ -3730,17 +4489,17 @@ class TransportSolver:
             consumption_field.x.scatter_forward()
             critical_out.interpolate(critical_mask)
             consumption_out.interpolate(consumption_field)
-            if vtk_out is not None:
+            if vtk_out is not None and write_this_step:
                 vtk_out.write_function(c_out, t)
-            if vtk_critical_out is not None:
+            if vtk_critical_out is not None and write_this_step:
                 vtk_critical_out.write_function(critical_out, t)
-            if vtk_consumption_out is not None:
+            if vtk_consumption_out is not None and write_this_step:
                 vtk_consumption_out.write_function(consumption_out, t)
-            if xdmf_out is not None:
+            if xdmf_out is not None and write_this_step:
                 xdmf_out.write_function(c_out, t)
-            if xdmf_critical_out is not None:
+            if xdmf_critical_out is not None and write_this_step:
                 xdmf_critical_out.write_function(critical_out, t)
-            if xdmf_consumption_out is not None:
+            if xdmf_consumption_out is not None and write_this_step:
                 xdmf_consumption_out.write_function(consumption_out, t)
 
             inlet_rates, outlet_rates = self._compute_exchange_rates(
@@ -3756,35 +4515,88 @@ class TransportSolver:
                 h=h,
                 alpha=alpha,
             )
-            consumption_rate = self._compute_consumption_rate(c_h, organoid_indicator, dx)
+            nonlinear_consumption_rate = self._compute_consumption_rate(
+                c_h, organoid_indicator, dx
+            )
+            consumption_rate = float(
+                nonlinear_consumption_rate
+                if self.steady_state
+                else applied_consumption_rate
+            )
             inlet_total = float(np.sum(inlet_rates) + np.sum(concave_in_rates))
             outlet_total = float(np.sum(outlet_rates) + np.sum(concave_out_rates))
             terminal_in_total = float(np.sum(inlet_rates))
             terminal_out_total = float(np.sum(outlet_rates))
             concave_in_total = float(np.sum(concave_in_rates))
             concave_out_total = float(np.sum(concave_out_rates))
-            injected_cumulative += inlet_total * self.dt
-            removed_cumulative += outlet_total * self.dt
-            consumed_cumulative += consumption_rate * self.dt
+            three_d_mass = self._global_scalar(c_h * dx)
+            combined_mass = three_d_mass
+            combined_storage_rate = float("nan")
+            combined_external_rate = float("nan")
+            combined_mass_balance_residual = float("nan")
+            if self.two_way_1d_transport:
+                combined_mass += self.network_inlet.stored_mass(
+                    root_mode="dirichlet"
+                )
+                combined_mass += self.network_outlet.stored_mass(
+                    root_mode=self.venous_root_bc
+                )
+                combined_external_rate = (
+                    float(self.network_inlet.root_flux_rate)
+                    + float(self.network_outlet.root_flux_rate)
+                    + concave_in_total
+                    - concave_out_total
+                    - consumption_rate
+                )
+                if self.steady_state:
+                    combined_storage_rate = 0.0
+                    combined_mass_balance_residual = -combined_external_rate
+                else:
+                    combined_storage_rate = (
+                        combined_mass - combined_mass_old
+                    ) / self.dt
+                    combined_mass_balance_residual = (
+                        combined_storage_rate - combined_external_rate
+                    )
+            if not self.steady_state:
+                injected_cumulative += inlet_total * self.dt
+                removed_cumulative += outlet_total * self.dt
+                consumed_cumulative += consumption_rate * self.dt
             row = {
                 "step": int(step + 1),
                 "time_s": float(t),
+                "steady_state": bool(self.steady_state),
+                "steady_state_iteration": int(step + 1) if self.steady_state else 0,
+                "steady_state_relative_residual": float(
+                    steady_relative_residual
+                ) if self.steady_state else float("nan"),
                 "inlet_concentration_mol_per_cm3": float(c_in.value),
                 "injection_rate_mol_per_s": float(inlet_total),
                 "outflow_rate_mol_per_s": float(outlet_total),
                 "consumption_rate_mol_per_s": float(consumption_rate),
+                "consumption_rate_nonlinear_evaluated_mol_per_s": float(
+                    nonlinear_consumption_rate
+                ),
                 "terminal_injection_rate_mol_per_s": float(terminal_in_total),
                 "terminal_outflow_rate_mol_per_s": float(terminal_out_total),
                 "concave_injection_rate_mol_per_s": float(concave_in_total),
                 "concave_outflow_rate_mol_per_s": float(concave_out_total),
+                "three_d_mass_mol": float(three_d_mass),
+                "combined_1d_3d_dynamic_mass_mol": float(combined_mass),
+                "combined_storage_rate_mol_per_s": float(combined_storage_rate),
+                "combined_external_rate_mol_per_s": float(combined_external_rate),
+                "combined_mass_balance_residual_mol_per_s": float(
+                    combined_mass_balance_residual
+                ),
                 "injected_cumulative_mol": float(injected_cumulative),
                 "removed_cumulative_mol": float(removed_cumulative),
                 "consumed_cumulative_mol": float(consumed_cumulative),
                 **critical_stats,
             }
-            critical_rows.append(row)
+            if not self.steady_state or write_this_step:
+                critical_rows.append(row)
 
-            if mesh.comm.rank == 0:
+            if mesh.comm.rank == 0 and (not self.steady_state or write_this_step):
                 print(
                     f"Step {step + 1}/{nt}   t={t:.3f}   c_in={float(c_in.value):.6e}   "
                     f"inj_rate={inlet_total:.6e}   out_rate={outlet_total:.6e}   "
@@ -3796,6 +4608,9 @@ class TransportSolver:
                     f"org_below_crit={critical_stats['organoid_below_critical_volume_fraction']:.3e}"
                 )
                 progress_reporter.update(row)
+
+            if self.steady_state and steady_converged:
+                break
 
         if progress_reporter is not None:
             progress_reporter.close()
@@ -3828,6 +4643,16 @@ class TransportSolver:
             if self.critical_summary_file
             else Path(self.out_file).with_name(f"{Path(self.out_file).stem}_oxygen_summary.json")
         )
+        if self.steady_state:
+            self.transport_metadata.update(
+                {
+                    "steady_state_converged": bool(steady_converged),
+                    "steady_state_iterations": int(steady_iterations),
+                    "steady_state_final_relative_residual": float(
+                        steady_relative_residual
+                    ),
+                }
+            )
         if mesh.comm.rank == 0:
             payload = {
                 "metadata": dict(getattr(self, "transport_metadata", {})),
@@ -3877,6 +4702,13 @@ class TransportSolver:
                 ),
             }
             summary_path.write_text(json.dumps(payload, indent=2))
+        mesh.comm.barrier()
+        if self.steady_state and not steady_converged:
+            raise RuntimeError(
+                "Steady transport solve did not converge after "
+                f"{self.steady_state_max_iterations} iterations; relative "
+                f"concentration residual={steady_relative_residual:.3e}"
+            )
 
 
 ################################################################################
@@ -3971,12 +4803,21 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
             critical_summary_file=args.critical_summary_file,
             velocity_debug_output_file=args.velocity_debug_output_file,
             output_format=args.output_format,
+            output_stride=args.output_stride,
             branching_in_file=args.branching_in_file,
             branching_out_file=args.branching_out_file,
             couple_1d_transport=args.coupled_1d_transport,
+            two_way_1d_transport=args.two_way_1d_transport,
             network_cells_per_segment=args.network_cells_per_segment,
             network_coupling_relaxation=args.network_coupling_relaxation,
+            network_coupling_tolerance=args.network_coupling_tolerance,
+            network_coupling_max_iterations=args.network_coupling_max_iterations,
             network_initial_concentration=args.network_initial_concentration,
+            venous_root_bc=args.venous_root_bc,
+            steady_state=args.steady_state,
+            steady_state_tolerance=args.steady_state_tolerance,
+            steady_state_max_iterations=args.steady_state_max_iterations,
+            steady_state_relaxation=args.steady_state_relaxation,
         )
 
     return TransportSolver(
@@ -4023,6 +4864,7 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
         if args.velocity_debug_output_file
         else "",
         output_format=args.output_format,
+        output_stride=args.output_stride,
         branching_in_file=_resolve_organoid_path(args.branching_in_file, organoid_id)
         if args.branching_in_file
         else "",
@@ -4030,9 +4872,17 @@ def _build_solver_from_args(args, organoid_id: int | None, batch_mode: bool) -> 
         if args.branching_out_file
         else "",
         couple_1d_transport=args.coupled_1d_transport,
+        two_way_1d_transport=args.two_way_1d_transport,
         network_cells_per_segment=args.network_cells_per_segment,
         network_coupling_relaxation=args.network_coupling_relaxation,
+        network_coupling_tolerance=args.network_coupling_tolerance,
+        network_coupling_max_iterations=args.network_coupling_max_iterations,
         network_initial_concentration=args.network_initial_concentration,
+        venous_root_bc=args.venous_root_bc,
+        steady_state=args.steady_state,
+        steady_state_tolerance=args.steady_state_tolerance,
+        steady_state_max_iterations=args.steady_state_max_iterations,
+        steady_state_relaxation=args.steady_state_relaxation,
     )
 
 
@@ -4127,6 +4977,17 @@ if __name__ == "__main__":
         ),
     )
     ap.add_argument(
+        "--two-way-1d-transport",
+        action="store_true",
+        help=(
+            "Enable conservative partitioned arterial/venous 1D-3D coupling. "
+            "Both networks exchange one signed total terminal species flux, "
+            "the venous root condition is selected by --venous-root-bc, and "
+            "lagged Michaelis-Menten consumption remains active. Implies "
+            "--coupled-1d-transport."
+        ),
+    )
+    ap.add_argument(
         "--network-cells-per-segment",
         type=int,
         default=1000,
@@ -4143,12 +5004,34 @@ if __name__ == "__main__":
         ),
     )
     ap.add_argument(
+        "--network-coupling-tolerance",
+        type=float,
+        default=1.0e-6,
+        help="Relative terminal-concentration tolerance for two-way coupling.",
+    )
+    ap.add_argument(
+        "--network-coupling-max-iterations",
+        type=int,
+        default=20,
+        help="Maximum partitioned iterations per physical timestep.",
+    )
+    ap.add_argument(
         "--network-initial-concentration",
         type=float,
         default=0.0,
         help=(
             "Initial arterial and venous lumen concentration in mol/cm^3 "
             "(default: 0)."
+        ),
+    )
+    ap.add_argument(
+        "--venous-root-bc",
+        choices=["dirichlet", "natural_outflow"],
+        default="dirichlet",
+        help=(
+            "Venous 1D root condition in two-way mode. 'dirichlet' uses "
+            "--marker-32-concentration (or c_in when marker 32 is omitted); "
+            "'natural_outflow' uses zero external diffusive flux."
         ),
     )
     ap.add_argument(
@@ -4172,6 +5055,39 @@ if __name__ == "__main__":
     )
     ap.add_argument("--T", type=float, default=5000.0)
     ap.add_argument("--dt", type=float, default=50.0)
+    ap.add_argument(
+        "--steady-state",
+        action="store_true",
+        help=(
+            "Solve the stationary transport problem directly. Removes the 1D "
+            "and 3D storage terms; --T and --dt are not used as physical-time "
+            "integration controls."
+        ),
+    )
+    ap.add_argument(
+        "--steady-state-tolerance",
+        type=float,
+        default=1.0e-6,
+        help=(
+            "Relative concentration tolerance for the outer stationary "
+            "Michaelis-Menten iteration (default: 1e-6)."
+        ),
+    )
+    ap.add_argument(
+        "--steady-state-max-iterations",
+        type=int,
+        default=50,
+        help="Maximum outer stationary nonlinear iterations (default: 50).",
+    )
+    ap.add_argument(
+        "--steady-state-relaxation",
+        type=float,
+        default=0.5,
+        help=(
+            "Relaxation applied to the stationary concentration iterate in "
+            "(0, 1] (default: 0.5)."
+        ),
+    )
     ap.add_argument(
         "--D-value",
         type=float,
@@ -4279,6 +5195,12 @@ if __name__ == "__main__":
             "Visualization format. 'vtk' writes ParaView-safe .pvd/.vtu time "
             "series. 'xdmf' writes XDMF time series. 'both' writes both."
         ),
+    )
+    ap.add_argument(
+        "--output-stride",
+        type=int,
+        default=1,
+        help="Write field and 1D visualization output every N timesteps.",
     )
     ap.add_argument("--out-file", default="transport_c_no_vasc.xdmf")
     ap.add_argument(
