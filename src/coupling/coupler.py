@@ -670,16 +670,44 @@ def synthesize_scaled_screening_outputs(
                 scaled_fields._shift_for_organoid(reference_organoid, organoid_id, float(0.0)),
             )
         )
-        try:
-            transform = scaled_fields._pressure_transform_from_0d(
-                ref_zero_d,
-                zero_d[organoid_id],
-                scaled_cfg["pressure_offset_anchor"],
-            )
-        except ZeroDivisionError:
+        transform_mode = str(scaled_cfg.get("transform_mode", "dynamic")).strip().lower()
+        if transform_mode == "static":
             transform = _fallback_scaled_pressure_transform(scaled_cfg, organoid_id)
             if transform is None:
-                raise
+                die(
+                    "Static scaled-screening output synthesis requires a prepared "
+                    f"scale_factor and pressure_offset for organoid_{organoid_id}."
+                )
+            # Hold scale/offset fixed, but report the endpoints obtained by
+            # applying that fixed transform to the current reference 0D state.
+            scale = float(transform["scale_factor"])
+            offset = float(transform["pressure_offset"])
+            transform["target_arterial_pressure"] = (
+                offset + scale * float(ref_zero_d["p_art_mean"])
+            )
+            transform["target_venous_pressure"] = (
+                offset + scale * float(ref_zero_d["p_ven_mean"])
+            )
+            transform["offset_from_artery"] = offset
+            transform["offset_from_vein"] = offset
+            transform["offset_mismatch"] = 0.0
+            transform["arterial_channel_drop"] = float(
+                ref_zero_d["p_art_mean"] - transform["target_arterial_pressure"]
+            )
+            transform["venous_channel_drop"] = float(
+                ref_zero_d["p_ven_mean"] - transform["target_venous_pressure"]
+            )
+        else:
+            try:
+                transform = scaled_fields._pressure_transform_from_0d(
+                    ref_zero_d,
+                    zero_d[organoid_id],
+                    scaled_cfg["pressure_offset_anchor"],
+                )
+            except ZeroDivisionError:
+                transform = _fallback_scaled_pressure_transform(scaled_cfg, organoid_id)
+                if transform is None:
+                    raise
         if write_field_outputs:
             scaling_rows.append(
                 _write_scaled_organoid_outputs(
@@ -728,6 +756,7 @@ def synthesize_scaled_screening_outputs(
         "trial_dir": str(run_dir),
         "prepared_root": str(run_dir),
         "reference_organoid": reference_organoid,
+        "transform_mode": str(scaled_cfg.get("transform_mode", "dynamic")),
         "scaled_organoids": scaling_rows,
         "assumptions": list(
             scaled_cfg.get("assumptions")
@@ -4367,6 +4396,13 @@ def prepare_automatic_darcy_response_maps(
                 rebuild = rebuild or str(
                     metadata.get("concave_bc_mode", "dirichlet")
                 ) != str(args.concave_bc_mode)
+                # Single-side and two-sided maps can share identical geometry
+                # and permeability fingerprints while having different terminal
+                # input/output layouts. The standard coupler always needs the
+                # full two-sided topology, so do not reuse a side-tagged map.
+                rebuild = rebuild or bool(
+                    str(metadata.get("single_side_active", "")).strip()
+                )
             except Exception:
                 rebuild = True
         else:
@@ -5828,6 +5864,10 @@ def main() -> None:
         args,
         scaled_cfg=scaled_cfg,
         replicate_reference_outputs=(scaled_cfg is not None),
+        # Automatic maps are prepared below, after run_0 has established the
+        # terminal/interface layout. Never interpret the literal value "auto"
+        # (or an existing map) during this initialization solve.
+        force_pde=True,
     )
     write_post_darcy_terminal_convergence(
         run0,

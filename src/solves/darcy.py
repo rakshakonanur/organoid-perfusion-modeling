@@ -709,7 +709,7 @@ class PerfusionSolver:
         Read a branchingData_*.csv and return:
           - coords: (N_term, 3) array of distal coordinates
           - ids:    (N_term,) array of branch IDs (or 0..N_term-1 if not present)
-          - normals:(N_term, 3) array of terminal axial directions (W basis when available)
+          - normals:(N_term, 3) array of normalized proximal-to-distal axes
 
         Assumptions (tweak if your headers differ):
           * child columns contain 'child' in their name
@@ -717,6 +717,8 @@ class PerfusionSolver:
               (x_dist, y_dist, z_dist) or
               (xDist,  yDist,  zDist)  or
               (x, y, z) as a fallback
+          * proximal/distal endpoints define the preferred axial direction
+          * W is treated as distal-to-proximal when endpoint data is unavailable
           * branch ID column is one of:
               branchID, branch_id, id, ID
         """
@@ -760,19 +762,37 @@ class PerfusionSolver:
 
         coords = df.loc[mask_terminal, [xcol, ycol, zcol]].to_numpy(dtype=float)
 
-        if all(c in df.columns for c in ("W1", "W2", "W3")):
-            normals = df.loc[mask_terminal, ["W1", "W2", "W3"]].to_numpy(dtype=float)
-        elif all(c in df.columns for c in ("proximalCoordsX", "proximalCoordsY", "proximalCoordsZ")):
+        # Prefer the geometric branch axis whenever both endpoints are present.
+        # Generated branchingData files usually store W from distal to proximal,
+        # but that convention is not reliable for every terminal.  The endpoint
+        # difference is unambiguous and is also the convention used by the
+        # embedded-facet transport solver.
+        if all(c in df.columns for c in ("proximalCoordsX", "proximalCoordsY", "proximalCoordsZ")):
             pcols = ["proximalCoordsX", "proximalCoordsY", "proximalCoordsZ"]
             prox = df.loc[mask_terminal, pcols].to_numpy(dtype=float)
             normals = coords - prox
+            geometric_axes = normals.copy()
+        elif all(c in df.columns for c in ("W1", "W2", "W3")):
+            # W is a distal-to-proximal basis vector in generated branchingData,
+            # whereas embedded terminal traces require proximal-to-distal.
+            normals = -df.loc[mask_terminal, ["W1", "W2", "W3"]].to_numpy(dtype=float)
+            geometric_axes = None
         else:
             normals = np.zeros_like(coords)
+            geometric_axes = None
 
         if len(normals):
             nn = np.linalg.norm(normals, axis=1, keepdims=True)
             nn[nn <= 0.0] = 1.0
             normals = normals / nn
+            if geometric_axes is not None:
+                axis_norms = np.linalg.norm(geometric_axes, axis=1)
+                valid = np.isfinite(axis_norms) & (axis_norms > 0.0)
+                alignment = np.einsum("ij,ij->i", normals[valid], geometric_axes[valid])
+                if np.any(alignment <= 0.0):
+                    raise RuntimeError(
+                        "Terminal branch directions are not oriented proximal-to-distal"
+                    )
 
         # 3) branch IDs (optional but nice to keep)
         branch_id_col = None
