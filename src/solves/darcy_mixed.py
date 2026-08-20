@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import glob
 import hashlib
@@ -371,6 +372,297 @@ class PerfusionSolver(CGPerfusionSolver):
         with io.XDMFFile(self.mesh.comm, out_dir / "K_x.xdmf", "w") as f:
             f.write_mesh(self.mesh)
             f.write_function(Kx_fun)
+
+    def _terminal_marker_branch_map(
+        self, markers, marker_centroids, branch_coords, branch_ids
+    ) -> dict[int, int]:
+        """Map terminal markers to branch IDs using their physical coordinates.
+
+        ``_get_terminal_marker_data`` also returns marker-to-1D checkpoint
+        indices, but checkpoint ordering is independent of the branching-data
+        ordering used by ``branch_ids``.  Match the two coordinate sets instead,
+        as is done when interface diagnostics are placed in branch order.
+        """
+        markers = np.asarray(markers, dtype=int)
+        marker_centroids = np.asarray(marker_centroids, dtype=float)
+        if (
+            branch_coords is None
+            or branch_ids is None
+            or len(branch_coords) == 0
+            or len(branch_ids) != len(branch_coords)
+        ):
+            return {int(marker): int(marker) for marker in markers}
+
+        marker_indices = self._build_reordering_indices(
+            marker_centroids, np.asarray(branch_coords, dtype=float)
+        )
+        marker_indices = np.asarray(marker_indices, dtype=int)
+        if (
+            len(marker_indices) != len(branch_ids)
+            or np.any(marker_indices < 0)
+            or np.any(marker_indices >= len(markers))
+            or len(np.unique(marker_indices)) != len(marker_indices)
+        ):
+            raise RuntimeError(
+                "Could not construct a one-to-one terminal marker-to-branch mapping"
+            )
+
+        return {
+            int(markers[marker_index]): int(branch_ids[branch_index])
+            for branch_index, marker_index in enumerate(marker_indices)
+        }
+
+    def _write_terminal_trace_output(self, out_dir: Path, p_h, u_h) -> None:
+        """Write branch-oriented tissue traces on the embedded terminal mesh.
+
+        The mixed pressure is DG0, so every internal terminal facet has two
+        cell traces.  This output explicitly selects the cell lying in the
+        proximal-to-distal branch direction.  ``volumetric_flux_into_tissue``
+        is the selected velocity trace dotted with that direction and
+        multiplied by the triangle area; arterial inflow is therefore positive
+        and venous drainage is negative.  A companion CSV sums that flux and
+        computes the area-weighted pressure average for each terminal marker.
+        """
+        mesh = self.mesh
+        tdim = mesh.topology.dim
+        fdim = tdim - 1
+        mesh.topology.create_entities(fdim)
+        mesh.topology.create_connectivity(fdim, tdim)
+        facet_to_cell = mesh.topology.connectivity(fdim, tdim)
+        if facet_to_cell is None:
+            raise RuntimeError("Could not build terminal facet-to-cell connectivity")
+
+        inlet_marks, outlet_marks, inlet_centroids, outlet_centroids, _idx_in, _idx_out = (
+            self._get_terminal_marker_data()
+        )
+        marker_kind: dict[int, float] = {}
+        marker_branch = self._terminal_marker_branch_map(
+            inlet_marks,
+            inlet_centroids,
+            self.branch_coords_in,
+            self.branch_ids_in,
+        )
+        marker_branch.update(
+            self._terminal_marker_branch_map(
+                outlet_marks,
+                outlet_centroids,
+                self.branch_coords_out,
+                self.branch_ids_out,
+            )
+        )
+        for marker in inlet_marks:
+            marker = int(marker)
+            marker_kind[marker] = 1.0
+        for marker in outlet_marks:
+            marker = int(marker)
+            marker_kind[marker] = -1.0
+
+        owned_facet_count = mesh.topology.index_map(fdim).size_local
+        marker_by_facet: dict[int, int] = {}
+        for marker in marker_kind:
+            for facet in np.asarray(self.facet_tags.find(marker), dtype=np.int32):
+                if (
+                    int(facet) < int(owned_facet_count)
+                    and len(facet_to_cell.links(int(facet))) == 2
+                ):
+                    marker_by_facet[int(facet)] = int(marker)
+        terminal_facets = np.asarray(sorted(marker_by_facet), dtype=np.int32)
+        global_facet_count = int(
+            mesh.comm.allreduce(int(terminal_facets.size), op=MPI.SUM)
+        )
+        if global_facet_count == 0:
+            return
+
+        terminal_mesh, parent_facets, _vertex_map, _geometry_map = (
+            dfx.mesh.create_submesh(mesh, fdim, terminal_facets)
+        )
+        terminal_cell_count = terminal_mesh.topology.index_map(fdim).size_local
+        pressure_values = np.zeros(terminal_cell_count, dtype=float)
+        flux_values = np.zeros(terminal_cell_count, dtype=float)
+        area_values = np.zeros(terminal_cell_count, dtype=float)
+        marker_values = np.zeros(terminal_cell_count, dtype=float)
+        kind_values = np.zeros(terminal_cell_count, dtype=float)
+        branch_values = np.zeros(terminal_cell_count, dtype=float)
+
+        for terminal_cell in range(terminal_cell_count):
+            parent_facet = int(parent_facets[terminal_cell])
+            marker = int(marker_by_facet[parent_facet])
+            kind = "inlet" if marker_kind[marker] > 0.0 else "outlet"
+            direction = self._marker_distal_direction_vector(marker, kind)
+            if direction is None:
+                raise RuntimeError(
+                    f"Embedded {kind} terminal marker {marker} has no valid "
+                    "proximal-to-distal direction"
+                )
+
+            adjacent_cells = np.asarray(
+                facet_to_cell.links(parent_facet), dtype=np.int32
+            )
+            if adjacent_cells.size != 2:
+                raise RuntimeError(
+                    f"Embedded terminal facet {parent_facet} on marker {marker} "
+                    f"has {adjacent_cells.size} adjacent cells; expected 2"
+                )
+            facet_points = self._entity_geometry_points(
+                mesh, fdim, parent_facet, mesh.geometry.dim
+            )
+            if facet_points.shape[0] < 3:
+                raise RuntimeError(
+                    f"Embedded terminal facet {parent_facet} has fewer than 3 points"
+                )
+            facet_center = np.mean(facet_points, axis=0)
+            cell_centers = np.asarray(
+                [
+                    np.mean(
+                        self._cell_geometry_points(
+                            mesh, int(cell), mesh.geometry.dim
+                        ),
+                        axis=0,
+                    )
+                    for cell in adjacent_cells
+                ]
+            )
+            projections = (cell_centers - facet_center) @ direction
+            selected_cell = int(adjacent_cells[int(np.argmax(projections))])
+
+            pressure_dofs = p_h.function_space.dofmap.cell_dofs(selected_cell)
+            pressure_values[terminal_cell] = float(
+                np.mean(np.asarray(p_h.x.array[pressure_dofs], dtype=float))
+            )
+            velocity = np.asarray(
+                u_h.eval(
+                    facet_center.reshape(1, mesh.geometry.dim),
+                    np.asarray([selected_cell], dtype=np.int32),
+                ),
+                dtype=float,
+            ).reshape(-1, mesh.geometry.dim)[0]
+            triangle_area = 0.5 * float(
+                np.linalg.norm(
+                    np.cross(
+                        facet_points[1] - facet_points[0],
+                        facet_points[2] - facet_points[0],
+                    )
+                )
+            )
+            flux_values[terminal_cell] = float(
+                np.dot(velocity, direction) * triangle_area
+            )
+            area_values[terminal_cell] = triangle_area
+            marker_values[terminal_cell] = float(marker)
+            kind_values[terminal_cell] = float(marker_kind[marker])
+            branch_values[terminal_cell] = float(marker_branch[marker])
+
+        trace_space = fem.functionspace(terminal_mesh, ("DG", 0))
+
+        def _cell_function(name: str, values: np.ndarray):
+            function = fem.Function(trace_space)
+            function.name = name
+            for cell, value in enumerate(values):
+                dofs = trace_space.dofmap.cell_dofs(cell)
+                function.x.array[int(dofs[0])] = value
+            function.x.scatter_forward()
+            return function
+
+        fields = [
+            _cell_function("pressure_tissue_trace", pressure_values),
+            _cell_function("volumetric_flux_into_tissue", flux_values),
+            _cell_function("terminal_marker", marker_values),
+            _cell_function("terminal_kind_arterial_1_venous_minus1", kind_values),
+            _cell_function("branch_id", branch_values),
+        ]
+        with VTKFile(mesh.comm, out_dir / "terminal_traces.vtu", "w") as vtk:
+            vtk.write_function(fields)
+
+        local_summary: dict[int, dict[str, float | int | str]] = {}
+        for cell in range(terminal_cell_count):
+            marker = int(marker_values[cell])
+            row = local_summary.setdefault(
+                marker,
+                {
+                    "terminal_kind": (
+                        "arterial" if marker_kind[marker] > 0.0 else "venous"
+                    ),
+                    "branch_id": int(marker_branch[marker]),
+                    "terminal_marker": marker,
+                    "facet_count": 0,
+                    "area": 0.0,
+                    "pressure_area_integral": 0.0,
+                    "total_volumetric_flux_into_tissue": 0.0,
+                },
+            )
+            area = float(area_values[cell])
+            row["facet_count"] = int(row["facet_count"]) + 1
+            row["area"] = float(row["area"]) + area
+            row["pressure_area_integral"] = (
+                float(row["pressure_area_integral"])
+                + float(pressure_values[cell]) * area
+            )
+            row["total_volumetric_flux_into_tissue"] = (
+                float(row["total_volumetric_flux_into_tissue"])
+                + float(flux_values[cell])
+            )
+
+        gathered = mesh.comm.gather(local_summary, root=0)
+        if mesh.comm.rank == 0:
+            global_summary: dict[int, dict[str, float | int | str]] = {}
+            for rank_summary in gathered:
+                for marker, local_row in rank_summary.items():
+                    row = global_summary.setdefault(
+                        int(marker),
+                        {
+                            "terminal_kind": str(local_row["terminal_kind"]),
+                            "branch_id": int(local_row["branch_id"]),
+                            "terminal_marker": int(marker),
+                            "facet_count": 0,
+                            "area": 0.0,
+                            "pressure_area_integral": 0.0,
+                            "total_volumetric_flux_into_tissue": 0.0,
+                        },
+                    )
+                    row["facet_count"] = int(row["facet_count"]) + int(
+                        local_row["facet_count"]
+                    )
+                    row["area"] = float(row["area"]) + float(local_row["area"])
+                    row["pressure_area_integral"] = float(
+                        row["pressure_area_integral"]
+                    ) + float(local_row["pressure_area_integral"])
+                    row["total_volumetric_flux_into_tissue"] = float(
+                        row["total_volumetric_flux_into_tissue"]
+                    ) + float(local_row["total_volumetric_flux_into_tissue"])
+
+            summary_path = out_dir / "terminal_trace_summary.csv"
+            fieldnames = [
+                "terminal_kind",
+                "branch_id",
+                "terminal_marker",
+                "facet_count",
+                "area",
+                "average_pressure_tissue_trace",
+                "total_volumetric_flux_into_tissue",
+            ]
+            with summary_path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fieldnames)
+                writer.writeheader()
+                for marker in sorted(global_summary):
+                    row = global_summary[marker]
+                    area = float(row["area"])
+                    writer.writerow(
+                        {
+                            "terminal_kind": row["terminal_kind"],
+                            "branch_id": int(row["branch_id"]),
+                            "terminal_marker": int(row["terminal_marker"]),
+                            "facet_count": int(row["facet_count"]),
+                            "area": area,
+                            "average_pressure_tissue_trace": (
+                                float(row["pressure_area_integral"]) / area
+                                if area > 0.0
+                                else float("nan")
+                            ),
+                            "total_volumetric_flux_into_tissue": float(
+                                row["total_volumetric_flux_into_tissue"]
+                            ),
+                        }
+                    )
 
     def _build_terminal_flux_rhs_mixed(self, v):
         """
@@ -1066,9 +1358,9 @@ class PerfusionSolver(CGPerfusionSolver):
         outlet_distal_directions = self._get_branch_port_normals(
             outlet_c, self.branch_coords_out, self.branch_normals_out, outward=False
         )
-        inlet_normals = self._get_branch_port_normals(
-            inlet_c, self.branch_coords_in, self.branch_normals_in, outward=True
-        )
+        # Arterial flow enters tissue in the proximal-to-distal direction.
+        # Venous flow leaves tissue in the opposite, distal-to-proximal direction.
+        inlet_normals = inlet_distal_directions.copy()
         outlet_normals = self._get_branch_port_normals(
             outlet_c, self.branch_coords_out, self.branch_normals_out, outward=True
         )
@@ -1399,6 +1691,7 @@ class PerfusionSolver(CGPerfusionSolver):
         }
 
     def _get_branch_port_normals(self, marker_centroids, branch_coords, branch_normals, outward=False):
+        """Map proximal-to-distal branch axes to markers, optionally reversing them."""
         marker_centroids = np.asarray(marker_centroids, dtype=float).reshape((-1, 3))
         branch_coords = np.asarray(branch_coords if branch_coords is not None else np.zeros((0, 3)), dtype=float).reshape((-1, 3))
         branch_normals = np.asarray(branch_normals if branch_normals is not None else np.zeros((0, 3)), dtype=float).reshape((-1, 3))
@@ -1928,7 +2221,7 @@ class PerfusionSolver(CGPerfusionSolver):
         coords_in = np.asarray(coords_in, dtype=float).reshape((-1, 3)) if len(coords_in) else np.zeros((0, 3))
         coords_out = np.asarray(coords_out, dtype=float).reshape((-1, 3)) if len(coords_out) else np.zeros((0, 3))
         port_normals_in_raw = self._get_branch_port_normals(
-            coords_in, self.branch_coords_in, self.branch_normals_in, outward=True
+            coords_in, self.branch_coords_in, self.branch_normals_in, outward=False
         )
         port_normals_out_raw = self._get_branch_port_normals(
             coords_out, self.branch_coords_out, self.branch_normals_out, outward=True
@@ -2500,11 +2793,17 @@ class PerfusionSolver(CGPerfusionSolver):
             print(f"[io] Permeability outputs complete in {time.perf_counter() - t0:.2f}s", flush=True)
 
         if self.output_mode in {"full", "fields"}:
+            p_h.name = "pressure_dg0"
+            u_h.name = "darcy_velocity_rt"
             if mesh.comm.rank == 0:
                 print("[io] Writing pressure field XDMF", flush=True)
             with io.XDMFFile(mesh.comm, out_dir / "p.xdmf", "w") as f:
                 f.write_mesh(mesh)
                 f.write_function(p_h)
+
+            if mesh.comm.rank == 0:
+                print("[io] Writing branch-oriented terminal trace output", flush=True)
+            self._write_terminal_trace_output(out_dir, p_h, u_h)
 
             # Project H(div) velocity to P1 vector space for robust IO/visualization.
             if mesh.comm.rank == 0:
@@ -2700,7 +2999,9 @@ if __name__ == "__main__":
         default="full",
         help=(
             "Darcy file output mode: full writes permeability, XDMF, and VTU fields; "
-            "fields writes only p.xdmf/u.xdmf; minimal writes only interface_bc.json."
+            "fields writes p.xdmf/u.xdmf, terminal-trace VTU fields, and a "
+            "per-terminal trace-summary CSV; "
+            "minimal writes only interface_bc.json."
         ),
     )
     ap.add_argument(
